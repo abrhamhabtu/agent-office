@@ -14,8 +14,9 @@ const ROUTE: readonly (readonly [number, number, number])[] = [
   [5.2, 1.25, 6.75],
   [4.2, 0.92, 7.15],
   [3.5, 0.57, 7.85],
-  [2.75, 0.21, 8.5],
-  [1.9, 0.02, 8.35],
+  [2.9, 0.26, 8.3],
+  [2.15, 0.09, 8.45],
+  [1.3, 0.02, 8.45],
 ];
 
 export interface OfficeSlide {
@@ -46,7 +47,7 @@ export function buildSlide(): OfficeSlide {
     const normal = new THREE.Vector3().crossVectors(side, tangent).normalize();
     return path.getPointAt(t).addScaledVector(up, height)
       .addScaledVector(side, Math.cos(angle) * (width - (inner ? 0.06 : 0) + offset))
-      .addScaledVector(normal, Math.sin(angle) * (height + (inner ? -0.02 : 0.05) + offset));
+      .addScaledVector(normal, Math.sin(angle) * (height - (inner ? 0.02 : 0) + offset));
   };
   const sweep = (inner: boolean) => {
     const segments = 80;
@@ -92,7 +93,7 @@ export function buildSlide(): OfficeSlide {
   const colliders: Collider[] = [];
   for (const t of [0.38, 0.7]) {
     const p = path.getPointAt(t);
-    const height = Math.max(0.35, p.y + 0.05);
+    const height = Math.max(0.35, p.y - 0.06);
     group.add(mesh(new THREE.CylinderGeometry(0.055, 0.075, height, 8), dark, p.x, height / 2, p.z, false));
     colliders.push({ minX: p.x - 0.09, maxX: p.x + 0.09, minZ: p.z - 0.09, maxZ: p.z + 0.09, top: height });
   }
