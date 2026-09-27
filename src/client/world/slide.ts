@@ -6,12 +6,16 @@ import type { Collider, Interactable } from './office';
 /** The feet's route, from the boss's office to the open floor beside the stairs. */
 const ROUTE: readonly (readonly [number, number, number])[] = [
   [LOFT.minX + 0.7, LOFT.y, 9.65],
-  [LOFT.minX - 0.2, LOFT.y - 0.08, 9.65],
-  [7.85, 2.55, 9.45],
-  [6.75, 1.95, 8.75],
-  [5.55, 1.25, 8.05],
-  [4.4, 0.55, 8.15],
-  [3.55, 0.02, 8.8],
+  [LOFT.minX - 0.2, LOFT.y - 0.1, 9.65],
+  [8.05, 2.6, 9.2],
+  [7.7, 2.3, 8.2],
+  [7.25, 1.95, 7.25],
+  [6.3, 1.65, 6.8],
+  [5.25, 1.32, 7.15],
+  [4.9, 1.0, 8.15],
+  [5.5, 0.65, 9.05],
+  [4.5, 0.28, 9.1],
+  [3.5, 0.02, 8.6],
 ];
 
 export interface OfficeSlide {
