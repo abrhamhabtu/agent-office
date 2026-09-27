@@ -406,6 +406,46 @@ function usePole(i: number) {
   else climber.twirl(spot);
 }
 
+let ridingSlide = false;
+/** Ride the open slide from the boss's office to the floor beside the stairs. */
+function useSlide() {
+  const entry = office.slide.interactable;
+  if (trip || ridingSlide || climber.active || player.seat || player.pos.y < LOFT.y - 0.25) return;
+  if (Math.hypot(player.pos.x - entry.x, player.pos.z - entry.z) > entry.radius) return;
+  if (hanger.active) hanger.cancel();
+  if (walkingTo) stopWalking();
+  player.clearKeys();
+  ridingSlide = true;
+  let progress = 0;
+  sound.slide(2.7);
+  player.rig = (dt) => {
+    progress = Math.min(1, progress + dt / 2.7);
+    const point = office.slide.path.getPointAt(progress);
+    const direction = office.slide.path.getTangentAt(progress);
+    player.pos.copy(point);
+    player.facing = Math.atan2(direction.x, direction.z);
+    if (player.view === 'first') {
+      player.camYaw = Math.atan2(-direction.x, -direction.z);
+      player.lookPitch = Math.atan2(direction.y, Math.hypot(direction.x, direction.z));
+    }
+    player.moving = progress < 1;
+    if (progress === 1) {
+      player.rig = null;
+      ridingSlide = false;
+      player.pos.y = 0;
+      player.moving = false;
+      hintKey = 'stale';
+    }
+  };
+}
+
+function stopSlide() {
+  if (!ridingSlide) return;
+  player.rig = null;
+  ridingSlide = false;
+  player.moving = false;
+}
+
 /**
  * The ladder and the poles go where there are floors to go to from this one, and the building is as
  * tall as there are floors, with the street as far down as this one is up.
@@ -675,6 +715,7 @@ function ride(floorId: string) {
   closeAllModals();
   if (hanger.active) hanger.cancel();
   if (climber.active) climber.abort();
+  stopSlide();
   const inside = inElevator(player.pos.x, player.pos.z);
   trip = { floor: floorId, how: 'elevator', timer: window.setTimeout(tripFailed, 10_000) };
   player.enabled = false;
@@ -710,6 +751,7 @@ function switchFloor(floorId: string) {
   closeAllModals();
   if (hanger.active) hanger.cancel();
   if (climber.active) climber.abort();
+  stopSlide();
   if (player.seat) standUp();
   // The floor list isn't a window, so nothing else stops a walk over to someone on this floor.
   if (walkingTo) stopWalking();
@@ -1525,6 +1567,7 @@ function interact(target: Interactable | null, key: DeskKey, note = aimedNote) {
   else if (target.kind === 'cabinet') cabinet.play();
   else if (target.kind === 'ladder') grabLadder();
   else if (target.kind === 'pole' && target.pole !== undefined) usePole(target.pole);
+  else if (target.kind === 'slide') useSlide();
   else if (target.kind === 'meeting') showMeeting();
   else if (target.kind === 'bar') showBar();
   else if (target.kind === 'dj') blowHorn();
@@ -1931,6 +1974,14 @@ interface Hint {
 
 function renderHint() {
   const el = $('hint');
+  if (ridingSlide && !modalOpen()) {
+    if (hintKey !== 'slide-riding') {
+      hintKey = 'slide-riding';
+      el.replaceChildren(h('span.title', {}, '🛝 Wheeeee!'));
+      el.classList.remove('hidden');
+    }
+    return;
+  }
   if (hanger.active && !modalOpen()) return renderHangHint(el);
   if (climber.active && !modalOpen()) return renderClimbHint(el);
   if ((!target && !carrying) || modalOpen()) {
@@ -2041,6 +2092,8 @@ function hintFor(it: Interactable): Hint {
       const up = floorThere(1)?.name ?? 'upstairs';
       return { k: `landing|${up}`, parts: [title('🚒 Fire pole'), aside(`comes down from ${up}`), key('E', 'Twirl')] };
     }
+    case 'slide':
+      return { k: '', parts: [title('🛝 Boss office slide'), aside('down beside the stairs'), key('E', 'Slide down!')] };
     case 'bar': {
       const cut = booze.cutOff(performance.now() / 1000);
       return { k: String(cut), parts: [title('🍸 Sky Bar'), aside(cut ? "you've had enough" : 'drinks on the house'), key('E', cut ? 'Ask for water' : 'Order a drink')] };
@@ -2439,7 +2492,7 @@ document.addEventListener('pointerlockchange', () => {
 const raycaster = new THREE.Raycaster();
 const CROSSHAIR = new THREE.Vector2(0, 0);
 /** How close (meters from your eyes) you must be to use each kind of thing. */
-const REACH: Record<InteractKind, number> = { desk: 4.5, station: 4.5, coffee: 3, issues: 9, pulls: 9, services: 9, queue: 9, tv: 10, decor: 9, smoke: 3, elevator: 4.5, gong: 3.5, dog: 3.2, jukebox: 4, seat: 3, whiteboard: 7, cabinet: 4, ladder: 3, pole: 4, meeting: 7, bar: 3.5, dj: 6 };
+const REACH: Record<InteractKind, number> = { desk: 4.5, station: 4.5, coffee: 3, issues: 9, pulls: 9, services: 9, queue: 9, tv: 10, decor: 9, smoke: 3, elevator: 4.5, gong: 3.5, dog: 3.2, jukebox: 4, seat: 3, whiteboard: 7, cabinet: 4, ladder: 3, pole: 4, slide: 3, meeting: 7, bar: 3.5, dj: 6 };
 const eye = new THREE.Vector3();
 
 /** What the ray through `ndc` lands on first, whether it is within reach (plus `slack` meters), and where it hit. */

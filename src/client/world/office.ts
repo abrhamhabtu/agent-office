@@ -12,6 +12,7 @@ import { buildCabinet, type CabinetModel } from './cabinet';
 import { buildWhiteboard, type WhiteboardStand } from './whiteboard';
 import { buildStack, type Stack } from './stack';
 import { buildTower } from './tower';
+import { buildSlide, type OfficeSlide } from './slide';
 
 export interface Collider {
   minX: number;
@@ -25,7 +26,7 @@ export interface Collider {
   fence?: boolean;
 }
 
-export type InteractKind = 'desk' | 'station' | 'issues' | 'pulls' | 'services' | 'queue' | 'tv' | 'coffee' | 'decor' | 'smoke' | 'elevator' | 'gong' | 'dog' | 'jukebox' | 'seat' | 'whiteboard' | 'cabinet' | 'ladder' | 'pole' | 'meeting' | 'bar' | 'dj';
+export type InteractKind = 'desk' | 'station' | 'issues' | 'pulls' | 'services' | 'queue' | 'tv' | 'coffee' | 'decor' | 'smoke' | 'elevator' | 'gong' | 'dog' | 'jukebox' | 'seat' | 'whiteboard' | 'cabinet' | 'ladder' | 'pole' | 'slide' | 'meeting' | 'bar' | 'dj';
 
 /** Something you can use. Its scene object carries it as `userData.interact`, for clicking. */
 export interface Interactable {
@@ -76,6 +77,8 @@ export interface Office {
   tvScreen: THREE.Mesh;
   /** The monitor on the boss's desk upstairs, where Minesweeper plays (ui/arcade.ts). */
   bossScreen: THREE.Mesh;
+  /** Open slide from the boss's loft to the floor beside the stairs. */
+  slide: OfficeSlide;
   /** The monitor on the west wall showing how busy the office's machine is (world/machine.ts). */
   machineScreen: THREE.Mesh;
   /** The meeting room's board, showing the meeting's output as it's written, and the sign by its door. */
@@ -1206,6 +1209,10 @@ export function buildOffice(): Office {
   }
 
   const bossScreen = buildLoft(group, colliders, interactables, looks);
+  const slide = buildSlide();
+  group.add(slide.group);
+  colliders.push(...slide.colliders);
+  interactables.push(slide.interactable);
   // Under the loft: the meeting room.
   const meeting = buildMeetingRoom(group, colliders, interactables, desks, doors, night);
   fixture('south', MEETING_BOARD.x, MEETING_BOARD.y, MEETING_BOARD.width + 0.4, MEETING_BOARD.height + 0.4);
@@ -1286,7 +1293,7 @@ export function buildOffice(): Office {
     gong.update(dt);
   };
 
-  return { group, colliders, interactables, desks, setBeanbags, boardMeshes, tvScreen, bossScreen, machineScreen, meetingBoard: meeting.board, meetingSign: meeting.sign, fixtures: () => fixtures, elevator, gong, jukebox, cabinet, whiteboard, stack, setProjectName, setLook, setLevel, night, plants, update };
+  return { group, colliders, interactables, desks, setBeanbags, boardMeshes, tvScreen, bossScreen, slide, machineScreen, meetingBoard: meeting.board, meetingSign: meeting.sign, fixtures: () => fixtures, elevator, gong, jukebox, cabinet, whiteboard, stack, setProjectName, setLook, setLevel, night, plants, update };
 }
 
 /** A chair at the meeting table, with its laptop on the table in front of it. */
@@ -1518,13 +1525,18 @@ function buildLoft(group: THREE.Group, colliders: Collider[], interactables: Int
   for (let i = 0; i <= 6; i++) bar(0.1, height, T + 0.04, minX + i * (w / 6), floorY + height / 2, northZ);
   bar(w, 0.12, T + 0.06, cx, floorY + 0.06, northZ);
   bar(w, 0.12, T + 0.06, cx, roofY - 0.06, northZ);
-  const westLen = doorZ - minZ;
-  for (let i = 0; i < 2; i++) pane(westLen / 2, westX, minZ + (i + 0.5) * (westLen / 2), Math.PI / 2);
-  for (let i = 0; i <= 2; i++) bar(T + 0.04, height, 0.1, westX, floorY + height / 2, minZ + i * (westLen / 2));
-  bar(T + 0.06, 0.12, westLen, westX, floorY + 0.06, minZ + westLen / 2);
-  bar(T + 0.06, 0.12, westLen, westX, roofY - 0.06, minZ + westLen / 2);
+  const slideZ0 = 8.9;
+  const slideZ1 = 10.4;
+  for (const [a, b] of [[minZ, slideZ0], [slideZ1, doorZ]]) {
+    pane(b - a, westX, (a + b) / 2, Math.PI / 2);
+    for (const z of [a, b]) bar(T + 0.04, height, 0.1, westX, floorY + height / 2, z);
+    bar(T + 0.06, 0.12, b - a, westX, floorY + 0.06, (a + b) / 2);
+    bar(T + 0.06, 0.12, b - a, westX, roofY - 0.06, (a + b) / 2);
+  }
   colliders.push({ minX, maxX, minZ, maxZ: minZ + T, bottom: floorY, top: 99 });
-  colliders.push({ minX, maxX: minX + T, minZ, maxZ: doorZ, bottom: floorY, top: 99 });
+  colliders.push({ minX, maxX: minX + T, minZ, maxZ: slideZ0, bottom: floorY, top: 99 });
+  colliders.push({ minX, maxX: minX + T, minZ: slideZ1, maxZ: doorZ, bottom: floorY, top: 99 });
+  colliders.push({ minX, maxX: minX + T, minZ: slideZ0, maxZ: slideZ1, bottom: floorY + 2.15, top: roofY });
   // Over the door at the top of the stairs.
   const doorTop = floorY + 2.3;
   group.add(mesh(box(T + 0.04, roofY - doorTop, maxZ - doorZ), wallMat, westX, (roofY + doorTop) / 2, (doorZ + maxZ) / 2, false));
