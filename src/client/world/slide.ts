@@ -21,7 +21,7 @@ const ROUTE: readonly (readonly [number, number, number])[] = [
 
 export interface OfficeSlide {
   group: THREE.Group;
-  path: THREE.CatmullRomCurve3;
+  path: THREE.Curve<THREE.Vector3>;
   interactable: Interactable;
   colliders: Collider[];
 }
@@ -29,7 +29,11 @@ export interface OfficeSlide {
 /** A half-open slide with a copper shell, a silver riding surface and two supports. */
 export function buildSlide(): OfficeSlide {
   const group = new THREE.Group();
-  const path = new THREE.CatmullRomCurve3(ROUTE.map(([x, y, z]) => new THREE.Vector3(x, y, z)), false, 'centripetal');
+  const chute = new THREE.CatmullRomCurve3(ROUTE.map(([x, y, z]) => new THREE.Vector3(x, y, z)), false, 'centripetal');
+  // Carry riders beyond the open end so walking back into the chute meets its collision boundary.
+  const path = new THREE.CurvePath<THREE.Vector3>();
+  path.add(chute);
+  path.add(new THREE.LineCurve3(chute.getPoint(1), new THREE.Vector3(-0.35, 0.02, 8.45)));
   const metal = toon('#cbd5d8');
   const copper = toon('#aa624b');
   const dark = toon('#52616b');
@@ -42,10 +46,10 @@ export function buildSlide(): OfficeSlide {
     const flare = THREE.MathUtils.smoothstep(t, 0.72, 1);
     const height = THREE.MathUtils.lerp(0.64, 0.12, flare);
     const width = THREE.MathUtils.lerp(0.69, 0.98, flare);
-    const tangent = path.getTangentAt(t);
+    const tangent = chute.getTangentAt(t);
     const side = new THREE.Vector3().crossVectors(tangent, up).normalize();
     const normal = new THREE.Vector3().crossVectors(side, tangent).normalize();
-    return path.getPointAt(t).addScaledVector(up, height)
+    return chute.getPointAt(t).addScaledVector(up, height)
       .addScaledVector(side, Math.cos(angle) * (width - (inner ? 0.06 : 0) + offset))
       .addScaledVector(normal, Math.sin(angle) * (height - (inner ? 0.02 : 0) + offset));
   };
@@ -92,10 +96,26 @@ export function buildSlide(): OfficeSlide {
 
   const colliders: Collider[] = [];
   for (const t of [0.38, 0.7]) {
-    const p = path.getPointAt(t);
+    const p = chute.getPointAt(t);
     const height = Math.max(0.35, p.y - 0.06);
     group.add(mesh(new THREE.CylinderGeometry(0.055, 0.075, height, 8), dark, p.x, height / 2, p.z, false));
-    colliders.push({ minX: p.x - 0.09, maxX: p.x + 0.09, minZ: p.z - 0.09, maxZ: p.z + 0.09, top: height });
+  }
+
+  // Short invisible sections follow the open trough. The underside leaves headroom beneath the
+  // high run, while the low run and exit stop someone walking into it from the office floor.
+  for (let i = 4; i <= 24; i++) {
+    const a = chute.getPointAt((i - 1) / 24);
+    const b = chute.getPointAt(i / 24);
+    const half = THREE.MathUtils.lerp(0.75, 1.04, THREE.MathUtils.smoothstep(i / 24, 0.72, 1));
+    colliders.push({
+      minX: Math.min(a.x, b.x) - half,
+      maxX: Math.min(LOFT.minX - 0.08, Math.max(a.x, b.x) + half),
+      minZ: Math.min(a.z, b.z) - half,
+      maxZ: Math.max(a.z, b.z) + half,
+      bottom: Math.max(0, Math.min(a.y, b.y) - 0.05),
+      top: 99,
+      fence: true,
+    });
   }
 
   const interactable: Interactable = { kind: 'slide', x: ROUTE[0][0], y: LOFT.y, z: ROUTE[0][2], radius: 1.25 };
