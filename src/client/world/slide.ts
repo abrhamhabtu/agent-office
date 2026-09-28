@@ -101,20 +101,27 @@ export function buildSlide(): OfficeSlide {
     group.add(mesh(new THREE.CylinderGeometry(0.055, 0.075, height, 8), dark, p.x, height / 2, p.z, false));
   }
 
-  // Short invisible sections follow the open trough. The underside leaves headroom beneath the
-  // high run, while the low run and exit stop someone walking into it from the office floor.
-  for (let i = 4; i <= 24; i++) {
-    const a = chute.getPointAt((i - 1) / 24);
-    const b = chute.getPointAt(i / 24);
-    const half = THREE.MathUtils.lerp(0.75, 1.04, THREE.MathUtils.smoothstep(i / 24, 0.72, 1));
+  // Closely spaced walkable sections support feet along the trough. Each rise is small enough for
+  // the player's normal stair stepping, including when approaching the flared mouth from the floor.
+  // Their undersides still leave room to walk beneath the elevated part of the slide.
+  const sections = 72;
+  const footprint = (t: number) => {
+    const p = chute.getPointAt(t);
+    const side = new THREE.Vector3().crossVectors(chute.getTangentAt(t), up).normalize();
+    const half = THREE.MathUtils.lerp(0.43, 0.7, THREE.MathUtils.smoothstep(t, 0.72, 1));
+    return [p.clone().addScaledVector(side, half), p.clone().addScaledVector(side, -half)];
+  };
+  for (let i = 1; i <= sections; i++) {
+    const a = chute.getPointAt((i - 1) / sections);
+    const b = chute.getPointAt(i / sections);
+    const corners = [...footprint((i - 1) / sections), ...footprint(i / sections)];
     colliders.push({
-      minX: Math.min(a.x, b.x) - half,
-      maxX: Math.min(LOFT.minX - 0.08, Math.max(a.x, b.x) + half),
-      minZ: Math.min(a.z, b.z) - half,
-      maxZ: Math.max(a.z, b.z) + half,
-      bottom: Math.max(0, Math.min(a.y, b.y) - 0.05),
-      top: 99,
-      fence: true,
+      minX: Math.min(...corners.map((p) => p.x)) - 0.02,
+      maxX: Math.max(...corners.map((p) => p.x)) + 0.02,
+      minZ: Math.min(...corners.map((p) => p.z)) - 0.02,
+      maxZ: Math.max(...corners.map((p) => p.z)) + 0.02,
+      bottom: Math.max(0, Math.min(a.y, b.y) - 0.3),
+      top: Math.max(a.y, b.y) + 0.02,
     });
   }
 
