@@ -30,7 +30,7 @@ export interface Collider {
   fence?: boolean;
 }
 
-export type InteractKind = 'desk' | 'station' | 'issues' | 'pulls' | 'services' | 'queue' | 'tv' | 'coffee' | 'decor' | 'smoke' | 'elevator' | 'gong' | 'dog' | 'jukebox' | 'seat' | 'whiteboard' | 'cabinet' | 'ladder' | 'pole' | 'slide' | 'meeting' | 'bar' | 'dj' | 'golf' | 'ball' | 'bookshelf';
+export type InteractKind = 'desk' | 'monitor' | 'ticker' | 'station' | 'issues' | 'pulls' | 'services' | 'queue' | 'tv' | 'coffee' | 'decor' | 'smoke' | 'elevator' | 'gong' | 'dog' | 'jukebox' | 'seat' | 'whiteboard' | 'cabinet' | 'ladder' | 'pole' | 'slide' | 'meeting' | 'bar' | 'dj' | 'golf' | 'ball' | 'bookshelf';
 
 /** Something you can use. Its scene object carries it as `userData.interact`, for clicking. */
 export interface Interactable {
@@ -859,7 +859,7 @@ function buildBeanbag(def: DeskDef, index: number): DeskView {
   return { def, group, laptopAnchor, seatAnchor, stage, chair: bag, vacancy, vacancyY };
 }
 
-const KIOSK_SIGN: Record<StationKind, string> = { issues: '📌 Ask me', pulls: '🔀 Ask me', queue: '📋 Ask me' };
+const KIOSK_SIGN: Partial<Record<StationKind, string>> = { issues: '📌 Ask me', pulls: '🔀 Ask me', queue: '📋 Ask me' };
 
 /**
  * A board agent's kiosk: a little counter in its color with a sign on the front, and the agent standing
@@ -877,7 +877,7 @@ function buildKiosk(def: DeskDef): DeskView {
   group.add(mesh(roundedBox(width - 0.16, height - 0.1, depth - 0.12, 0.06), color, 0, (height - 0.1) / 2 + 0.04, 0));
   group.add(mesh(roundedBox(width - 0.02, 0.06, depth + 0.02, 0.05), toon(PALETTE.ink), 0, 0.03, 0));
   group.add(mesh(roundedBox(width, 0.06, depth, 0.05), toon(PALETTE.desk), 0, height - 0.03, 0));
-  const sign = textPlane(KIOSK_SIGN[kind], { bg: '#fffaf3', size: 56 });
+  const sign = textPlane(KIOSK_SIGN[kind] ?? 'Ask me', { bg: '#fffaf3', size: 56 });
   sign.scale.multiplyScalar(0.62);
   sign.position.set(0, height * 0.55, -(depth - 0.12) / 2 - 0.012);
   sign.rotation.y = Math.PI;
@@ -914,6 +914,7 @@ function wallBoard(width: number, height: number, frameColor: string): { group: 
   const frame = mesh(roundedBox(width + 0.3, 0.12, height + 0.3, 0.1), toon(frameColor), 0, 0, 0);
   frame.rotation.x = Math.PI / 2;
   group.add(frame);
+  group.add(mesh(new THREE.BoxGeometry(width + 0.1, 0.025, 0.03), toon('#ffd166'), 0, height / 2 + 0.08, 0.12, false));
   const faceMat = new THREE.MeshBasicMaterial({ color: '#ffffff' });
   const face = new THREE.Mesh(new THREE.PlaneGeometry(width, height), faceMat);
   face.position.z = 0.07;
@@ -1020,7 +1021,7 @@ export function buildOffice(): Office {
     const hd = DESK_SIZE.depth / 2 - 0.02;
     colliders.push({ minX: def.x - hw, maxX: def.x + hw, minZ: def.z - hd, maxZ: def.z + hd, top: DESK_SIZE.height });
     const seat = deskSeat(def, 1.25);
-    const it: Interactable = { kind: 'desk', deskId: def.id, x: seat.x, z: seat.z, radius: 1.3 };
+    const it: Interactable = { kind: def.station ? 'station' : 'desk', deskId: def.id, x: seat.x, z: seat.z, radius: def.station ? 1.65 : 1.3 };
     interactables.push(it);
     view.group.userData.interact = it;
   });
@@ -1048,8 +1049,7 @@ export function buildOffice(): Office {
     const view = buildKiosk(def);
     group.add(view.group);
     desks.set(def.id, view);
-    // The kiosk and the agent behind it, back to the wall (they all stand by the north wall) so
-    // nobody squeezes in behind, and up over the agent's head so nobody hops on it.
+    // The kiosk and the agent behind it, up against the north wall.
     const corners = [-1, 1].flatMap((t) => [-KIOSK.depth / 2, KIOSK.stand + 0.35].map((sz) => deskPoint(def, (t * KIOSK.width) / 2, sz)));
     const xs = corners.map(([x]) => x);
     const zs = corners.map(([, z]) => z);
@@ -1059,7 +1059,7 @@ export function buildOffice(): Office {
     const it: Interactable = { kind: 'station', deskId: def.id, x: fx, z: fz, radius: 1.3 };
     interactables.push(it);
     view.group.userData.interact = it;
-    // The agent, its name tag and the card over its head, up against the wall.
+    // Reserve space for the agent's name tag and card.
     fixture('north', def.x, 1.45, 1.4, 2.9);
   }
   const setBeanbags = (out: Set<string>) => {
@@ -1085,15 +1085,15 @@ export function buildOffice(): Office {
     // Out from the wall, the way the board faces.
     const nx = Math.sin(b.rotY);
     const nz = Math.cos(b.rotY);
-    // The queue is a whiteboard in an aluminium frame; the others hang in wood.
-    const { group: bg, face } = wallBoard(b.width, b.height, key === 'queue' ? '#aab4be' : PALETTE.wood);
+    // The trading displays share a dark frame and a thin live-tape accent.
+    const { group: bg, face } = wallBoard(b.width, b.height, '#20283a');
     bg.position.set(b.x + nx * 0.08, b.y, b.z + nz * 0.08);
     bg.rotation.y = b.rotY;
     group.add(bg);
     boardMeshes[key] = face;
     const label = textPlane(b.label, { bg: '#fffaf3', size: 64 });
-    label.scale.multiplyScalar(1.3);
-    label.position.set(b.x + nx * 0.04, b.y + b.height / 2 + 0.5, b.z + nz * 0.04);
+    label.scale.multiplyScalar(1.1);
+    label.position.set(b.x + nx * 0.04, b.y + b.height / 2 + 0.33, b.z + nz * 0.04);
     label.rotation.y = b.rotY;
     group.add(label);
     boardLabels.set(key, { mesh: label, text: b.label });
@@ -1101,8 +1101,8 @@ export function buildOffice(): Office {
     interactables.push(it);
     bg.userData.interact = it;
     // The board and its label above it, up to the ceiling.
-    const wall = wallFacing(b.rotY);
     const bottom = b.y - (b.height + 0.3) / 2;
+    const wall = wallFacing(b.rotY);
     fixture(wall, wall === 'north' || wall === 'south' ? b.x : b.z, (bottom + WALL_HEIGHT) / 2, b.width + 0.3, WALL_HEIGHT - bottom);
   }
 
@@ -1242,14 +1242,14 @@ export function buildOffice(): Office {
   const meeting = buildMeetingRoom(group, colliders, interactables, desks, doors, night);
   fixture('south', MEETING_BOARD.x, MEETING_BOARD.y, MEETING_BOARD.width + 0.4, MEETING_BOARD.height + 0.4);
 
-  // The elevator to the other floors, against the north wall between the PR board and the gong.
+  // The elevator to the other floors, at the live market end of the north wall.
   const elevator = buildElevator();
   group.add(elevator.group);
   colliders.push(...elevator.colliders);
   interactables.push(elevator.interactable);
   fixture('north', ELEVATOR.x, WALL_HEIGHT / 2, ELEVATOR.width + 0.1, WALL_HEIGHT);
 
-  // The gong, just past the elevator from the PR board.
+  // The gong between the proposals board and the elevator.
   const gong = buildGong();
   group.add(gong.group);
   colliders.push(...gong.colliders);

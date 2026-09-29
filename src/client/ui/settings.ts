@@ -1,5 +1,5 @@
 import type { Net } from '../net';
-import { store, type Settings, type ViewMode } from '../state';
+import { store, type BellSound, type Settings, type ViewMode } from '../state';
 import { askNotifyPermission, notifyPermission, type DesktopNotifier } from '../notify';
 import type { ThemePick, WebhookKind } from '../../shared/protocol';
 import { THEME_PICKS } from '../../shared/theme';
@@ -18,7 +18,7 @@ const THEME_LABEL: Record<ThemePick, string> = { auto: '📅 By the calendar', h
 const WEBHOOK_NAME: Record<WebhookKind, string> = { slack: 'Slack', discord: 'Discord', other: 'a webhook' };
 
 /** `outside` describes the sky over the office (see describeSky), once the server has said. */
-export function openSettings(net: Net, settings: Settings, onChange: (s: Settings) => void, onCharacter: () => void, previewSound: () => void, notifier: DesktopNotifier, onSignOut: () => void, outside?: { now: string; live: boolean }) {
+export function openSettings(net: Net, settings: Settings, onChange: (s: Settings) => void, onCharacter: () => void, previewSound: () => void, previewBell: () => void, notifier: DesktopNotifier, onSignOut: () => void, outside?: { now: string; live: boolean }) {
   const seg = h('div.seg', { role: 'radiogroup', 'aria-label': 'Camera view' });
   const note = h('p.setting-note');
   const paint = () => {
@@ -96,6 +96,24 @@ export function openSettings(net: Net, settings: Settings, onChange: (s: Setting
     return row;
   };
   const soundRow = volumeRow('Office sounds volume', 'volume', 'muted', previewSound);
+  const bellRow = h('div.seg', { role: 'radiogroup', 'aria-label': 'Opening bell sound' });
+  const paintBell = () => {
+    bellRow.replaceChildren(...([
+      ['recording', '🔔 Exchange recording'],
+      ['synth', '🎛️ Classic synth'],
+    ] as [BellSound, string][]).map(([bellSound, label]) => h('button.btn', {
+      type: 'button', role: 'radio', 'aria-checked': String(settings.bellSound === bellSound),
+      class: settings.bellSound === bellSound ? 'on' : '',
+      onclick: () => {
+        if (settings.bellSound === bellSound) return;
+        settings = { ...settings, bellSound };
+        onChange(settings);
+        paintBell();
+      },
+    }, label)));
+  };
+  paintBell();
+  const bellPreview = h('button.btn', { type: 'button', onclick: previewBell }, '▶ Preview bell');
 
   // Voice chat: an open mic, or muted until you hold V.
   const talkRow = h('div.seg', { role: 'radiogroup', 'aria-label': 'Voice chat' });
@@ -444,6 +462,10 @@ export function openSettings(net: Net, settings: Settings, onChange: (s: Setting
       h('label', { style: 'margin-top:18px' }, 'Office sounds'),
       soundRow,
       h('p.setting-note', {}, 'Workers typing, footsteps, the coffee machine, birds and rain outside, the dog, and the ding when a worker is done. Voice chat isn’t affected.'),
+      h('label', { style: 'margin-top:18px' }, 'Opening bell sound'),
+      bellRow,
+      h('p.setting-note', {}, 'Choose the recorded exchange bell or the previous synthesized bell. This choice is yours alone.'),
+      bellPreview,
       h('label', { style: 'margin-top:18px' }, 'Voice chat'),
       talkRow,
       h('p.setting-note', {}, 'Either way, V joins voice, holding V talks and you’re muted once you let go, and M mutes or unmutes. With push to talk you join muted. Leave voice from the ☰ menu.'),

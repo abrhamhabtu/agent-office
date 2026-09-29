@@ -493,6 +493,35 @@ button { font-family: inherit; }
 .modal.viewer { width: min(1400px, 100%); background: #111; }
 .modal.viewer video { width: 100%; max-height: calc(100vh - 120px); background: #111; display: block; }
 
+/* A close-up of the canvas already painting a desk monitor or a wall display. */
+.modal.screen-preview { width: min(1280px, 100%); max-height: calc(100vh - 32px); }
+.screen-preview header { background: #151c2b; color: #f4f6fb; border-bottom-color: #31394b; padding: 14px 18px; }
+.screen-preview-heading { min-width: 0; flex: 1; display: grid; gap: 2px; }
+.screen-preview-kicker, .screen-preview-index { color: #ffd166; font: 800 11px/1.2 ui-monospace, Menlo, Consolas, monospace; letter-spacing: .14em; text-transform: uppercase; }
+.screen-preview header h2 { color: #f4f6fb; font-size: 20px; }
+.screen-preview-status { flex: none; margin-right: 36px; color: #2ee6a6; font: 900 12px ui-monospace, Menlo, Consolas, monospace; letter-spacing: .08em; }
+.screen-preview-status.waiting { color: #ffd166; }
+.screen-preview-body { min-height: 0; overflow: auto; display: grid; grid-template-columns: minmax(0, 1fr) 250px; background: #f5ecdf; }
+.screen-preview-display { min-width: 0; padding: 18px; background: #e5d5c1; }
+.screen-preview-bezel { padding: 10px; border: 3px solid #20283a; border-radius: 13px; background: #101722; box-shadow: 0 6px 0 #20283a; }
+.screen-preview-canvas { display: block; width: 100%; height: auto; background: #0f1522; border-radius: 3px; }
+.screen-preview-foot { display: flex; justify-content: space-between; gap: 12px; margin: 16px 2px 0; color: #5f5961; font: 800 10px/1.3 ui-monospace, Menlo, Consolas, monospace; letter-spacing: .04em; }
+.screen-preview-updated { text-align: right; }
+.screen-preview-side { display: flex; flex-direction: column; align-items: flex-start; gap: 14px; padding: 24px 20px; border-left: 3px solid #20283a; }
+.screen-preview-side h3 { margin: 0; font-size: 24px; line-height: 1.1; }
+.screen-preview-side p { margin: 0; color: #555363; font-size: 14px; line-height: 1.5; font-weight: 700; }
+.screen-preview-live { display: flex; align-items: center; gap: 8px; color: #53596b; font-size: 12px; font-weight: 800; }
+.screen-preview-pulse { width: 9px; height: 9px; border-radius: 50%; background: #06d6a0; box-shadow: 0 0 0 3px #06d6a033; }
+.screen-preview-side .btn { margin-top: auto; width: 100%; justify-content: center; }
+@media (max-width: 760px) {
+  .screen-preview-body { grid-template-columns: 1fr; }
+  .screen-preview-display { padding: 12px; }
+  .screen-preview-side { border-left: 0; border-top: 3px solid #20283a; padding: 16px; }
+  .screen-preview-side h3 { font-size: 20px; }
+  .screen-preview-side .btn { margin-top: 0; }
+  .screen-preview-foot { font-size: 9px; }
+}
+
 /* Send-home dialog: what becomes of a worker's worktree */
 .choices { display: flex; flex-direction: column; gap: 8px; }
 .modal label.choice { display: flex; gap: 10px; align-items: flex-start; margin: 0; padding: 10px 12px; border: 3px solid var(--ink); border-radius: 12px; background: #fff; cursor: pointer; }

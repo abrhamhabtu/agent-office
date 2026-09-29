@@ -44,7 +44,14 @@ function obstacles(): { rects: Rect[]; circles: Circle[] } {
   // The gong's frame, as office.ts puts it.
   rects.push([GONG.x - GONG.width / 2 - 0.12, GONG.x + GONG.width / 2 + 0.3, GONG.z - 0.3, GONG.z + 0.3]);
   // The whiteboard on its wheels, as world/whiteboard.ts puts it.
-  rects.push([WHITEBOARD.x - WHITEBOARD.width / 2 - 0.2, WHITEBOARD.x + WHITEBOARD.width / 2 + 0.2, WHITEBOARD.z - 0.48, WHITEBOARD.z + 0.48]);
+  const boardFootprint = [-WHITEBOARD.width / 2 - 0.2, WHITEBOARD.width / 2 + 0.2].flatMap((u) => [-0.48, 0.48].map((v): Pt => [
+    WHITEBOARD.x + Math.cos(WHITEBOARD.rotY) * u + Math.sin(WHITEBOARD.rotY) * v,
+    WHITEBOARD.z - Math.sin(WHITEBOARD.rotY) * u + Math.cos(WHITEBOARD.rotY) * v,
+  ]));
+  rects.push([
+    Math.min(...boardFootprint.map(([x]) => x)), Math.max(...boardFootprint.map(([x]) => x)),
+    Math.min(...boardFootprint.map(([, z]) => z)), Math.max(...boardFootprint.map(([, z]) => z)),
+  ]);
   // The jukebox, against the east wall.
   rects.push([JUKEBOX.x - JUKEBOX.depth / 2 - 0.05, FLOOR.maxX, JUKEBOX.z - JUKEBOX.width / 2 - 0.05, JUKEBOX.z + JUKEBOX.width / 2 + 0.05]);
   // The arcade cabinet next to it, as world/cabinet.ts puts it (its control panel sticks out a little).

@@ -1,9 +1,10 @@
 /**
- * Office sounds, synthesized with Web Audio so there are no audio files to ship: the room's air and a
+ * Most office sounds are synthesized with Web Audio: the room's air and a
  * humming fridge, workers typing while they work, footsteps, the coffee machine, birds outside the
- * windows by day and crickets at night, rain and thunder, the odd rustle or phone, the gong, the dog
+ * windows by day and crickets at night, rain and thunder, the odd rustle or phone, the dog
  * barking, and the dings when a worker needs you. And the lounge jukebox, whose tunes are in music.ts,
  * and up on the roof, the wind, the city far below and the DJ's drum and bass (dnb.ts).
+ * The exchange bell uses a short CC0 recording; see public/sounds/SOURCE.md.
  *
  * Everything goes through one master gain that Settings turns down or mutes. Voice chat doesn't, and
  * the jukebox has a volume of its own.
@@ -13,6 +14,7 @@ import type { GongWhy } from '../shared/protocol';
 import { STREAM } from '../shared/jukebox';
 import { TunePlayer } from './music';
 import { DjPlayer } from './dnb';
+import type { BellSound } from './state';
 
 type Pos = { x: number; y: number; z: number };
 
@@ -48,19 +50,11 @@ const WINDOWS: Pos[] = OPENINGS.filter((o) => o.y0 < 2).map((o) =>
 const GONG_AT: Pos = { x: GONG.x, y: GONG.height - 1.36, z: GONG.z };
 /** The arcade cabinet's speaker, under its screen. */
 const CABINET_AT: Pos = { x: CABINET.x - 0.2, y: 1.2, z: CABINET.z };
-/** A small brass bell's overtones: [ratio to the lowest, loudness, seconds to ring out once struck for the last time]. */
+/** The previous synthesized bell's metal modes: frequency ratio, loudness, decay in seconds. */
 const BELL_PARTIALS: [number, number, number][] = [
-  [0.5, 0.25, 2.6],
-  [1, 1, 2.2],
-  [1.19, 0.45, 1.8],
-  [1.5, 0.3, 1.5],
-  [2, 0.55, 1.3],
-  [2.52, 0.35, 1],
-  [2.76, 0.4, 0.9],
-  [3.9, 0.22, 0.6],
-  [5.4, 0.12, 0.4],
+  [0.5, 0.42, 1.45], [1, 1, 1.3], [1.19, 0.32, 0.9], [1.51, 0.28, 0.75],
+  [2.03, 0.48, 0.6], [2.76, 0.29, 0.42], [3.91, 0.16, 0.28],
 ];
-
 const rand = (a: number, b: number) => a + Math.random() * (b - a);
 const randInt = (a: number, b: number) => Math.floor(rand(a, b + 1));
 const pick = <T>(xs: readonly T[]): T => xs[Math.floor(Math.random() * xs.length)];
@@ -92,6 +86,8 @@ export class OfficeSound {
   private outdoors = false;
   private analyser!: AnalyserNode;
   private buf!: Buffers;
+  private bellSample: Promise<AudioBuffer | null> | null = null;
+  private bellSound: BellSound = 'recording';
   private volume = 0.7;
   private muted = false;
   private typists = new Map<string, Typist>();
@@ -142,6 +138,10 @@ export class OfficeSound {
     this.volume = Math.max(0, Math.min(1, volume));
     this.muted = muted;
     this.applyVolume();
+  }
+
+  setBellSound(sound: BellSound) {
+    this.bellSound = sound;
   }
 
   /** The weather outside (see world/sky.ts), every frame. */
@@ -220,6 +220,7 @@ export class OfficeSound {
     this.startRoomTone();
     this.startFridge();
     this.startWind();
+    void this.loadBellSample();
     this.applyOutdoors();
     this.applyDj();
     const now = ctx.currentTime;
@@ -1041,62 +1042,88 @@ export class OfficeSound {
   // ---- The opening bell --------------------------------------------------------------------------
 
   /**
-   * The exchange bell by the proposals board rings: someone walked up and rang it (a short ring), the
-   * opening bell (a long one, 06:30 PT), or the closing bell and a merge (in between). It's an electric
-   * trading-floor bell, not a gong: a clapper hammering a bright brass bell twenty-odd times a second,
-   * the whole thing ringing out when it stops. From where it hangs, so you hear which way it is.
+   * Load the recorded NYSE bell once, after audio is unlocked. A real bell's attack and uneven
+   * overtones were missing from the oscillator version, especially across the rapid repeated strikes.
    */
+  private loadBellSample(): Promise<AudioBuffer | null> {
+    if (this.bellSample) return this.bellSample;
+    const ctx = this.ctx;
+    if (!ctx) return Promise.resolve(null);
+    this.bellSample = fetch('/sounds/nyse-opening-bell.mp3')
+      .then((response) => {
+        if (!response.ok) throw new Error(`Bell recording: ${response.status}`);
+        return response.arrayBuffer();
+      })
+      .then((data) => ctx.decodeAudioData(data))
+      .catch(() => {
+        this.bellSample = null;
+        return null;
+      });
+    return this.bellSample;
+  }
+
+  /** The opening, closing and hand-rung bells all come from the same physical bell in the office. */
   gong(why: GongWhy) {
     this.unlock();
     const ctx = this.ctx;
     if (!ctx) return;
     if (ctx.state === 'suspended') void ctx.resume();
     this.count(`gong.${why}`);
-    const out = why === 'hit' ? this.panner(GONG_AT, 4, 0.6) : this.panner(GONG_AT, 9, 0.4);
-    out.connect(why === 'hit' ? this.ambience : this.alerts);
-    this.ringBell(out, ctx.currentTime + 0.03, why === 'queue' ? 5 : why === 'merged' ? 3.2 : 1.4, why === 'hit' ? 0.75 : 1);
+    if (this.bellSound === 'synth') {
+      const out = why === 'hit' ? this.panner(GONG_AT, 4, 0.6) : this.panner(GONG_AT, 9, 0.4);
+      out.connect(why === 'hit' ? this.ambience : this.alerts);
+      this.ringSynthBell(out, ctx.currentTime + 0.03, why === 'queue' ? 5 : why === 'merged' ? 3.2 : 1.4, why === 'hit' ? 0.75 : 1);
+      return;
+    }
+    void this.loadBellSample().then((sample) => {
+      if (!sample || this.ctx !== ctx) return;
+      const out = why === 'hit' ? this.panner(GONG_AT, 4, 0.6) : this.panner(GONG_AT, 9, 0.4);
+      out.connect(why === 'hit' ? this.ambience : this.alerts);
+      const gain = ctx.createGain();
+      gain.gain.value = why === 'hit' ? 0.65 : 0.9;
+      const source = ctx.createBufferSource();
+      source.buffer = sample;
+      source.connect(gain).connect(out);
+      source.start();
+      source.onended = () => {
+        source.disconnect();
+        gain.disconnect();
+        out.disconnect();
+      };
+    });
   }
 
-  private ringBell(out: AudioNode, t0: number, seconds: number, strength: number) {
+  /** The original synthesized choice, kept for anyone who prefers its brisk metal rhythm. */
+  private ringSynthBell(out: AudioNode, t0: number, seconds: number, strength: number) {
     const ctx = this.ctx!;
-    const f0 = 760 * rand(0.99, 1.01);
-    const rate = 22;
-    const period = 1 / rate;
+    const period = 1 / 7.5;
     const end = t0 + seconds;
-    // The clapper: every strike kicks the bell back up, and it sags a little before the next one.
-    const hammer = ctx.createGain();
-    hammer.gain.setValueAtTime(0.0001, t0);
-    for (let t = t0; t < end; t += period) {
-      hammer.gain.setValueAtTime(0.32 * strength, t);
-      hammer.gain.exponentialRampToValueAtTime(0.14 * strength, t + period * 0.92);
-    }
-    hammer.gain.setValueAtTime(0.3 * strength, end);
-    hammer.connect(out);
-    for (const [ratio, amp, ring] of BELL_PARTIALS) {
-      for (const cents of [-4, 4]) {
+    const body = ctx.createGain();
+    body.gain.value = 0.065 * strength;
+    body.connect(out);
+    for (let i = 0, t = t0; t < end; i++, t += period) {
+      const attack = t + (i % 3 === 1 ? 0.006 : 0);
+      const accent = i === 0 || i % 4 === 0 ? 1.18 : 0.92;
+      for (const [ratio, amp, ring] of BELL_PARTIALS) {
         const o = ctx.createOscillator();
-        o.frequency.value = f0 * ratio;
-        o.detune.value = cents;
+        o.frequency.value = 520 * ratio * (1 + (i % 5 - 2) * 0.0007);
         const g = ctx.createGain();
-        // Each overtone rings out at its own pace once the clapper stops: the high ones go first.
-        g.gain.setValueAtTime(0.0001, t0);
-        g.gain.exponentialRampToValueAtTime(amp * 0.5, t0 + 0.004);
-        g.gain.setValueAtTime(amp * 0.5, end);
-        g.gain.exponentialRampToValueAtTime(0.0001, end + ring);
-        o.connect(g).connect(hammer);
-        o.start(t0);
-        o.stop(end + ring + 0.05);
+        g.gain.setValueAtTime(0.0001, attack);
+        g.gain.exponentialRampToValueAtTime(amp * accent, attack + 0.004);
+        g.gain.exponentialRampToValueAtTime(0.0001, attack + ring);
+        o.connect(g).connect(body);
+        o.start(attack);
+        o.stop(attack + ring + 0.02);
       }
     }
-    // The clapper's tick on the metal.
     const click = this.noise(this.buf.white, true);
     const clickG = ctx.createGain();
     clickG.gain.setValueAtTime(0.0001, t0);
     for (let t = t0; t < end; t += period) {
-      clickG.gain.setValueAtTime(0.09 * strength, t);
-      clickG.gain.exponentialRampToValueAtTime(0.0001, t + 0.012);
+      clickG.gain.setValueAtTime(0.11 * strength, t);
+      clickG.gain.exponentialRampToValueAtTime(0.0001, t + 0.024);
     }
-    click.connect(biquad(ctx, 'highpass', 3500, 0.7)).connect(clickG).connect(out);
+    click.connect(biquad(ctx, 'highpass', 1800, 0.7)).connect(clickG).connect(out);
     click.start(t0);
     click.stop(end + 0.05);
   }

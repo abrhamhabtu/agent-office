@@ -1,5 +1,6 @@
 import http from 'node:http';
 import { TradingDesk } from './trading/desk.js';
+import { stationSnapshot } from './stations.js';
 import type { ProposalAction } from '../shared/trading.js';
 import https from 'node:https';
 import { randomBytes } from 'node:crypto';
@@ -1434,7 +1435,19 @@ export async function startServer(cfg: Config) {
       case 'station.prompt': {
         const floor = here();
         if (!floor) break;
-        const r = floor.workers.station(str(msg.deskId, 32), who, str(msg.prompt, 20000));
+        const deskId = str(msg.deskId, 32);
+        const question = str(msg.prompt, 20000);
+        const kind = DESK_BY_ID.get(deskId)?.station;
+        let context: string | undefined;
+        if (kind) {
+          try {
+            context = stationSnapshot(kind, desk.snapshot());
+          } catch {
+            // A specialist can still answer with its standing prompt when a snapshot is unavailable.
+          }
+        }
+        const prompt = context ? `${context}\n\nOWNER'S QUESTION:\n${question}` : question;
+        const r = floor.workers.station(deskId, who, prompt);
         if (typeof r === 'string') warn(c, r);
         else if (r.hired) toastFloor(floor, `${who} asked the ${r.info.name} something`);
         break;

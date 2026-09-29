@@ -2,9 +2,11 @@ import * as THREE from 'three';
 import { DESK_SIZE, DESKS } from '../../shared/layout';
 import type { FloorRole, PlaybookId, Symbol, TradingSnapshot } from '../../shared/trading';
 import { INSTRUMENTS, PLAYBOOK_BY_ID, PLAYBOOKS, PODS, PROP_ACCOUNTS, seatJob } from '../../shared/trading';
+import { DESK_BY_ID, STATION_AGENT } from '../../shared/layout';
 import { Worker } from '../world/character';
 import { Laptop } from '../world/laptop';
 import type { DeskView } from '../world/office';
+import type { PanelTab } from './panel';
 import { mesh, roundedBox, toon } from '../world/toon';
 import { accountRow, clip, guardBar, drawChart, fives, fmt, INK, money, pct, Screen, sparkline, STAGE_COLOR, STAGE_LABEL, type ChartOpts } from './screens';
 
@@ -64,9 +66,30 @@ const JOBS: Record<FloorRole, Job[]> = {
 };
 
 /** The seats that already have a trader working at them when nobody's been hired there. */
-const TRADERS: Record<FloorRole, number[]> = { bell: [1, 6, 9, 14], office: [1, 5, 10, 15] };
+const TRADERS: Record<FloorRole, number[]> = { bell: [1, 3, 6, 13, 14, 16], office: [1, 3, 6, 13, 14, 16] };
+const RESIDENT_TITLES = {
+  chief: 'SESSION CHIEF', tape: 'TAPE BRIEF', levels: 'LEVELS', risk: 'RISK', backtest: 'BACKTEST', paper: 'PAPER + GRADE',
+} as const;
 
 const marketAt = (s: TradingSnapshot, i: number): Symbol => s.markets[i % Math.max(1, s.markets.length)] ?? 'NQ';
+
+export function deskDetailsTab(deskId: string, role: FloorRole): PanelTab {
+  const n = Number(/^desk-(\d+)$/.exec(deskId)?.[1]);
+  const job = JOBS[role][n - 1];
+  switch (job?.kind) {
+    case 'news': return 'news';
+    case 'accounts': return 'accounts';
+    case 'journal': return 'alerts';
+    case 'paperToday':
+    case 'paperRecent':
+    case 'paperStats': return 'paper';
+    case 'equity':
+    case 'eval': return 'backtest';
+    case 'quotes':
+    case 'paperMarket': return 'connections';
+    default: return 'proposals';
+  }
+}
 
 /** A desk monitor: one seat's job, redrawn from the snapshot. */
 class DeskMonitor extends Screen {
@@ -302,6 +325,7 @@ class DeskMonitor extends Screen {
 export interface TradingDesks {
   /** Redraws what's due and animates the traders; cheap enough to call every frame. */
   update(dt: number, t: number, cam: THREE.Vector3, role: FloorRole, snap: TradingSnapshot | null, tick: number): void;
+  screenFor(deskId: string, role: FloorRole, snap: TradingSnapshot | null): Screen | null;
 }
 
 export function buildTradingDesks(desks: Map<string, DeskView>): TradingDesks {
@@ -321,6 +345,10 @@ export function buildTradingDesks(desks: Map<string, DeskView>): TradingDesks {
     const face = new THREE.Mesh(new THREE.PlaneGeometry(W, H), new THREE.MeshBasicMaterial({ map: screen.texture, toneMapped: false }));
     face.position.z = 0.028;
     mon.add(face);
+    mon.add(mesh(new THREE.BoxGeometry(W - 0.12, 0.012, 0.014), toon('#06d6a0'), 0, H / 2 + 0.018, 0.03, false));
+    mon.add(mesh(new THREE.SphereGeometry(0.012, 8, 8), toon('#06d6a0', { emissive: '#06d6a0' }), W / 2 - 0.055, -H / 2 - 0.015, 0.03, false));
+    // Only the second screen opens a market preview. The laptop and the desk still open the terminal.
+    face.userData.interact = { kind: 'monitor', x: def.x, z: def.z, radius: 4.5, deskId: def.id };
     mon.add(mesh(new THREE.BoxGeometry(0.05, 0.2, 0.05), frameMat, 0, -H / 2 - 0.08, -0.03, false));
     mon.add(mesh(roundedBox(0.3, 0.025, 0.2, 0.01), frameMat, 0, -H / 2 - 0.18, -0.01, false));
     mon.position.set(0.56, height + 0.19 + H / 2, -depth / 2 + 0.24);
@@ -334,10 +362,13 @@ export function buildTradingDesks(desks: Map<string, DeskView>): TradingDesks {
     TRADERS[role].map((n) => {
       const id = `desk-${n}`;
       const view = desks.get(id)!;
-      const job = seatJob(role, id) ?? 'Trader';
-      const name = job.split(' · ')[0]!;
+      const station = DESK_BY_ID.get(id)?.station;
+      const job = station && station in RESIDENT_TITLES
+        ? `${STATION_AGENT[station].name} · ${RESIDENT_TITLES[station as keyof typeof RESIDENT_TITLES]}`
+        : seatJob(role, id) ?? 'Trader';
+      const name = station && station in RESIDENT_TITLES ? STATION_AGENT[station].name : job.split(' · ')[0]!;
       const pod = PODS[role][Math.floor((n - 1) / 4)]!;
-      const model = new Worker(name, pod.color);
+      const model = new Worker(name, station && station in RESIDENT_TITLES ? STATION_AGENT[station].color : pod.color);
       model.setStatus('working', false);
       view.seatAnchor.add(model.root);
       const laptop = new Laptop();
@@ -353,6 +384,12 @@ export function buildTradingDesks(desks: Map<string, DeskView>): TradingDesks {
   let cursor = 0;
 
   return {
+    screenFor(deskId, role, snap) {
+      const monitor = monitors.find((m) => `desk-${m.n}` === deskId);
+      if (!monitor) return null;
+      monitor.screen.render(snap, role);
+      return monitor.screen;
+    },
     update(dt, t, cam, role, snap, tick) {
       // Monitors: when the prices move, redraw the nearest few each frame rather than all sixteen at once.
       if (tick !== drawnTick) {

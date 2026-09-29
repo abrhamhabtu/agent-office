@@ -55,7 +55,8 @@ import { floorRole, PLAYBOOK_BY_ID, PODS, podOf, seatJob, SYMBOLS, type FloorRol
 import { trading } from './trading/feed';
 import { openTrading, type PanelTab } from './trading/panel';
 import { BacktestBoard, BossScreen, EvalBoard, MarketMap, NewsBoard, PaperBoard, PlaybookBoard, ProposalsBoard, TickerStrip, bellText, type Screen as TradingScreen } from './trading/screens';
-import { buildTradingDesks } from './trading/desks';
+import { buildTradingDesks, deskDetailsTab } from './trading/desks';
+import { openScreenPreview } from './trading/preview';
 import { openQueue } from './ui/queue';
 import { openUpgrade, restarting, showRestarting, showUpgraded } from './ui/upgrade';
 import { openHelp, renderCaffeine, renderChat, renderPeople, renderWorkers, updateSpeaking } from './ui/hud';
@@ -139,6 +140,12 @@ const STATION_INFO: Record<StationKind, { icon: string; offer: string; does: str
   issues: { icon: '📰', offer: 'Ask me about the news', does: 'I sum up catalysts and flag what moves the tape', example: 'What high-impact news is left before 9:00 PT?' },
   pulls: { icon: '🎯', offer: 'Ask me about setups', does: 'I stress-test the live proposals from the playbooks', example: 'Walk me through the NQ VWAP pullback and what would invalidate it' },
   queue: { icon: '📋', offer: 'Ask me about the plan', does: 'I run the playbook and queue the code work', example: 'What is left on the playbook before the open?' },
+  chief: { icon: '🧭', offer: 'Ask for the session plan', does: 'I synthesize tape, levels and risk into a clear plan', example: 'Give me today’s bias, the level that matters, and what invalidates it' },
+  tape: { icon: '📡', offer: 'Ask for the tape brief', does: 'I separate the futures read from the Bitcoin reference', example: 'Give me the futures and crypto briefs; flag any missing news data' },
+  levels: { icon: '📐', offer: 'Ask for key levels', does: 'I map VWAP, opening range and prior-session levels', example: 'Show me NQ and ES levels and which are unformed or untested' },
+  risk: { icon: '🛡️', offer: 'Ask for a risk check', does: 'I size from your stop and enforce configured guardrails', example: 'On the active account, size one MNQ with a 20-tick stop' },
+  backtest: { icon: '🧪', offer: 'Ask about strategy evidence', does: 'I read backtest sample size, expectancy and drawdown', example: 'What does the latest backtest actually prove, and what does it not?' },
+  paper: { icon: '📒', offer: 'Ask for a paper review', does: 'I track the simulator and grade process, never profit', example: 'Review today’s paper trades and give me a process grade' },
 };
 /** The board agents waiting by their boards before anyone has asked them anything (see buildKiosk). */
 const idleAgents = STATIONS.map((def) => {
@@ -152,6 +159,8 @@ const idleAgents = STATIONS.map((def) => {
   noOutline(model.root);
   return { model, view };
 });
+/** A newly prompted resident: open its terminal as soon as the server seats its session. */
+let pendingStationTerminal: { deskId: string; until: number } | null = null;
 
 // Boards: each draws onto a canvas texture, redrawn whenever what it shows changes.
 function mountBoard(mesh: THREE.Mesh, texture: THREE.Texture, render: () => void, topics: Topic[]) {
@@ -225,6 +234,31 @@ const BOARD_SET: Record<FloorRole, Record<'issues' | 'queue' | 'pulls' | 'servic
 const tape = new TickerStrip();
 const tradingDesks = buildTradingDesks(office.desks);
 const bossMarkets = new BossScreen();
+function previewDeskMonitor(deskId: string) {
+  const role = tradingRole();
+  const screen = tradingDesks.screenFor(deskId, role, trading.snap);
+  if (!screen) return;
+  const n = Number(/^desk-(\d+)$/.exec(deskId)?.[1]);
+  openScreenPreview({
+    title: deskName(deskId),
+    place: `DESK ${String(n).padStart(2, '0')} · SECOND MONITOR`,
+    screen,
+    detail: 'This is the live market view on the monitor beside the laptop. The laptop still shows the worker’s Codex, Claude Code, OpenCode, or shell session.',
+    onDetails: () => openTrading(role, deskDetailsTab(deskId, role)),
+  });
+}
+function previewWallScreen(kind: 'issues' | 'queue' | 'pulls' | 'services') {
+  const role = tradingRole();
+  const board = BOARD_SET[role][kind];
+  board.screen.render(trading.snap, role);
+  openScreenPreview({
+    title: board.label,
+    place: 'TRADING FLOOR · WALL DISPLAY',
+    screen: board.screen,
+    detail: 'A close-up of the same live display on the wall. Prices, plans, news, and results update here as they change in the office.',
+    onDetails: () => openTrading(role, board.tab),
+  });
+}
 {
   const mat = office.bossMarkets.material as THREE.MeshBasicMaterial;
   mat.map = bossMarkets.texture;
@@ -248,6 +282,8 @@ function paintTrading() {
 }
 /** The name of a seat on this floor: its job on the trading floor, if it has one. */
 function deskName(id: string): string {
+  const station = DESK_BY_ID.get(id)?.station;
+  if (station && station in STATION_INFO) return STATION_AGENT[station].name;
   return seatJob(tradingRole(), id) ?? DESK_BY_ID.get(id)?.label ?? 'the desk';
 }
 /** What a laptop charts while its worker's terminal is empty: its pod's market, the way that pod reads it. */
@@ -261,8 +297,9 @@ function laptopChart(deskId: string): { symbol: (typeof SYMBOLS)[number]; view: 
 // The tape runs the length of the north wall, above the boards.
 {
   const len = FLOOR.maxX - FLOOR.minX - 2;
-  const strip = new THREE.Mesh(new THREE.PlaneGeometry(len, len * (128 / 2048)), new THREE.MeshBasicMaterial({ map: tape.texture, toneMapped: false }));
-  strip.position.set((FLOOR.minX + FLOOR.maxX) / 2, 4.85, FLOOR.minZ + 0.07);
+  const strip = new THREE.Mesh(new THREE.PlaneGeometry(len, len * (64 / 4096)), new THREE.MeshBasicMaterial({ map: tape.texture, toneMapped: false }));
+  strip.position.set((FLOOR.minX + FLOOR.maxX) / 2, 4.88, FLOOR.minZ + 0.07);
+  strip.userData.interact = { kind: 'ticker', x: strip.position.x, z: FLOOR.minZ + 1.6, radius: 3 };
   office.group.add(strip);
 }
 trading.on(paintTrading);
@@ -402,6 +439,7 @@ me.onSmoke = (kind, at, dir) => {
 };
 const sound = new OfficeSound();
 sound.setVolume(settings.volume, settings.muted);
+sound.setBellSound(settings.bellSound);
 // The floor's dog. It goes quiet once someone has the terminal of the worker it's barking at open.
 const dog = new Dog(sound, (id) => (store.workers.get(id)?.viewers.length ?? 0) > 0);
 scene.add(dog.root);
@@ -1330,6 +1368,13 @@ function syncWorkers() {
   renderWaiting();
   notifier.sync(store.workers);
   renderTitle();
+  if (pendingStationTerminal) {
+    const resident = store.workerAtDesk(pendingStationTerminal.deskId);
+    if (resident) {
+      pendingStationTerminal = null;
+      openWorkerTerminal(resident.id);
+    } else if (Date.now() >= pendingStationTerminal.until) pendingStationTerminal = null;
+  }
 }
 
 /** Hired by you (at a desk, or through the queue), or last given something to do by you. */
@@ -1538,7 +1583,7 @@ function askStation(deskId: string) {
   // Nobody there yet: asking hires the agent.
   if (!w && officeIsFull()) return;
   const subtitle = !w
-    ? `${info.does}, in a terminal of my own: press O at the kiosk to watch.`
+    ? `${info.does}. This resident keeps its own session at this desk, so you can return for follow-up questions.`
     : isAsleep(w.status)
       ? `The ${name} is asleep: this wakes it up, and it carries on where it left off.`
       : isBusy(w.status)
@@ -1548,9 +1593,13 @@ function askStation(deskId: string) {
     title: `${info.icon} Ask the ${name}`,
     subtitle,
     placeholder: `e.g. ${info.example}`,
-    submitLabel: 'Send ✨',
+    submitLabel: w ? 'Send follow-up ✨' : 'Ask this resident ✨',
     warning: w ? undefined : pressureNote(store.machine),
-    onSubmit: (text) => net.send({ t: 'station.prompt', deskId, prompt: text }),
+    onSubmit: (text) => {
+      if (w) openWorkerTerminal(w.id);
+      else pendingStationTerminal = { deskId, until: Date.now() + 12_000 };
+      net.send({ t: 'station.prompt', deskId, prompt: text });
+    },
   });
 }
 
@@ -1799,6 +1848,14 @@ function interact(target: Interactable | null, key: DeskKey, note = aimedNote) {
     if (key === 'R' && w && isAsleep(w.status)) return resumeWorker(w);
     if (key === 'X' && w) return killWorker(w.id);
     if (key === 'O' && w) return pullRequestFor(w);
+    return;
+  }
+  if (target.kind === 'monitor' && target.deskId) {
+    if (key === 'E') previewDeskMonitor(target.deskId);
+    return;
+  }
+  if (target.kind === 'ticker') {
+    if (key === 'E') previewWallScreen('services');
     return;
   }
   if (target.kind === 'station' && target.deskId) {
@@ -2476,10 +2533,14 @@ function renderHint() {
 /** What the hint bar says about the thing you're facing. */
 function hintFor(it: Interactable): Hint {
   const title = (text: string) => h('span.title', {}, text);
-  const board = (name: string): Hint => ({ k: '', parts: [title(name), key('E', 'Open')] });
+  const board = (name: string): Hint => ({ k: '', parts: [title(name), key('E', 'Open details'), aside('Click screen to enlarge')] });
   switch (it.kind) {
     case 'desk':
       return it.deskId ? deskHint(it.deskId) : { k: '', parts: [] };
+    case 'monitor':
+      return { k: it.deskId ?? '', parts: [title(`${deskName(it.deskId ?? '')} · live monitor`), key('E', 'View screen')] };
+    case 'ticker':
+      return { k: '', parts: [title('📈 Live market tape'), key('E', 'View market')] };
     case 'station':
       return it.deskId ? stationHint(it.deskId) : { k: '', parts: [] };
     case 'issues':
@@ -2640,6 +2701,7 @@ function deskHint(deskId: string): Hint {
               m.pressure ? h('span.cost', { title: `This machine is under pressure: ${m.pressure}` }, '⚠️ Machine under pressure') : '',
               ...(paused ? [h('span.cost', {}, '💸 Budget spent — hiring resumes tomorrow')] : [key('E', 'Hire a worker'), key('P', 'Hire with a task')]),
               key('B', 'Shell'),
+              aside('Click side monitor to preview'),
             ]),
       ],
     };
@@ -2655,6 +2717,7 @@ function deskHint(deskId: string): Hint {
       doing ? aside(doing) : '',
       spent ? h('span.cost', { title: usageTitle(w.usage!, workerProvider) }, spent) : '',
       key('E', 'Open terminal'),
+      aside('Click side monitor to preview'),
       key('C', 'Changes'),
       isAsleep(w.status) ? key('R', shell ? 'Restart' : 'Resume') : key('P', shell ? 'Run command' : 'Prompt'),
       w.pr ? key('O', `PR #${w.pr.number}`) : w.prOpening ? aside('⏳ Opening PR…') : prReady(w) ? key('O', 'Open PR') : '',
@@ -2676,7 +2739,7 @@ function stationHint(deskId: string): Hint {
       parts: [
         h('span.title', {}, `${info.icon} ${STATION_AGENT[kind].name}`),
         aside(info.offer.replace(/^Ask me /, '')),
-        full ? h('span.cost', {}, `🚫 Office full · ${m.workers} of ${m.limit} workers`) : key('E', 'Prompt'),
+      full ? h('span.cost', {}, `🚫 Office full · ${m.workers} of ${m.limit} workers`) : key('E', 'Ask a question'),
       ],
     };
   }
@@ -2689,7 +2752,7 @@ function stationHint(deskId: string): Hint {
       h('span.title', {}, `${info.icon} ${w.name} · ${STATUS_LABEL[w.status]}`),
       doing ? aside(doing) : '',
       spent ? h('span.cost', { title: usageTitle(w.usage!, provider) }, spent) : '',
-      key('E', isAsleep(w.status) ? 'Wake with a prompt' : 'Prompt'),
+      key('E', isAsleep(w.status) ? 'Ask & wake' : 'Ask follow-up'),
       key('O', 'Terminal'),
       key('X', 'Send home'),
     ],
@@ -3030,7 +3093,7 @@ document.addEventListener('pointerlockchange', () => {
 const raycaster = new THREE.Raycaster();
 const CROSSHAIR = new THREE.Vector2(0, 0);
 /** How close (meters from your eyes) you must be to use each kind of thing. */
-const REACH: Record<InteractKind, number> = { desk: 4.5, station: 4.5, coffee: 3, issues: 9, pulls: 9, services: 9, queue: 9, tv: 10, decor: 9, smoke: 3, elevator: 4.5, gong: 3.5, dog: 3.2, jukebox: 4, seat: 3, whiteboard: 7, cabinet: 4, ladder: 3, pole: 4, slide: 3, meeting: 7, bar: 3.5, dj: 6, golf: 3.5, ball: 3.2, bookshelf: 4 };
+const REACH: Record<InteractKind, number> = { desk: 4.5, monitor: 5, ticker: 12, station: 4.5, coffee: 3, issues: 9, pulls: 9, services: 9, queue: 9, tv: 10, decor: 9, smoke: 3, elevator: 4.5, gong: 3.5, dog: 3.2, jukebox: 4, seat: 3, whiteboard: 7, cabinet: 4, ladder: 3, pole: 4, slide: 3, meeting: 7, bar: 3.5, dj: 6, golf: 3.5, ball: 3.2, bookshelf: 4 };
 const eye = new THREE.Vector3();
 
 /** What the ray through `ndc` lands on first, whether it is within reach (plus `slack` meters), and where it hit. */
@@ -3083,13 +3146,28 @@ player.onClick = (ndc) => {
     hanger.place(ndc);
     return;
   }
+  const aim = aimedAt(ndc, 2.5);
+  if (aim?.near && aim.it.kind === 'monitor' && aim.it.deskId) {
+    reach();
+    previewDeskMonitor(aim.it.deskId);
+    return;
+  }
+  if (aim?.near && aim.it.kind === 'ticker') {
+    reach();
+    previewWallScreen('services');
+    return;
+  }
+  if (aim?.near && (aim.it.kind === 'issues' || aim.it.kind === 'queue' || aim.it.kind === 'pulls' || aim.it.kind === 'services') && aim.hit.object === office.boardMeshes[aim.it.kind]) {
+    reach();
+    previewWallScreen(aim.it.kind);
+    return;
+  }
   if (player.view === 'first') {
     // Reach out even at nothing, like poking the air.
     reach();
     if (target) interact(target, 'E');
     return;
   }
-  const aim = aimedAt(ndc, 2.5);
   if (!aim) return;
   if (!aim.near) {
     toast('Walk closer to that first');
@@ -3289,10 +3367,12 @@ function showSettings() {
       }
       player.setView(settings.view);
       sound.setVolume(settings.volume, settings.muted);
+      sound.setBellSound(settings.bellSound);
       sound.setMusicVolume(settings.music, settings.musicMuted);
     },
     editProfile,
     () => sound.ding('done'),
+    () => sound.gong('hit'),
     notifier,
     signOut,
     store.sky ? { now: describeSky(store.sky), live: !!store.sky.city } : undefined,

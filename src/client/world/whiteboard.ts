@@ -26,9 +26,10 @@ export interface WhiteboardStand {
 }
 
 export function buildWhiteboard(): WhiteboardStand {
-  const { x, z, width, height, bottom } = WHITEBOARD;
+  const { x, z, rotY, width, height, bottom } = WHITEBOARD;
   const group = new THREE.Group();
   group.position.set(x, 0, z);
+  group.rotation.y = rotY;
   const alu = toon(ALU);
   const ink = toon(INK);
   const mid = bottom + height / 2;
@@ -83,8 +84,16 @@ export function buildWhiteboard(): WhiteboardStand {
   plaque.position.set(0, bottom + height + 0.2, 0.05);
   group.add(plaque);
 
-  const colliders: Collider[] = [{ minX: x - post - 0.1, maxX: x + post + 0.1, minZ: z - 0.48, maxZ: z + 0.48, top: bottom + height + 0.35 }];
-  const interactable: Interactable = { kind: 'whiteboard', x, z: z + 1.7, radius: 2.3 };
+  const footprint = [-post - 0.1, post + 0.1].flatMap((u) => [-0.48, 0.48].map((v) => ({
+    x: x + Math.cos(rotY) * u + Math.sin(rotY) * v,
+    z: z - Math.sin(rotY) * u + Math.cos(rotY) * v,
+  })));
+  const colliders: Collider[] = [{
+    minX: Math.min(...footprint.map((p) => p.x)), maxX: Math.max(...footprint.map((p) => p.x)),
+    minZ: Math.min(...footprint.map((p) => p.z)), maxZ: Math.max(...footprint.map((p) => p.z)),
+    top: bottom + height + 0.35,
+  }];
+  const interactable: Interactable = { kind: 'whiteboard', x: x + Math.sin(rotY) * 1.7, z: z + Math.cos(rotY) * 1.7, radius: 2.3 };
   group.userData.interact = interactable;
 
   const show = (drawing: HTMLCanvasElement | null) => {

@@ -17,7 +17,7 @@ export interface DeskDef {
   label: string;
   /** A bean bag on the floor instead of a desk; the worker sits on it at (x, z), facing -z at rotY 0. */
   beanbag?: boolean;
-  /** A board agent's kiosk instead of a desk (see STATIONS): the worker stands behind it. */
+  /** A resident agent desk or board-agent kiosk; asked in place instead of hired through the plus action. */
   station?: StationKind;
   /** A chair at the meeting room's table (see MEETING_SEATS): only a meeting seats a worker here. */
   room?: boolean;
@@ -49,6 +49,17 @@ function buildDesks(): DeskDef[] {
       }
     }
   }
+  // Six desks are resident trading-adviser seats. Their live avatars are painted by trading/desks;
+  // when asked, the same place hosts a durable provider session (unlike a plus-button hire).
+  const residentByDesk: Record<string, StationKind> = {
+    'desk-1': 'backtest',
+    'desk-3': 'tape',
+    'desk-6': 'levels',
+    'desk-13': 'risk',
+    'desk-14': 'paper',
+    'desk-16': 'chief',
+  };
+  for (const desk of desks) desk.station = residentByDesk[desk.id];
   return desks;
 }
 
@@ -60,29 +71,29 @@ export const DESKS: DeskDef[] = buildDesks();
  */
 export const BEANBAGS: DeskDef[] = (
   [
-    // Out in the north-east corner past the gong, and between the PR board and the elevator, clear of
-    // the gong's front and the elevator doors.
-    [FLOOR.maxX - 3.5, FLOOR.minZ + 3.2, 0],
+    // Between the gong and the elevator, clear of the elevator's approach.
+    [12.8, FLOOR.minZ + 4.2, 0],
     [5.4, FLOOR.minZ + 3.2, 0],
-    [FLOOR.minX + 2.4, -10, Math.PI / 2],
-    [FLOOR.minX + 2.4, -6.5, Math.PI / 2],
+    [FLOOR.minX + 2.4, -7.2, Math.PI / 2],
+    [FLOOR.minX + 2.4, -4.2, Math.PI / 2],
     [-8.8, 10.2, Math.PI],
     [0.8, 10.2, Math.PI],
     [14.7, -5.6, -Math.PI / 2],
     [14.7, 5.6, -Math.PI / 2],
     [FLOOR.minX + 2.4, 4.5, Math.PI / 2],
     // Clear of the board agents' kiosks, and of the floor in front of them.
-    [-13.2, FLOOR.minZ + 3.2, 0],
+    [-12.4, -8.2, 0],
     [-12.6, 9.2, Math.PI / 2],
     [-5.4, FLOOR.minZ + 3.2, 0],
   ] as const
 ).map(([x, z, rotY], i) => ({ id: `beanbag-${i + 1}`, x, z, rotY, label: `Bean bag ${i + 1}`, beanbag: true }));
 
-/** Everywhere a worker can sit: the desks, then the bean bags. */
-export const SEATS: DeskDef[] = [...DESKS, ...BEANBAGS];
+/** Seats a normal hire can take; resident specialists keep their own desks. */
+export const HIREABLE_DESKS: DeskDef[] = DESKS.filter((d) => !d.station);
+export const SEATS: DeskDef[] = [...HIREABLE_DESKS, ...BEANBAGS];
 
-/** The boards with an agent standing by: the Issues board, the PR board and the task queue. */
-export type StationKind = 'issues' | 'pulls' | 'queue';
+/** A resident the owner can ask at a desk or kiosk. */
+export type StationKind = 'issues' | 'pulls' | 'queue' | 'chief' | 'tape' | 'levels' | 'risk' | 'backtest' | 'paper';
 
 /**
  * The board agents: a worker standing behind a little kiosk just west of each of those boards (see
@@ -90,12 +101,12 @@ export type StationKind = 'issues' | 'pulls' | 'queue';
  * rotY PI the worker stands on the wall side of it. Nobody hires them from the desks or the queue.
  */
 export const STATIONS: DeskDef[] = [
-  // Between the plant in the north-west corner and the Issues board.
-  { id: 'station-issues', station: 'issues', x: -15.6, z: FLOOR.minZ + 1.3, rotY: Math.PI, label: 'News board' },
+  // Wire stands just to the left of the news display, beside the corner whiteboard.
+  { id: 'station-issues', station: 'issues', x: -14.6, z: FLOOR.minZ + 1.3, rotY: Math.PI, label: 'News board' },
   // Between the task queue and the PR board.
-  { id: 'station-pulls', station: 'pulls', x: 0, z: FLOOR.minZ + 1.3, rotY: Math.PI, label: 'Proposals board' },
+  { id: 'station-pulls', station: 'pulls', x: 1, z: FLOOR.minZ + 1.3, rotY: Math.PI, label: 'Proposals board' },
   // Between the Issues board and the task queue.
-  { id: 'station-queue', station: 'queue', x: -7.8, z: FLOOR.minZ + 1.3, rotY: Math.PI, label: 'Playbook board' },
+  { id: 'station-queue', station: 'queue', x: -6.8, z: FLOOR.minZ + 1.3, rotY: Math.PI, label: 'Playbook board' },
 ];
 /** A board agent's kiosk: its top, and how far behind its middle (toward the wall) the agent stands. */
 export const KIOSK = { width: 0.8, depth: 0.5, height: 0.55, stand: 0.55 } as const;
@@ -104,6 +115,12 @@ export const STATION_AGENT: Record<StationKind, { name: string; color: string }>
   issues: { name: 'Wire', color: '#4ecdc4' },
   pulls: { name: 'Setups', color: '#00bbf9' },
   queue: { name: 'Marshal', color: '#ffd166' },
+  chief: { name: 'Session Chief', color: '#ed8d72' },
+  tape: { name: 'Tape Brief', color: '#5daec9' },
+  levels: { name: 'Levels', color: '#8c86db' },
+  risk: { name: 'Risk', color: '#d6a956' },
+  backtest: { name: 'Backtest', color: '#68b394' },
+  paper: { name: 'Paper + Grade', color: '#b37acc' },
 };
 
 /** The upstairs office: a glass-walled loft on posts in the south-east corner, looking down on the desks. */
@@ -138,8 +155,8 @@ export const MEETING_SEATS: DeskDef[] = (
 /** The board on the meeting room's back (south) wall that shows the meeting's output file as it's written. */
 export const MEETING_BOARD = { x: MEETING_TABLE.x, y: 1.95, z: FLOOR.maxZ - 0.08, width: 4.6, height: 1.4 } as const;
 
-/** Any place a worker can be by id: the seats, the board agents' kiosks and the meeting room's chairs. */
-export const DESK_BY_ID = new Map([...SEATS, ...STATIONS, ...MEETING_SEATS].map((d) => [d.id, d]));
+/** Any place a worker can be by id: normal seats, resident desks, board kiosks and meeting chairs. */
+export const DESK_BY_ID = new Map([...DESKS, ...BEANBAGS, ...STATIONS, ...MEETING_SEATS].map((d) => [d.id, d]));
 
 /** The seat a new worker takes when nobody picks one: the first free desk, else the first free bean bag. */
 export function nextFreeSeat(taken: (id: string) => boolean): DeskDef | undefined {
@@ -152,7 +169,7 @@ export function nextFreeSeat(taken: (id: string) => boolean): DeskDef | undefine
  */
 export function beanbagsOut(taken: (id: string) => boolean): Set<string> {
   const out = new Set(BEANBAGS.filter((b) => taken(b.id)).map((b) => b.id));
-  if (DESKS.every((d) => taken(d.id))) {
+  if (HIREABLE_DESKS.every((d) => taken(d.id))) {
     const spare = BEANBAGS.find((b) => !taken(b.id));
     if (spare) out.add(spare.id);
   }
@@ -182,12 +199,10 @@ export function deskSeat(desk: DeskDef, offset = 0.85): { x: number; z: number }
 
 /** Wall boards. `rotY` is the way the board faces (0 = +z, like the north-wall boards). */
 export const BOARDS = {
-  // Side by side along the north wall, the way work goes: an issue goes on the task queue (the
-  // whiteboard in the middle), and its worker's pull request comes out the other side. Each has its
-  // board agent's kiosk just west of it (see STATIONS).
-  issues: { x: -11.7, y: 2.1, z: FLOOR.minZ + 0.08, rotY: 0, width: 6, height: 3, label: '📰 News' },
-  queue: { x: -3.9, y: 2.1, z: FLOOR.minZ + 0.08, rotY: 0, width: 6, height: 3, label: '📋 Playbook' },
-  pulls: { x: 3.9, y: 2.1, z: FLOOR.minZ + 0.08, rotY: 0, width: 6, height: 3, label: '🎯 Trade proposals' },
+  // News stays flat on the north wall. The full display row shifts right to open the corner for the whiteboard.
+  issues: { x: -10.7, y: 2.1, z: FLOOR.minZ + 0.08, rotY: 0, width: 6, height: 3, label: '📰 News' },
+  queue: { x: -2.9, y: 2.1, z: FLOOR.minZ + 0.08, rotY: 0, width: 6, height: 3, label: '📋 Playbook' },
+  pulls: { x: 4.9, y: 2.1, z: FLOOR.minZ + 0.08, rotY: 0, width: 6, height: 3, label: '🎯 Trade proposals' },
   // East wall, north of the lounge TV.
   services: { x: FLOOR.maxX - 0.08, y: 2.1, z: -8.2, rotY: -Math.PI / 2, width: 6, height: 3, label: '🔌 Connectors' },
 } as const;
@@ -214,13 +229,13 @@ export const BOOKSHELF = { x: -6.5, z: FLOOR.maxZ - 0.21, width: 1.7, depth: 0.4
 
 export const SPAWN = { x: 5, z: 4.5 } as const;
 
-/** The gong: on the north wall just past the elevator from the PR board, facing into the room. It rings when a PR merges. */
-export const GONG = { x: 11.8, z: FLOOR.minZ + 0.75, width: 1.9, height: 2.45 } as const;
+/** The gong: on the north wall between the proposals board and elevator. It rings when a PR merges. */
+export const GONG = { x: 11.3, z: FLOOR.minZ + 0.75, width: 1.9, height: 2.45 } as const;
 
 /** Potted plants around the room: where each stands, and how big it is. */
 export const PLANTS: readonly (readonly [x: number, z: number, scale: number])[] = [
   [FLOOR.minX + 0.8, FLOOR.minZ + 0.8, 1.4],
-  [FLOOR.maxX - 0.8, FLOOR.minZ + 0.8, 1.5],
+  [19.3, -4.5, 1.1],
   [FLOOR.maxX - 0.8, FLOOR.maxZ - 0.8, 1.3],
   [FLOOR.minX + 0.8, 8.5, 1.2],
   [14.4, FLOOR.minZ + 0.8, 1.1],
@@ -230,11 +245,10 @@ export const PLANTS: readonly (readonly [x: number, z: number, scale: number])[]
 ];
 
 /**
- * The whiteboard on wheels everyone draws on together, out on the open floor between the desks and
- * the lounge, facing into the room (+z). `width` and `height` are its writing surface, whose bottom
- * edge is `bottom` above the floor.
+ * The whiteboard on wheels everyone draws on together, angled into the north-west corner without
+ * covering the news display. `width` and `height` are its writing surface.
  */
-export const WHITEBOARD = { x: -16.3, z: -0.9, width: 4, height: 2.2, bottom: 0.5 } as const;
+export const WHITEBOARD = { x: -17.8, z: -12.1, rotY: Math.PI / 4, width: 3, height: 1.9, bottom: 0.62 } as const;
 
 /**
  * The bottom floor of the building is its second storey: the street, and the open garage under the
@@ -453,10 +467,10 @@ export function seatHere(key: string, onRoof: boolean): SeatPlace | undefined {
 }
 
 /**
- * The elevator: a shaft against the north wall, between the PR board and the gong, with its
+ * The elevator: a shaft against the north wall by the live market corner, with its
  * doors facing into the room. Every floor has it in the same spot, so you step out where you got in.
  */
-export const ELEVATOR = { x: 8.5, width: 2.6, depth: 2.4, wall: 0.14, doorWidth: 1.4, doorHeight: 2.4 } as const;
+export const ELEVATOR = { x: 18.8, width: 2.6, depth: 2.4, wall: 0.14, doorWidth: 1.4, doorHeight: 2.4 } as const;
 /** Where the doors are: the front of the shaft. */
 export const ELEVATOR_FRONT = FLOOR.minZ + ELEVATOR.depth;
 /** The inside of the car, where you stand to ride. */

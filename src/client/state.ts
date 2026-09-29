@@ -43,6 +43,7 @@ export function saveProfile(p: Profile) {
 }
 
 export type ViewMode = 'first' | 'third';
+export type BellSound = 'recording' | 'synth';
 
 /** The panels you can show or hide on screen, from the ☰ menu. */
 export type HudPanel = 'workers' | 'people' | 'spend' | 'limits' | 'chat' | 'floor';
@@ -56,6 +57,8 @@ export interface Settings {
   /** Office sounds, 0–1. */
   volume: number;
   muted: boolean;
+  /** Which sound the exchange bell makes in this browser. */
+  bellSound: BellSound;
   /** The lounge jukebox, 0–1, apart from the office sounds. */
   music: number;
   musicMuted: boolean;
@@ -90,13 +93,14 @@ function rememberFloor(id: string | null) {
 }
 
 export function loadSettings(): Settings {
-  const s: Settings = { view: 'first', lowPower: true, volume: 0.7, muted: false, music: 0.5, musicMuted: false, pushToTalk: false, notify: true, hud: { ...HUD_DEFAULTS }, pins: [] };
+  const s: Settings = { view: 'first', lowPower: true, volume: 0.7, muted: false, bellSound: 'recording', music: 0.5, musicMuted: false, pushToTalk: false, notify: true, hud: { ...HUD_DEFAULTS }, pins: [] };
   try {
     const saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) ?? 'null');
     if (saved?.view === 'first' || saved?.view === 'third') s.view = saved.view;
     if (typeof saved?.lowPower === 'boolean') s.lowPower = saved.lowPower;
     if (typeof saved?.volume === 'number' && Number.isFinite(saved.volume)) s.volume = Math.max(0, Math.min(1, saved.volume));
     if (typeof saved?.muted === 'boolean') s.muted = saved.muted;
+    if (saved?.bellSound === 'recording' || saved?.bellSound === 'synth') s.bellSound = saved.bellSound;
     if (typeof saved?.music === 'number' && Number.isFinite(saved.music)) s.music = Math.max(0, Math.min(1, saved.music));
     if (typeof saved?.musicMuted === 'boolean') s.musicMuted = saved.musicMuted;
     if (typeof saved?.pushToTalk === 'boolean') s.pushToTalk = saved.pushToTalk;

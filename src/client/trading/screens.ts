@@ -66,6 +66,8 @@ export abstract class Screen {
   readonly texture: THREE.CanvasTexture;
   protected canvas: HTMLCanvasElement;
   protected g: CanvasRenderingContext2D;
+  /** The same live canvas used by the 3D texture, for a readable close-up. */
+  get element(): HTMLCanvasElement { return this.canvas; }
   constructor(
     protected W: number,
     protected H: number,
@@ -895,41 +897,41 @@ export function accountRow(g: CanvasRenderingContext2D, x: number, y: number, w:
 /** The tape that runs the length of the wall. It scrolls with the clock, so every screen agrees where it is. */
 export class TickerStrip extends Screen {
   constructor() {
-    super(2048, 128);
+    super(4096, 64);
   }
   draw(s: TradingSnapshot, _role: FloorRole, now: number) {
     const g = this.g;
     g.fillStyle = '#080c16';
     g.fillRect(0, 0, this.W, this.H);
     g.fillStyle = INK.warn;
-    g.fillRect(0, 0, this.W, 4);
-    g.fillRect(0, this.H - 4, this.W, 4);
-    g.font = `900 58px ${MONO}`;
+    g.fillRect(0, 0, this.W, 2);
+    g.fillRect(0, this.H - 2, this.W, 2);
+    g.font = `900 39px ${MONO}`;
     const cells: { label: string; ink: string; price: string; changePct: number }[] = [
       ...s.quotes.map((q) => ({ label: q.symbol, ink: q.ink, price: fmt(q.last, q.decimals), changePct: q.changePct })),
       ...s.context.map((c) => ({ label: c.id, ink: '#a7b4d4', price: fmt(c.last, c.decimals), changePct: c.changePct })),
     ];
     const bell = bellText(s);
     const texts = cells.map((c) => `${c.label}  ${c.price}  ${c.changePct >= 0 ? '▲' : '▼'} ${pct(c.changePct)}`);
-    const gapPx = 110;
+    const gapPx = 90;
     const widths = [...texts.map((t) => g.measureText(t).width + gapPx), g.measureText(bell).width + gapPx];
     const total = widths.reduce((a, b) => a + b, 0);
-    const offset = ((now / 1000) * 110) % total;
+    const offset = ((now / 1000) * 85) % total;
     for (let rep = -1; rep < Math.ceil(this.W / total) + 1; rep++) {
       let x = rep * total - offset;
       cells.forEach((c, i) => {
         g.fillStyle = c.ink;
-        g.fillText(c.label, x, 82);
+        g.fillText(c.label, x, 46);
         const lw = g.measureText(`${c.label}  `).width;
         g.fillStyle = INK.text;
-        g.fillText(c.price, x + lw, 82);
+        g.fillText(c.price, x + lw, 46);
         const pw = g.measureText(`${c.price}  `).width;
         g.fillStyle = tone(c.changePct);
-        g.fillText(`${c.changePct >= 0 ? '▲' : '▼'} ${pct(c.changePct)}`, x + lw + pw, 82);
+        g.fillText(`${c.changePct >= 0 ? '▲' : '▼'} ${pct(c.changePct)}`, x + lw + pw, 46);
         x += widths[i]!;
       });
       g.fillStyle = INK.warn;
-      g.fillText(bell, x, 82);
+      g.fillText(bell, x, 46);
     }
   }
 }

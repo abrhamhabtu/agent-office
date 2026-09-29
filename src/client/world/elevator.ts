@@ -3,12 +3,12 @@ import { ELEVATOR, ELEVATOR_CAR, ELEVATOR_FRONT, FLOOR, WALL_HEIGHT } from '../.
 import { mesh, roundedBox, textPlane, toon } from './toon';
 import type { Collider, Interactable } from './office';
 
-// The elevator: a steel shaft against the north wall, doors facing into the room. Every floor has
+// The elevator: a graphite shaft at the live market corner, doors facing into the room. Every floor has
 // it in the same place; riding it swaps the floor around you while the doors are shut.
 
-const STEEL = '#b8c1cc';
-const STEEL_DARK = '#8d99ae';
-const BRASS = '#e9b949';
+const STEEL = '#8798a8';
+const STEEL_DARK = '#293b4f';
+const ACCENT = '#64dfd2';
 
 export interface Elevator {
   group: THREE.Group;
@@ -37,7 +37,7 @@ export function buildElevator(): Elevator {
   const midZ = (back + front) / 2;
   const steel = toon(STEEL);
   const steelDark = toon(STEEL_DARK);
-  const brass = toon(BRASS);
+  const accent = toon(ACCENT, { emissive: '#1c8e89' });
 
   // Side walls, the whole height of the room.
   for (const sx of [minX + wall / 2, maxX - wall / 2]) {
@@ -55,18 +55,33 @@ export function buildElevator(): Elevator {
   }
   const header = WALL_HEIGHT - doorHeight;
   group.add(mesh(new THREE.BoxGeometry(doorWidth, header, wall), steel, x, doorHeight + header / 2, front - wall / 2));
-  // A brass frame round the doorway, and a kick plate along the bottom of the shaft.
-  const frameT = 0.08;
-  group.add(mesh(new THREE.BoxGeometry(doorWidth + frameT * 2, frameT, 0.05), brass, x, doorHeight + frameT / 2, front + 0.02, false));
-  for (const sx of [-1, 1]) group.add(mesh(new THREE.BoxGeometry(frameT, doorHeight, 0.05), brass, x + sx * (doorWidth / 2 + frameT / 2), doorHeight / 2, front + 0.02, false));
-  group.add(mesh(new THREE.BoxGeometry(width + 0.02, 0.25, wall + 0.04), steelDark, x, 0.125, front - wall / 2, false));
+  // A recessed illuminated portal and a low kick plate keep the tall shaft visually light.
+  const frameT = 0.045;
+  group.add(mesh(new THREE.BoxGeometry(doorWidth + frameT * 2, frameT, 0.05), accent, x, doorHeight + frameT / 2, front + 0.02, false));
+  for (const sx of [-1, 1]) group.add(mesh(new THREE.BoxGeometry(frameT, doorHeight, 0.05), accent, x + sx * (doorWidth / 2 + frameT / 2), doorHeight / 2, front + 0.02, false));
+  group.add(mesh(new THREE.BoxGeometry(width + 0.02, 0.15, wall + 0.04), steelDark, x, 0.075, front - wall / 2, false));
+  for (const sx of [-1, 1]) {
+    group.add(mesh(new THREE.BoxGeometry(0.035, WALL_HEIGHT - 0.7, 0.035), toon('#6a798c'), x + sx * (width / 2 - 0.12), WALL_HEIGHT / 2, front + 0.025, false));
+  }
+  // Two chamfered cheeks and a floating canopy turn the square shaft into a slim corner portal.
+  // They sit outside the moving doors, so the car and its shared floor geometry stay aligned.
+  for (const side of [-1, 1]) {
+    const cheek = mesh(roundedBox(0.38, 3.35, 0.08, 0.035), steelDark, x + side * (doorWidth / 2 + 0.3), 1.78, front + 0.12, false);
+    cheek.rotation.y = -side * 0.32;
+    group.add(cheek);
+    const edge = mesh(new THREE.BoxGeometry(0.025, 2.7, 0.035), accent, x + side * (doorWidth / 2 + 0.11), 1.55, front + 0.17, false);
+    edge.rotation.y = -side * 0.32;
+    group.add(edge);
+  }
+  group.add(mesh(roundedBox(width + 0.22, 0.14, 0.56, 0.07), steelDark, x, 3.49, front + 0.12, false));
+  group.add(mesh(new THREE.BoxGeometry(width - 0.12, 0.025, 0.03), accent, x, 3.39, front + 0.41, false));
 
   // Inside: a dark floor, a mirror on the back wall, handrails, a strip light over the doors.
   const inW = ELEVATOR_CAR.maxX - ELEVATOR_CAR.minX;
   const inD = ELEVATOR_CAR.maxZ - ELEVATOR_CAR.minZ;
-  const carFloor = mesh(new THREE.BoxGeometry(inW, 0.02, inD), toon('#3d405b'), x, 0.012, (ELEVATOR_CAR.minZ + ELEVATOR_CAR.maxZ) / 2, false);
+  const carFloor = mesh(new THREE.BoxGeometry(inW, 0.02, inD), toon('#253244'), x, 0.012, (ELEVATOR_CAR.minZ + ELEVATOR_CAR.maxZ) / 2, false);
   group.add(carFloor);
-  for (let i = 1; i < 4; i++) group.add(mesh(new THREE.BoxGeometry(inW, 0.024, 0.03), toon('#565a75'), x, 0.013, ELEVATOR_CAR.minZ + (i * inD) / 4, false));
+  for (let i = 1; i < 4; i++) group.add(mesh(new THREE.BoxGeometry(inW, 0.024, 0.025), toon('#516276'), x, 0.013, ELEVATOR_CAR.minZ + (i * inD) / 4, false));
   const mirror = mesh(new THREE.PlaneGeometry(inW - 0.3, 1.5), new THREE.MeshBasicMaterial({ color: '#cfe8f5' }), x, 1.55, back + 0.02, false);
   group.add(mirror);
   for (const [gx, gw] of [
@@ -78,7 +93,7 @@ export function buildElevator(): Elevator {
     group.add(glint);
   }
   const rail = (len: number, px: number, pz: number, alongX: boolean) => {
-    const r = mesh(new THREE.CylinderGeometry(0.025, 0.025, len, 8), brass, px, 0.95, pz, false);
+    const r = mesh(new THREE.CylinderGeometry(0.025, 0.025, len, 8), toon('#9aabb9'), px, 0.95, pz, false);
     r.rotation.z = alongX ? Math.PI / 2 : 0;
     r.rotation.x = alongX ? 0 : Math.PI / 2;
     group.add(r);
@@ -86,14 +101,14 @@ export function buildElevator(): Elevator {
   rail(inW - 0.2, x, back + 0.08, true);
   rail(inD - 0.5, ELEVATOR_CAR.minX + 0.06, midZ - 0.1, false);
   rail(inD - 0.5, ELEVATOR_CAR.maxX - 0.06, midZ - 0.1, false);
-  group.add(mesh(new THREE.BoxGeometry(inW - 0.2, 0.06, 0.16), toon('#fff7d6', { emissive: '#ffe08a' }), x, doorHeight + 0.35, front - wall - 0.1, false));
+  group.add(mesh(new THREE.BoxGeometry(inW - 0.2, 0.045, 0.12), toon('#e1faf5', { emissive: '#74eadb' }), x, doorHeight + 0.35, front - wall - 0.1, false));
 
   // The button panel inside, by the doors on the right as you face out (the west wall).
   const panelIn = new THREE.Group();
   panelIn.add(mesh(roundedBox(0.04, 0.7, 0.32, 0.02), steelDark, 0, 0, 0, false));
   for (let row = 0; row < 4; row++) {
     for (const col of [-1, 1]) {
-      const b = mesh(new THREE.CylinderGeometry(0.035, 0.035, 0.02, 12), toon('#fff7d6', { emissive: row === 0 && col === 1 ? '#ffb400' : '#6c7288' }), -0.03, 0.22 - row * 0.15, col * 0.07, false);
+      const b = mesh(new THREE.CylinderGeometry(0.035, 0.035, 0.02, 12), toon('#dce8eb', { emissive: row === 0 && col === 1 ? ACCENT : '#40536a' }), -0.03, 0.22 - row * 0.15, col * 0.07, false);
       b.rotation.z = Math.PI / 2;
       panelIn.add(b);
     }
@@ -104,9 +119,9 @@ export function buildElevator(): Elevator {
 
   // The call button outside, on the right-hand pillar.
   const call = new THREE.Group();
-  call.add(mesh(roundedBox(0.2, 0.36, 0.04, 0.02), brass, 0, 0, 0, false));
+  call.add(mesh(roundedBox(0.2, 0.36, 0.04, 0.02), steelDark, 0, 0, 0, false));
   const arrow = (up: boolean) => {
-    const a = mesh(new THREE.ConeGeometry(0.045, 0.06, 3), toon('#fff7d6', { emissive: up ? '#7cf29a' : '#6c7288' }), 0, up ? 0.07 : -0.07, 0.03, false);
+    const a = mesh(new THREE.ConeGeometry(0.045, 0.06, 3), toon('#e1faf5', { emissive: up ? ACCENT : '#40536a' }), 0, up ? 0.07 : -0.07, 0.03, false);
     if (!up) a.rotation.z = Math.PI;
     call.add(a);
   };
@@ -118,11 +133,11 @@ export function buildElevator(): Elevator {
   // The doors: two steel panels that slide apart behind the pillars.
   const half = doorWidth / 2 + 0.02;
   const doorZ = front - wall - 0.03;
-  const doorMat = toon('#d9dee4');
+  const doorMat = toon('#b4c3ce');
   const doors = [-1, 1].map((side) => {
     const d = new THREE.Group();
     d.add(mesh(new THREE.BoxGeometry(half, doorHeight - 0.02, 0.05), doorMat, 0, 0, 0));
-    // A seam line and a porthole of light, so they read as elevator doors from across the room.
+    // Fine horizontal breaks keep the doors legible from across the room.
     d.add(mesh(new THREE.BoxGeometry(0.02, doorHeight - 0.1, 0.055), steelDark, (-side * half) / 2 + side * 0.01, 0, 0, false));
     d.add(mesh(new THREE.BoxGeometry(half - 0.2, 0.05, 0.055), steelDark, 0, 0.35, 0, false));
     d.position.set(x + (side * half) / 2, doorHeight / 2, doorZ);
@@ -141,11 +156,11 @@ export function buildElevator(): Elevator {
       sign.material.dispose();
       sign.geometry.dispose();
     }
-    sign = textPlane(text, { bg: '#2b2d42', color: '#fffaf3', size: 64, border: '#fffaf3' });
+    sign = textPlane(text, { bg: STEEL_DARK, color: '#e8f8f5', size: 64, border: ACCENT });
     const { width: sw } = sign.geometry.parameters;
-    // As big as fits over the doors.
-    sign.scale.multiplyScalar(Math.min(1.6, (width + 0.6) / sw));
-    sign.position.set(x, doorHeight + 0.75, front + 0.03);
+    // Center the floor name within the portal, clear of the angled cheeks and canopy.
+    sign.scale.multiplyScalar(Math.min(1.25, (doorWidth + 0.18) / sw));
+    sign.position.set(x, doorHeight + 0.65, front + 0.05);
     group.add(sign);
   };
 
