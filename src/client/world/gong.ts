@@ -3,8 +3,8 @@ import { GONG } from '../../shared/layout';
 import { mesh, roundedBox, textPlane, toon, toonUnique } from './toon';
 import type { Collider, Interactable } from './office';
 
-// The gong: a brass disc hung in a red lacquered frame, next to the PR board. It rings when a pull
-// request merges, and anyone can walk up and hit it.
+// The opening bell: a brass bell hung in a red lacquered frame, next to the trade proposals board. It rings at
+// 06:30 PT when the market opens, and at the 13:00 close, and anyone can walk up and ring it.
 
 const BRASS = '#e9b949';
 const LACQUER = '#b23a48';
@@ -43,7 +43,7 @@ export function buildGong(): Gong {
     group.add(tip);
   }
   group.add(mesh(new THREE.BoxGeometry(width, 0.07, 0.08), ink, 0, height - 0.32, 0, false));
-  const plaque = textPlane('🎉 Merge gong', { bg: '#fffaf3', size: 48 });
+  const plaque = textPlane('🔔 Opening bell', { bg: '#fffaf3', size: 48 });
   plaque.scale.multiplyScalar(0.5);
   plaque.position.set(0, height - 0.08, 0.1);
   group.add(plaque);
@@ -60,14 +60,21 @@ export function buildGong(): Gong {
   const disc = new THREE.Group();
   disc.position.y = -drop;
   pivot.add(disc);
-  disc.add(mesh(new THREE.CylinderGeometry(R, R, 0.05, 40).rotateX(Math.PI / 2), brass, 0, 0, 0));
-  disc.add(mesh(new THREE.TorusGeometry(R, 0.04, 8, 40), brass, 0, 0, 0, false));
-  disc.add(mesh(new THREE.TorusGeometry(R * 0.55, 0.018, 6, 32), toon('#c9952c'), 0, 0, 0.03, false));
-  const boss = mesh(new THREE.SphereGeometry(0.16, 16, 12), brass, 0, 0, 0.02, false);
-  boss.scale.z = 0.45;
-  disc.add(boss);
+  // A bell: a lathed brass profile, flared at the lip, with a clapper hanging inside and a gold crown.
+  const profile = [[0.0, 0.62], [0.1, 0.6], [0.2, 0.55], [0.3, 0.44], [0.38, 0.3], [0.42, 0.14], [0.46, 0.0], [0.56, -0.16], [0.64, -0.3], [0.7, -0.38], [0.72, -0.42], [0.66, -0.44], [0.6, -0.4]].map(([x, y]) => new THREE.Vector2(x! * 0.86, y! * 1.05));
+  const bell = new THREE.Mesh(new THREE.LatheGeometry(profile, 36), brass);
+  bell.castShadow = true;
+  disc.add(bell);
+  disc.add(mesh(new THREE.TorusGeometry(0.6, 0.03, 8, 36).rotateX(Math.PI / 2), toon('#c9952c'), 0, -0.44, 0, false));
+  disc.add(mesh(new THREE.TorusGeometry(0.4, 0.02, 6, 32).rotateX(Math.PI / 2), toon('#c9952c'), 0, -0.05, 0, false));
+  disc.add(mesh(new THREE.SphereGeometry(0.1, 12, 10), toon('#ffd166'), 0, 0.68, 0, false));
+  const clapper = new THREE.Group();
+  clapper.position.set(0, 0.35, 0);
+  clapper.add(mesh(new THREE.CylinderGeometry(0.012, 0.012, 0.6, 5), ink, 0, -0.3, 0, false));
+  clapper.add(mesh(new THREE.SphereGeometry(0.07, 10, 8), toon('#8a5a3b'), 0, -0.62, 0, false));
+  disc.add(clapper);
   for (const sx of [-1, 1]) {
-    const cord = mesh(new THREE.CylinderGeometry(0.012, 0.012, drop - R + 0.08, 5), ink, sx * 0.22, -(drop - R) / 2, 0, false);
+    const cord = mesh(new THREE.CylinderGeometry(0.012, 0.012, drop - R + 0.08, 5), ink, sx * 0.22, -(drop - R) / 2 - 0.05, 0, false);
     cord.rotation.z = sx * 0.2;
     pivot.add(cord);
   }
@@ -115,6 +122,7 @@ export function buildGong(): Gong {
         phase += dt * Math.PI * 2 * 0.85;
         swing *= Math.exp(-dt * 0.9);
         pivot.rotation.x = swing * Math.sin(phase);
+        clapper.rotation.z = swing * 3 * Math.sin(phase * 2.3);
         disc.rotation.z = swing * 0.35 * Math.sin(phase * 1.6);
         // The metal shivers while it rings.
         disc.position.z = Math.sin(phase * 40) * 0.012 * glow;
@@ -123,6 +131,7 @@ export function buildGong(): Gong {
         pivot.rotation.x = 0;
         disc.rotation.z = 0;
         disc.position.z = 0;
+        clapper.rotation.z = 0;
       }
       glow *= Math.exp(-dt * 2.5);
       brass.emissiveIntensity = glow * 0.55;

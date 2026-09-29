@@ -1,4 +1,6 @@
 import http from 'node:http';
+import { actOnProposal, snapshot as tradingSnapshot, togglePlaybook } from './trading.js';
+import type { ProposalAction } from '../shared/trading.js';
 import https from 'node:https';
 import { randomBytes } from 'node:crypto';
 import { createReadStream, existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
@@ -694,6 +696,16 @@ export async function startServer(cfg: Config) {
         return;
       }
       if (p === '/api/whoami') return send(res, 200, { ok: true, me: meOf(session.account?.id) });
+      if (p === '/api/trading/snapshot' && req.method === 'GET') return send(res, 200, tradingSnapshot());
+      if (p === '/api/trading/playbook' && req.method === 'POST') {
+        const body = JSON.parse((await readBody(req, 4096)) || '{}') as { id?: unknown };
+        return typeof body.id === 'string' && togglePlaybook(body.id) ? send(res, 200, tradingSnapshot()) : send(res, 400, { error: 'No such item' });
+      }
+      if (p === '/api/trading/proposal' && req.method === 'POST') {
+        const body = JSON.parse((await readBody(req, 4096)) || '{}') as { id?: unknown; action?: unknown };
+        const why = actOnProposal(String(body.id), String(body.action) as ProposalAction);
+        return why ? send(res, 400, { error: why }) : send(res, 200, tradingSnapshot());
+      }
       if (p === '/api/agents/opencode/models' && req.method === 'GET') {
         try {
           return send(res, 200, { models: await openCodeModels.get() });

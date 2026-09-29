@@ -51,6 +51,10 @@ import { openAsk } from './ui/ask';
 import { openTeam, routeTeamMessage } from './ui/team';
 import { openAccounts, routeAccountsMessage } from './ui/accounts';
 import { openServices } from './ui/services';
+import { floorRole } from '../shared/trading';
+import { trading } from './trading/feed';
+import { openTrading, type PanelTab } from './trading/panel';
+import { ConnectorsBoard, MarketMap, NewsBoard, PlaybookBoard, ProposalsBoard, TickerStrip, TicketsBoard, bellText } from './trading/screens';
 import { openQueue } from './ui/queue';
 import { openUpgrade, restarting, showRestarting, showUpgraded } from './ui/upgrade';
 import { openHelp, renderCaffeine, renderChat, renderPeople, renderWorkers, updateSpeaking } from './ui/hud';
@@ -131,9 +135,9 @@ noOutline(holiday.group);
 // ---- Board agents -------------------------------------------------------------------------------
 /** What each board agent is for: its board's icon, what it offers on the card over its head, and an example ask. */
 const STATION_INFO: Record<StationKind, { icon: string; offer: string; does: string; example: string }> = {
-  issues: { icon: '📌', offer: 'Ask me about issues', does: 'I file, find, triage, label and close them', example: 'File an issue: the dog walks straight through the jukebox' },
-  pulls: { icon: '🔀', offer: 'Ask me about PRs', does: 'I sum up, review, comment on and merge them', example: 'Review the newest PR and tell me if it’s ready to merge' },
-  queue: { icon: '📋', offer: 'Ask me to queue work', does: 'I turn it into tasks for fresh workers', example: 'Queue every open bug issue, most important first' },
+  issues: { icon: '📰', offer: 'Ask me about the news', does: 'I sum up catalysts and flag what moves the tape', example: 'What high-impact news is left before 9:00 PT?' },
+  pulls: { icon: '🎯', offer: 'Ask me about setups', does: 'I stress-test the VWAP and S/R proposals', example: 'Walk me through the MNQ VWAP setup and what would invalidate it' },
+  queue: { icon: '📋', offer: 'Ask me about the plan', does: 'I run the playbook and queue the code work', example: 'What is left on the playbook before the open?' },
 };
 /** The board agents waiting by their boards before anyone has asked them anything (see buildKiosk). */
 const idleAgents = STATIONS.map((def) => {
@@ -193,6 +197,60 @@ const servicesTex = new ServicesBoardTexture();
 mountBoard(office.boardMeshes.services, servicesTex.texture, () => servicesTex.render(store.services.items, store.workers), ['services', 'workers']);
 const queueTex = new QueueBoardTexture();
 mountBoard(office.boardMeshes.queue, queueTex.texture, () => queueTex.render(store.queue, store.workers), ['queue', 'workers']);
+
+// ---- The trading floors ----------------------------------------------------------------------------
+// The office's boards show the market desk instead of GitHub: news on the wire, the day's setups, the playbook,
+// the connectors, and the market map on the TV. One snapshot feeds every screen (see trading/feed.ts).
+const tradingRole = () => floorRole(store.currentFloor()?.name);
+const newsScreen = new NewsBoard();
+const proposalsScreen = new ProposalsBoard();
+const ticketsScreen = new TicketsBoard();
+const playbookScreen = new PlaybookBoard();
+const connectorsScreen = new ConnectorsBoard();
+const marketMap = new MarketMap();
+const tape = new TickerStrip();
+function paintTrading() {
+  const role = tradingRole();
+  const snap = trading.snap;
+  const on = (mesh: THREE.Mesh, screen: { texture: THREE.Texture; render(s: typeof snap, r: typeof role): void }) => {
+    const mat = mesh.material as THREE.MeshBasicMaterial;
+    if (mat.map !== screen.texture) {
+      mat.map = screen.texture;
+      mat.needsUpdate = true;
+    }
+    screen.render(snap, role);
+  };
+  on(office.boardMeshes.issues, newsScreen);
+  on(office.boardMeshes.pulls, role === 'desk' ? ticketsScreen : proposalsScreen);
+  on(office.boardMeshes.queue, playbookScreen);
+  on(office.boardMeshes.services, connectorsScreen);
+  if (!tvStream) {
+    tvMat.map = marketMap.texture;
+    tvMat.needsUpdate = true;
+  }
+  marketMap.render(snap, role);
+}
+// The tape runs the length of the north wall, above the boards.
+{
+  const strip = new THREE.Mesh(new THREE.PlaneGeometry(34, 34 * (128 / 2048)), new THREE.MeshBasicMaterial({ map: tape.texture, toneMapped: false }));
+  strip.position.set(0, 4.85, FLOOR.minZ + 0.07);
+  office.group.add(strip);
+}
+/** The bell rings for everyone at the open and the close: the next bell flips when one passes. */
+let lastBell: 'open' | 'close' | null = null;
+trading.on(() => {
+  paintTrading();
+  const s = trading.snap;
+  if (!s) return;
+  const kind = s.session.nextBell.kind;
+  if (lastBell && kind !== lastBell && !s.session.weekend) {
+    gongRang(lastBell === 'open' ? 'queue' : 'hit');
+    toast(lastBell === 'open' ? '🔔 The market is open' : '🔔 The session is closed — Ledger is grading the day');
+  }
+  lastBell = kind;
+});
+store.on('floors', paintTrading);
+trading.start();
 // The machine monitor on the west wall.
 const machineTex = new MachineTexture();
 mountBoard(office.machineScreen, machineTex.texture, () => machineTex.render(store.machine), ['machine']);
@@ -1719,9 +1777,10 @@ function interact(target: Interactable | null, key: DeskKey, note = aimedNote) {
   if (note && key === 'O') return openIssue(note, net, boardActions());
   if (key !== 'E') return;
   if (target.kind === 'elevator') showElevator();
-  else if (target.kind === 'issues' || target.kind === 'pulls') openBoard(target.kind, net, boardActions());
-  else if (target.kind === 'services') openServices();
-  else if (target.kind === 'queue') showQueue();
+  else if (target.kind === 'issues') openTrading(tradingRole(), 'news');
+  else if (target.kind === 'pulls') openTrading(tradingRole(), tradingRole() === 'desk' ? 'tickets' : 'proposals');
+  else if (target.kind === 'services') openTrading(tradingRole(), 'connectors');
+  else if (target.kind === 'queue') openTrading(tradingRole(), 'playbook');
   else if (target.kind === 'tv') watchShare();
   else if (target.kind === 'jukebox') showJukebox();
   else if (target.kind === 'bookshelf') showBookshelf();
@@ -2391,15 +2450,15 @@ function hintFor(it: Interactable): Hint {
     case 'station':
       return it.deskId ? stationHint(it.deskId) : { k: '', parts: [] };
     case 'issues':
-      if (aimedNote) return { k: String(aimedNote.number), parts: [title(clip(`📌 #${aimedNote.number} ${aimedNote.title}`, 60)), key('E', 'Take it'), key('O', 'Read it')] };
-      return issuesTex.hasNotes ? { k: 'notes', parts: [title('📌 Issues board'), key('E', 'Open'), aside('or point at a note to take it')] } : board('📌 Issues board');
+      return board('📰 News & catalysts');
     case 'pulls':
-      return board('🔀 Pull request board');
+      return board(tradingRole() === 'desk' ? '🎫 Trade tickets' : '🎯 Trade proposals');
     case 'services':
-      return board('🌐 Services board');
+      return board('🔌 Connectors');
     case 'queue': {
-      const n = store.queue.tasks.filter((t) => t.status !== 'done').length;
-      return { k: String(n), parts: [title(`📋 Task queue${n ? ` · ${n}` : ''}`), key('E', 'Open')] };
+      const p = trading.snap?.playbook;
+      const left = p ? p.filter((x) => !x.done).length : 0;
+      return { k: String(left), parts: [title(`📋 Playbook${left ? ` · ${left} to do` : ''}`), key('E', 'Open')] };
     }
     case 'tv': {
       const any = currentShares().length > 0;
@@ -2412,7 +2471,7 @@ function hintFor(it: Interactable): Hint {
     case 'smoke':
       return { k: String(smokeBreakUntil > 0), parts: [title('🚬 Ashtray'), key('E', smokeBreakUntil ? 'Stub it out' : 'Take a smoke break')] };
     case 'gong':
-      return { k: '', parts: [title('🎉 Merge gong'), aside('rings when a PR merges'), key('E', 'Bang it')] };
+      return { k: String(trading.tick > 0 && (trading.snap?.session.nextBell.kind ?? '')), parts: [title('🔔 Opening bell'), aside(trading.snap ? bellText(trading.snap) : 'rings at 06:30 and 13:00 PT'), key('E', 'Ring it')] };
     case 'golf': {
       const other = teeTaken();
       if (other) return { k: `taken|${other}`, parts: [title('⛳ Golf tee'), aside(`🏌️ ${clip(other, 24)} is teeing off`)] };
@@ -3070,7 +3129,7 @@ function refreshShares() {
     tvStream = stream;
     tvVideo.srcObject = stream;
     if (stream) void tvVideo.play().catch(() => {});
-    tvMat.map = stream ? tvTexture : tvIdle;
+    tvMat.map = stream ? tvTexture : marketMap.texture;
     tvMat.needsUpdate = true;
   }
   const box = $('shares');
@@ -3107,10 +3166,10 @@ const waitingNow = () => waitingInOrder(store.workers.values());
 const noMedia = () => (window.isSecureContext ? undefined : 'Voice and screen sharing need HTTPS or localhost — use a TLS proxy, --self-signed, or an SSH tunnel');
 const hud = mountHud(
   [
-    { id: 'issues', icon: '📌', label: 'Issues', section: 'Open', count: () => store.issues.items.filter((i) => i.state === 'OPEN').length, run: () => openBoard('issues', net, boardActions()) },
-    { id: 'pulls', icon: '🔀', label: 'Pull requests', section: 'Open', count: () => store.pulls.items.filter((p) => p.state === 'OPEN').length, run: () => openBoard('pulls', net, boardActions()) },
-    { id: 'queue', icon: '📋', label: 'Task queue', section: 'Open', count: () => store.queue.tasks.filter((t) => t.status !== 'done').length, title: () => 'Issues and tasks waiting for a worker', run: showQueue },
-    { id: 'services', icon: '🌐', label: 'Services', section: 'Open', count: () => store.services.items.length, title: () => 'Web servers the workers are running', run: () => openServices() },
+    { id: 'issues', icon: '📰', label: 'News', section: 'Open', count: () => trading.snap?.news.filter((n) => n.impact === 'high').length ?? 0, title: () => 'News and catalysts', run: () => openTrading(tradingRole(), 'news') },
+    { id: 'pulls', icon: '🎯', label: 'Proposals', section: 'Open', count: () => trading.snap?.proposals.filter((p) => p.stage === 'ready').length ?? 0, title: () => 'Setups from Vex and Ledge', run: () => openTrading(tradingRole(), tradingRole() === 'desk' ? 'tickets' : 'proposals') },
+    { id: 'queue', icon: '📋', label: 'Playbook', section: 'Open', count: () => trading.snap?.playbook.filter((p) => !p.done).length ?? 0, title: () => "Today's checklist", run: () => openTrading(tradingRole(), 'playbook') },
+    { id: 'services', icon: '🔌', label: 'Connectors', section: 'Open', title: () => 'TradingView, market data and the rest', run: () => openTrading(tradingRole(), 'connectors') },
     { id: 'whiteboard', icon: '📝', label: 'Whiteboard', section: 'Open', title: () => 'Draw together, live', run: () => openWhiteboard(net) },
     // Up on the top bar while a meeting is on: what's being worked through in the meeting room.
     {
@@ -3276,6 +3335,7 @@ const headPos = new THREE.Vector3();
 /** Last frame went through the drunk vision. */
 let drunkVisionOn = false;
 
+let frameCount = 0;
 function frame(ts: number) {
   frameRequest = undefined;
   if (document.hidden) return;
@@ -3303,6 +3363,7 @@ function frame(ts: number) {
   // Drinks from the rooftop bar: a glass in hand, and the world swaying.
   const drunk = drinking(now);
 
+  if (trading.snap && (frameCount++ & 1) === 0) tape.render(trading.snap, tradingRole());
   walkTick(now);
   player.update(dt);
   // Walked into a pole's hole: you grab the pole on your way down it.

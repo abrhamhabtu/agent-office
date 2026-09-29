@@ -1,6 +1,12 @@
 import * as THREE from 'three';
 import { FLAG_BOLD, FLAG_DIM, FLAG_INVERSE, RGB_FLAG, type Run } from '../../shared/protocol';
 import { mesh, roundedBox, toon } from './toon';
+import { SYMBOLS } from '../../shared/trading';
+import { trading } from '../trading/feed';
+import { paintLaptopChart, paintLaptopTape } from '../trading/screens';
+
+/** Hands each new laptop the next contract to chart, so a floor's monitors cover MNQ, MES, MBT and BTC. */
+let nextSymbol = 0;
 
 export const TERM_THEME = {
   background: '#1e1f2e',
@@ -159,6 +165,8 @@ export class Laptop {
   private paintedAt = 0;
   private openT = 0;
   private placeholder = 'booting…';
+  private drawnTick = -1;
+  private symbol = SYMBOLS[nextSymbol++ % SYMBOLS.length]!;
 
   constructor() {
     this.canvas.width = 1024;
@@ -205,10 +213,17 @@ export class Laptop {
     const version = screen ? screen.version : -1;
     const now = performance.now();
     const every = distance < 6 ? 150 : distance < 14 ? 600 : 2000;
-    if (version !== this.drawnVersion && (now - this.paintedAt > every || this.drawnVersion < 0)) {
+    // The tape moves on its own: a laptop redraws when the prices do, as often as its distance allows.
+    const stale = version !== this.drawnVersion || (trading.tick !== this.drawnTick && trading.snap !== null);
+    if (stale && (now - this.paintedAt > every || this.drawnVersion < 0)) {
       this.paintedAt = now;
       this.drawnVersion = version;
-      paintScreen(this.ctx, this.canvas.width, this.canvas.height, screen, this.placeholder, 22);
+      this.drawnTick = trading.tick;
+      const { width, height } = this.canvas;
+      // Nothing on the terminal yet: the chart. Otherwise the terminal, with the four tickers along its foot.
+      if (!screen && trading.snap) paintLaptopChart(this.ctx, width, height, trading.snap, this.symbol);
+      else paintScreen(this.ctx, width, height, screen, this.placeholder, 22);
+      if (screen) paintLaptopTape(this.ctx, width, height, trading.snap);
       this.texture.needsUpdate = true;
     }
   }

@@ -25,6 +25,9 @@ const DESK_WIDTH = 2.2;
 const DESK_DEPTH = 1.1;
 export const DESK_SIZE = { width: DESK_WIDTH, depth: DESK_DEPTH, height: 0.78 } as const;
 
+/** The first desks are seats with a job: who sits where on the trading floor. */
+const DESK_LABELS = ['Scout · tape', 'Vex · VWAP', 'Ledge · S/R', 'Ledger · paper book', 'Quill · backtests', 'Bulwark · risk', 'Tick · tickets', 'Overflow'];
+
 function buildDesks(): DeskDef[] {
   const desks: DeskDef[] = [];
   const clusterX = [-10.5, -1.5];
@@ -41,7 +44,7 @@ function buildDesks(): DeskDef[] {
         [pod.front, 0],
       ] as const) {
         for (const dx of [-DESK_WIDTH / 2, DESK_WIDTH / 2]) {
-          desks.push({ id: `desk-${n}`, x: cx + dx, z, rotY, label: `Desk ${n}` });
+          desks.push({ id: `desk-${n}`, x: cx + dx, z, rotY, label: DESK_LABELS[n - 1] ?? `Desk ${n}` });
           n++;
         }
       }
@@ -89,19 +92,19 @@ export type StationKind = 'issues' | 'pulls' | 'queue';
  */
 export const STATIONS: DeskDef[] = [
   // Between the plant in the north-west corner and the Issues board.
-  { id: 'station-issues', station: 'issues', x: -15.6, z: FLOOR.minZ + 1.3, rotY: Math.PI, label: 'Issues board' },
+  { id: 'station-issues', station: 'issues', x: -15.6, z: FLOOR.minZ + 1.3, rotY: Math.PI, label: 'News board' },
   // Between the task queue and the PR board.
-  { id: 'station-pulls', station: 'pulls', x: 0, z: FLOOR.minZ + 1.3, rotY: Math.PI, label: 'PR board' },
+  { id: 'station-pulls', station: 'pulls', x: 0, z: FLOOR.minZ + 1.3, rotY: Math.PI, label: 'Proposals board' },
   // Between the Issues board and the task queue.
-  { id: 'station-queue', station: 'queue', x: -7.8, z: FLOOR.minZ + 1.3, rotY: Math.PI, label: 'Task queue' },
+  { id: 'station-queue', station: 'queue', x: -7.8, z: FLOOR.minZ + 1.3, rotY: Math.PI, label: 'Playbook board' },
 ];
 /** A board agent's kiosk: its top, and how far behind its middle (toward the wall) the agent stands. */
 export const KIOSK = { width: 0.8, depth: 0.5, height: 0.55, stand: 0.55 } as const;
 /** Each board agent's name and its color, the same whenever it's hired. */
 export const STATION_AGENT: Record<StationKind, { name: string; color: string }> = {
-  issues: { name: 'Issues agent', color: '#ef476f' },
-  pulls: { name: 'PR agent', color: '#118ab2' },
-  queue: { name: 'Queue agent', color: '#06d6a0' },
+  issues: { name: 'Wire', color: '#4ecdc4' },
+  pulls: { name: 'Setups', color: '#00bbf9' },
+  queue: { name: 'Marshal', color: '#ffd166' },
 };
 
 /** The upstairs office: a glass-walled loft on posts in the south-east corner, looking down on the desks. */
@@ -181,11 +184,11 @@ export const BOARDS = {
   // Side by side along the north wall, the way work goes: an issue goes on the task queue (the
   // whiteboard in the middle), and its worker's pull request comes out the other side. Each has its
   // board agent's kiosk just west of it (see STATIONS).
-  issues: { x: -11.7, y: 2.1, z: FLOOR.minZ + 0.08, rotY: 0, width: 6, height: 3, label: 'Issues' },
-  queue: { x: -3.9, y: 2.1, z: FLOOR.minZ + 0.08, rotY: 0, width: 6, height: 3, label: '📋 Task queue' },
-  pulls: { x: 3.9, y: 2.1, z: FLOOR.minZ + 0.08, rotY: 0, width: 6, height: 3, label: 'Pull Requests' },
+  issues: { x: -11.7, y: 2.1, z: FLOOR.minZ + 0.08, rotY: 0, width: 6, height: 3, label: '📰 News' },
+  queue: { x: -3.9, y: 2.1, z: FLOOR.minZ + 0.08, rotY: 0, width: 6, height: 3, label: '📋 Playbook' },
+  pulls: { x: 3.9, y: 2.1, z: FLOOR.minZ + 0.08, rotY: 0, width: 6, height: 3, label: '🎯 Trade proposals' },
   // East wall, north of the lounge TV.
-  services: { x: FLOOR.maxX - 0.08, y: 2.1, z: -8.2, rotY: -Math.PI / 2, width: 6, height: 3, label: '🌐 Services' },
+  services: { x: FLOOR.maxX - 0.08, y: 2.1, z: -8.2, rotY: -Math.PI / 2, width: 6, height: 3, label: '🔌 Connectors' },
 } as const;
 
 /** The big TV on the east wall that shows whoever is screen sharing. */

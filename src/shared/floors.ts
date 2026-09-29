@@ -27,6 +27,8 @@ export const FLOOR_PALETTES: FloorPalette[] = [
   { name: 'Slate', wall: '#edf1f5', trim: '#3d5a80', floor: '#b9c3cd', floorAlt: '#aab5c0', seam: '#8d99a6' },
   { name: 'Rose', wall: '#ffeaf0', trim: '#e0567f', floor: '#eed3da', floorAlt: '#e4c1cb', seam: '#cea5b2' },
   { name: 'Teal', wall: '#e1f7f6', trim: '#1a9a9a', floor: '#c3e2de', floorAlt: '#b0d7d2', seam: '#92c3bd' },
+  // The Desk: the live-ticket floor, after dark.
+  { name: 'Night', wall: '#2b3558', trim: '#5cc8ff', floor: '#3a4468', floorAlt: '#333c5e', seam: '#232a48' },
 ];
 
 export function floorPalette(i: number): FloorPalette {

@@ -30,10 +30,11 @@ import type { Capacity } from './machine.js';
 
 type HeadlessTerminal = InstanceType<typeof headless.Terminal>;
 
+// The trading floors' desks first, in the order they're hired, then the tape's own vocabulary.
 const NAMES = [
-  'Pixel', 'Byte', 'Nibble', 'Sprocket', 'Widget', 'Gizmo', 'Bolt', 'Cosmo', 'Dot', 'Echo',
-  'Fizz', 'Glitch', 'Hopper', 'Jinx', 'Kilo', 'Lumen', 'Mochi', 'Noodle', 'Orbit', 'Pip',
-  'Quark', 'Rivet', 'Sparky', 'Tofu', 'Uno', 'Volt', 'Waffle', 'Zippy',
+  'Scout', 'Vex', 'Ledge', 'Ledger', 'Quill', 'Marshal', 'Bulwark', 'Tick',
+  'Wick', 'Candle', 'Spread', 'Basis', 'Delta', 'Gamma', 'Theta', 'Alpha',
+  'Beta', 'Sigma', 'Pivot', 'Fib', 'Renko', 'Tape', 'Print', 'Fade', 'Squeeze', 'Gap', 'Bid', 'Ask',
 ];
 const COLORS = ['#ff8a5b', '#5bc0eb', '#9bc53d', '#fde74c', '#c3423f', '#b388eb', '#f7aef8', '#72ddf7', '#ffb400', '#00a6a6'];
 

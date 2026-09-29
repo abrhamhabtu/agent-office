@@ -26,7 +26,7 @@ export interface OfficeSlide {
   colliders: Collider[];
 }
 
-/** A half-open slide with a copper shell, a silver riding surface and two supports. */
+/** A half-open playground slide: orange shell, teal riding surface, cream rims, yellow racing stripes and a soft landing mat. */
 export function buildSlide(): OfficeSlide {
   const group = new THREE.Group();
   const chute = new THREE.CatmullRomCurve3(ROUTE.map(([x, y, z]) => new THREE.Vector3(x, y, z)), false, 'centripetal');
@@ -34,9 +34,12 @@ export function buildSlide(): OfficeSlide {
   const path = new THREE.CurvePath<THREE.Vector3>();
   path.add(chute);
   path.add(new THREE.LineCurve3(chute.getPoint(1), new THREE.Vector3(-0.35, 0.02, 8.45)));
-  const metal = toon('#cbd5d8');
-  const copper = toon('#aa624b');
-  const dark = toon('#52616b');
+  // The office's own candy palette: a teal riding surface in an orange shell, with cream rolled edges.
+  const metal = toon('#4ecdc4');
+  const copper = toon('#ff8f3f');
+  const dark = toon('#fffaf3');
+  const stripe = toon('#ffd166');
+  const pink = toon('#f15bb5');
   metal.side = copper.side = THREE.DoubleSide;
   const startAngle = -Math.PI - 0.25;
   const endAngle = 0.25;
@@ -89,17 +92,38 @@ export function buildSlide(): OfficeSlide {
     group.add(mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(points), 48, 0.035, 6, false), dark, 0, 0, 0, false));
   }
   const edge = (t: number) => new THREE.CatmullRomCurve3(Array.from({ length: 17 }, (_, i) => surfacePoint(t, startAngle + (endAngle - startAngle) * i / 16, false, 0.01)));
-  for (let i = 0; i <= 10; i++) {
-    const seam = mesh(new THREE.TubeGeometry(edge(i / 10), 16, i === 0 ? 0.05 : 0.018, 6, false), i === 0 ? dark : copper, 0, 0, 0, false);
-    group.add(seam);
+  // Two yellow racing stripes down the riding surface, and a cream lip at the top where riders sit down.
+  const mid = (startAngle + endAngle) / 2;
+  for (const lane of [-0.42, 0.42]) {
+    const pts = Array.from({ length: 61 }, (_, i) => surfacePoint(0.02 + 0.9 * i / 60, mid + lane, true, 0.012));
+    group.add(mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts), 60, 0.025, 6, false), stripe, 0, 0, 0, false));
   }
+  group.add(mesh(new THREE.TubeGeometry(edge(0), 16, 0.055, 8, false), dark, 0, 0, 0, false));
 
   const colliders: Collider[] = [];
-  for (const t of [0.38, 0.7]) {
+  // Round-footed posts with cream collars, and a pink mat where the ride ends.
+  for (const t of [0.22, 0.42, 0.62, 0.8]) {
     const p = chute.getPointAt(t);
-    const height = Math.max(0.35, p.y - 0.06);
-    group.add(mesh(new THREE.CylinderGeometry(0.055, 0.075, height, 8), dark, p.x, height / 2, p.z, false));
+    const height = Math.max(0.3, p.y - 0.06);
+    if (height < 0.35) continue;
+    group.add(mesh(new THREE.CylinderGeometry(0.05, 0.06, height, 10), toon('#4ecdc4'), p.x, height / 2, p.z, false));
+    group.add(mesh(new THREE.CylinderGeometry(0.15, 0.17, 0.05, 14), dark, p.x, 0.025, p.z, false));
+    group.add(mesh(new THREE.CylinderGeometry(0.085, 0.085, 0.06, 10), dark, p.x, p.y - 0.08, p.z, false));
   }
+  const end = chute.getPointAt(1);
+  const endDir = chute.getTangentAt(1);
+  const mat = mesh(new THREE.CylinderGeometry(0.9, 0.95, 0.03, 28), pink, end.x - endDir.x * 0.1, 0.016, end.z - endDir.z * 0.1, false);
+  mat.scale.set(1, 1, 1.15);
+  mat.castShadow = false;
+  group.add(mat);
+  // A grab bar at the top, over the loft opening.
+  const top = chute.getPointAt(0.03);
+  for (const sideSign of [-1, 1]) {
+    group.add(mesh(new THREE.CylinderGeometry(0.03, 0.03, 0.55, 8), dark, top.x, top.y + 0.55, top.z + sideSign * 0.68, false));
+  }
+  const bar = mesh(new THREE.CylinderGeometry(0.03, 0.03, 1.36, 8), copper, top.x, top.y + 0.82, top.z, false);
+  bar.rotation.x = Math.PI / 2;
+  group.add(bar);
 
   // Closely spaced walkable sections support feet along the trough. Each rise is small enough for
   // the player's normal stair stepping, including when approaching the flared mouth from the floor.
@@ -126,7 +150,7 @@ export function buildSlide(): OfficeSlide {
   }
 
   const interactable: Interactable = { kind: 'slide', x: ROUTE[0][0], y: LOFT.y, z: ROUTE[0][2], radius: 1.25 };
-  const mouth = mesh(new THREE.TubeGeometry(edge(0), 16, 0.055, 8, false), dark, 0, 0, 0, false);
+  const mouth = mesh(new THREE.TubeGeometry(edge(0), 16, 0.07, 8, false), dark, 0, 0, 0, false);
   mouth.userData.interact = interactable;
   group.add(mouth);
   return { group, path, interactable, colliders };
