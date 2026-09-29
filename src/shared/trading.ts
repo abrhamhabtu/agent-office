@@ -312,17 +312,19 @@ export interface PropRules {
   dailyLossLimit: number | null;
   maxMicros: number;
   consistencyPercent: number;
+  /** What the consistency rule measures the best day against: the profit target, or all the profit so far. */
+  consistencyBasis: 'profitTarget' | 'totalProfit';
   minTradingDays: number;
   kind: 'eval' | 'funded';
 }
 
 /** The firms Abe is trying out, with the rules Trade Pilot keeps for them (verify at checkout: firms change them). */
 export const PROP_ACCOUNTS: PropRules[] = [
-  { id: 'lucidflex-50k', firm: 'Lucid', program: 'LucidFlex 50K', size: 50_000, profitTarget: 3000, drawdown: 2000, drawdownType: 'trailing-eod', lockProfit: 0, dailyLossLimit: null, maxMicros: 50, consistencyPercent: 50, minTradingDays: 5, kind: 'eval' },
-  { id: 'lucidflex-100k', firm: 'Lucid', program: 'LucidFlex 100K', size: 100_000, profitTarget: 6000, drawdown: 3000, drawdownType: 'trailing-eod', lockProfit: 0, dailyLossLimit: null, maxMicros: 100, consistencyPercent: 50, minTradingDays: 5, kind: 'eval' },
-  { id: 'topstep-50k', firm: 'Topstep', program: 'Combine 50K', size: 50_000, profitTarget: 3000, drawdown: 2000, drawdownType: 'trailing-eod', lockProfit: 0, dailyLossLimit: null, maxMicros: 50, consistencyPercent: 50, minTradingDays: 2, kind: 'eval' },
-  { id: 'tof-50k', firm: 'Top One', program: 'Ignite 50K (funded)', size: 50_000, profitTarget: 3000, drawdown: 2000, drawdownType: 'trailing-eod', lockProfit: 100, dailyLossLimit: null, maxMicros: 70, consistencyPercent: 15, minTradingDays: 5, kind: 'funded' },
-  { id: 'apex-50k', firm: 'Apex', program: 'Apex 4.0 50K', size: 50_000, profitTarget: 3000, drawdown: 2500, drawdownType: 'trailing-intraday', lockProfit: 100, dailyLossLimit: null, maxMicros: 100, consistencyPercent: 50, minTradingDays: 8, kind: 'eval' },
+  { id: 'lucidflex-50k', firm: 'Lucid', program: 'LucidFlex 50K', size: 50_000, profitTarget: 3000, drawdown: 2000, drawdownType: 'trailing-eod', lockProfit: 0, dailyLossLimit: null, maxMicros: 50, consistencyPercent: 50, consistencyBasis: 'totalProfit', minTradingDays: 5, kind: 'eval' },
+  { id: 'lucidflex-100k', firm: 'Lucid', program: 'LucidFlex 100K', size: 100_000, profitTarget: 6000, drawdown: 3000, drawdownType: 'trailing-eod', lockProfit: 0, dailyLossLimit: null, maxMicros: 100, consistencyPercent: 50, consistencyBasis: 'totalProfit', minTradingDays: 5, kind: 'eval' },
+  { id: 'topstep-50k', firm: 'Topstep', program: 'Combine 50K', size: 50_000, profitTarget: 3000, drawdown: 2000, drawdownType: 'trailing-eod', lockProfit: 0, dailyLossLimit: null, maxMicros: 50, consistencyPercent: 50, consistencyBasis: 'profitTarget', minTradingDays: 2, kind: 'eval' },
+  { id: 'tof-50k', firm: 'Top One', program: 'Ignite 50K (funded)', size: 50_000, profitTarget: 3000, drawdown: 2000, drawdownType: 'trailing-eod', lockProfit: 100, dailyLossLimit: null, maxMicros: 70, consistencyPercent: 15, consistencyBasis: 'totalProfit', minTradingDays: 5, kind: 'funded' },
+  { id: 'apex-50k', firm: 'Apex', program: 'Apex 4.0 50K', size: 50_000, profitTarget: 3000, drawdown: 2500, drawdownType: 'trailing-intraday', lockProfit: 100, dailyLossLimit: null, maxMicros: 100, consistencyPercent: 50, consistencyBasis: 'totalProfit', minTradingDays: 8, kind: 'eval' },
 ];
 
 /** Where one account stands today. */
@@ -340,9 +342,40 @@ export interface AccountState {
   riskPerTrade: number;
   toTarget: number;
   todayPnl: number;
+  /** Losing trades today (from ProjectX, or what was logged by hand). */
+  lossesToday: number;
+  tradesToday: number;
   source: 'projectx' | 'manual';
   active: boolean;
 }
+
+export type GuardLevel = 'ok' | 'warn' | 'stop';
+
+/** The risk guard's read on one account: may you take the next trade, and how big. */
+export interface AccountGuard {
+  accountId: string;
+  level: GuardLevel;
+  reasons: { label: string; level: GuardLevel }[];
+  /** The most to risk on the next trade (Law of 10), or 0 when it says stop. */
+  maxRisk: number;
+  /** How much more you can lose today before your daily stop. */
+  dailyStopLeft: number;
+  /** The most one day can make without breaking the consistency rule, roughly (null: no rule). */
+  dayCap: number | null;
+}
+
+/** The risk guard: the office's one answer to "can I take a trade right now?". */
+export interface RiskGuard {
+  level: GuardLevel;
+  headline: string;
+  reasons: { label: string; level: GuardLevel }[];
+  /** A high-impact release close enough to matter, and when. */
+  news: { title: string; at: number } | null;
+  accounts: AccountGuard[];
+}
+
+/** The daily stop Abe trades by: three losses, or down two risks, and the day is over. */
+export const DAILY_STOP = { losses: 3, risks: 2 } as const;
 
 // ---- TradingView alerts, the journal ------------------------------------------------------------------------
 
@@ -443,6 +476,7 @@ export interface TradingSnapshot {
   /** The TradingView webhook: where to point an alert, and the key it needs. */
   webhook: { path: string; key: string };
   tradePilot: { url: string | null; forwarding: boolean };
+  guard: RiskGuard;
   /** The markets the proposals cover (the rest still tick along on the market board). */
   markets: Symbol[];
 }

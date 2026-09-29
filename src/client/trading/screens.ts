@@ -333,7 +333,31 @@ export function sparkline(g: CanvasRenderingContext2D, x: number, y: number, w: 
   g.stroke();
 }
 
-// ---- 📰 News & calendar -------------------------------------------------------------------------------
+// ---- 📰 News & calendar ------------------------------------------------------------------------------
+const GUARD_INK = { ok: INK.up, warn: INK.warn, stop: INK.down } as const;
+const until = (ms: number) => {
+  const m = Math.round(ms / 60_000);
+  if (m <= 0) return 'now';
+  return m >= 1440 ? `${Math.floor(m / 1440)}d ${Math.floor((m % 1440) / 60)}h` : m >= 60 ? `${Math.floor(m / 60)}h ${m % 60}m` : `${m}m`;
+};
+
+/** The risk guard's one line, as a bar: green clear, amber careful, red stand down (it pulses). */
+export function guardBar(g: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, s: TradingSnapshot, now: number) {
+  const gd = s.guard;
+  const c = GUARD_INK[gd.level];
+  const pulse = gd.level === 'stop' ? 0.18 + 0.12 * Math.sin(now / 260) : 0.16;
+  g.fillStyle = gd.level === 'ok' ? `rgba(46,230,166,${pulse})` : gd.level === 'warn' ? `rgba(255,209,102,${pulse})` : `rgba(255,93,115,${pulse + 0.1})`;
+  rr(g, x, y, w, h, h / 2);
+  g.fill();
+  g.strokeStyle = c;
+  g.lineWidth = 2;
+  g.stroke();
+  g.fillStyle = c;
+  g.font = `900 ${Math.round(h * 0.5)}px ${SANS}`;
+  const icon = gd.level === 'ok' ? '🛡️' : gd.level === 'warn' ? '⚠️' : '⛔';
+  g.fillText(clip(g, `${icon}  ${gd.headline}`, w - h * 1.2), x + h * 0.5, y + h * 0.68);
+}
+
 export class NewsBoard extends Screen {
   constructor() {
     super(1200, 600);
@@ -342,69 +366,93 @@ export class NewsBoard extends Screen {
     const g = this.g;
     const cal = s.news.filter((n) => n.kind === 'calendar').sort((a, b) => a.at - b.at);
     const next = cal.find((n) => n.impact === 'high' && n.at > now);
-    const until = next ? Math.round((next.at - now) / 60_000) : null;
-    this.header('📰 News & calendar', next ? `${clip(g, next.headline.split(' · ')[0]!, 200)} in ${until! >= 60 ? `${Math.floor(until! / 60)}h ${until! % 60}m` : `${until}m`}` : 'no high-impact left', s, INK.info);
-    // The calendar: what's left today and tomorrow, then what's already out today (dimmed).
-    const upcoming = cal.filter((n) => n.at > now - 30 * 60_000).slice(0, 7);
-    const colW = 640;
+    this.header('📰 News & calendar', next ? `next high impact in ${until(next.at - now)}` : 'no high impact left', s, INK.info);
+    guardBar(g, 20, 90, this.W - 40, 44, s, now);
+    // The calendar: what's left, then what's just out (dimmed), each row with its time in its own column.
+    const upcoming = cal.filter((n) => n.at > now - 45 * 60_000).slice(0, 6);
+    const colW = 650;
     g.fillStyle = INK.dim;
-    g.font = `900 18px ${SANS}`;
-    g.fillText('ECONOMIC CALENDAR · US', 28, 106);
+    g.font = `900 16px ${SANS}`;
+    g.fillText('ECONOMIC CALENDAR · US · PACIFIC TIME', 24, 160);
     upcoming.forEach((n, i) => {
-      const y = 118 + i * 64;
+      const y = 170 + i * 69;
       const past = n.at < now;
+      const high = n.impact === 'high';
+      const c = high ? INK.down : INK.warn;
       g.globalAlpha = past ? 0.5 : 1;
-      g.fillStyle = i % 2 ? INK.bg : INK.panel;
-      rr(g, 20, y, colW, 58, 10);
+      g.fillStyle = high && !past && n.at - now < 60 * 60_000 ? 'rgba(255,93,115,.14)' : INK.panel;
+      rr(g, 20, y, colW, 62, 12);
       g.fill();
-      g.fillStyle = INK.text;
-      g.font = `900 22px ${MONO}`;
-      g.fillText(n.time, 32, y + 36);
-      pill(g, 130, y + 14, n.impact === 'high' ? 'HIGH' : 'MED', n.impact === 'high' ? INK.down : INK.warn, INK.bg, 15);
-      g.fillStyle = INK.text;
-      g.font = `800 22px ${SANS}`;
-      const title = n.headline.split(' · ')[0]!;
-      g.fillText(clip(g, title, 300), 206, y + 28);
+      g.fillStyle = c;
+      rr(g, 20, y, 8, 62, 4);
+      g.fill();
+      // When: the day over the time, so nothing sits on top of it.
+      const [day, time] = n.time.includes(' ') ? n.time.split(' ') : ['Today', n.time];
       g.fillStyle = INK.dim;
-      g.font = `800 17px ${MONO}`;
-      const nums = [n.actual ? `act ${n.actual}` : '', n.forecast ? `cons ${n.forecast}` : '', n.previous ? `prev ${n.previous}` : ''].filter(Boolean).join('  ');
-      g.fillText(clip(g, nums, 420), 206, y + 50);
-      if (n.actual) {
-        g.fillStyle = INK.up;
-        g.textAlign = 'right';
-        g.font = `900 22px ${MONO}`;
-        g.fillText(n.actual, 20 + colW - 14, y + 36);
-        g.textAlign = 'left';
+      g.font = `800 14px ${SANS}`;
+      g.fillText(day!.toUpperCase(), 40, y + 24);
+      g.fillStyle = INK.text;
+      g.font = `900 24px ${MONO}`;
+      g.fillText(time!, 40, y + 50);
+      // What, with its numbers underneath.
+      g.fillStyle = INK.text;
+      g.font = `800 21px ${SANS}`;
+      g.fillText(clip(g, n.headline.split(' · ')[0]!, 330), 150, y + 28);
+      g.font = `700 15px ${MONO}`;
+      let nx = 150;
+      for (const [label, v, ink] of [['ACT', n.actual, INK.up], ['CONS', n.forecast, INK.text], ['PREV', n.previous, INK.dim]] as const) {
+        if (!v) continue;
+        g.fillStyle = INK.dim;
+        g.fillText(label, nx, y + 51);
+        nx += g.measureText(`${label} `).width;
+        g.fillStyle = ink;
+        g.fillText(v, nx, y + 51);
+        nx += g.measureText(`${v}   `).width;
       }
+      // Impact and how long until it prints, on the right.
+      g.textAlign = 'right';
+      g.fillStyle = c;
+      g.font = `900 14px ${SANS}`;
+      g.fillText(high ? '● HIGH' : '● MED', 20 + colW - 16, y + 26);
+      g.fillStyle = past ? INK.dim : INK.text;
+      g.font = `900 18px ${MONO}`;
+      g.fillText(past ? 'out' : `in ${until(n.at - now)}`, 20 + colW - 16, y + 50);
+      g.textAlign = 'left';
       g.globalAlpha = 1;
     });
     if (!upcoming.length) {
       g.fillStyle = INK.dim;
-      g.font = `800 24px ${SANS}`;
-      g.fillText('Nothing on the calendar', 32, 160);
+      g.font = `800 22px ${SANS}`;
+      g.fillText('Nothing left on the calendar this week', 32, 210);
     }
-    // Headlines down the right.
+    // The wire down the right.
     const x = colW + 40;
     const w = this.W - x - 20;
     g.fillStyle = INK.dim;
-    g.font = `900 18px ${SANS}`;
-    g.fillText('THE WIRE', x, 106);
+    g.font = `900 16px ${SANS}`;
+    g.fillText('THE WIRE', x, 160);
     s.news
       .filter((n) => n.kind === 'headline')
-      .slice(0, 8)
+      .slice(0, 7)
       .forEach((n, i) => {
-        const y = 118 + i * 56;
-        g.fillStyle = n.impact === 'high' ? 'rgba(255,93,115,.14)' : INK.panel;
-        rr(g, x, y, w, 50, 10);
+        const y = 170 + i * 59;
+        g.fillStyle = n.impact === 'high' ? 'rgba(255,93,115,.12)' : INK.panel;
+        rr(g, x, y, w, 53, 10);
         g.fill();
-        g.fillStyle = n.impact === 'high' ? INK.down : n.impact === 'med' ? INK.warn : INK.dim;
-        g.fillRect(x, y + 8, 5, 34);
+        g.fillStyle = n.impact === 'high' ? INK.down : n.impact === 'med' ? INK.warn : INK.line;
+        rr(g, x, y, 6, 53, 3);
+        g.fill();
         g.fillStyle = INK.text;
-        g.font = `800 19px ${SANS}`;
-        g.fillText(clip(g, n.headline, w - 30), x + 16, y + 24);
+        g.font = `800 18px ${SANS}`;
+        g.fillText(clip(g, n.headline, w - 30), x + 18, y + 24);
         g.fillStyle = INK.dim;
-        g.font = `800 15px ${MONO}`;
-        g.fillText(`${n.source} · ${age(n.at, now)} ago · ${n.symbols.join(' ')}`, x + 16, y + 44);
+        g.font = `700 14px ${SANS}`;
+        g.fillText(`${n.source} · ${age(n.at, now)} ago`, x + 18, y + 45);
+        g.textAlign = 'right';
+        g.fillStyle = INK.info;
+        g.font = `800 14px ${MONO}`;
+        g.fillText(n.symbols.filter((sym) => s.markets.includes(sym)).join(' '), x + w - 12, y + 45);
+        g.textAlign = 'left';
       });
   }
 }
@@ -487,15 +535,20 @@ export class ProposalsBoard extends Screen {
     const hot = s.proposals.filter((p) => p.stage === 'live' || p.stage === 'ready').length;
     this.header('🎯 Trade proposals', `${s.markets.join(' · ')}${hot ? ` · ${hot} at a level` : ''}`, s, INK.warn);
     const list = s.proposals.filter((p) => p.stage !== 'off' && p.mark !== 'skipped').slice(0, 8);
+    if (s.guard.level !== 'ok') guardBar(g, 20, 90, this.W - 40, 36, s, now);
     if (!list.length) return this.empty('Nothing to propose right now', `The playbooks are watching ${s.markets.join(', ')}`);
     const cols = 4;
     const cw = (this.W - 40 - (cols - 1) * 12) / cols;
-    const ch = 244;
+    const banner = s.guard.level !== 'ok';
+    const ch = banner ? 226 : 244;
+    // Standing down: the setups stay up to learn from, dimmed, so nobody mistakes them for a go.
+    g.globalAlpha = s.guard.level === 'stop' ? 0.5 : 1;
     list.forEach((p, i) => {
       const x = 20 + (i % cols) * (cw + 12);
-      const y = 92 + Math.floor(i / cols) * (ch + 10);
+      const y = (banner ? 134 : 92) + Math.floor(i / cols) * (ch + 10);
       proposalCard(g, x, y, cw, ch, p, s, now);
     });
+    g.globalAlpha = 1;
   }
 }
 
@@ -539,18 +592,18 @@ function proposalCard(g: CanvasRenderingContext2D, x: number, y: number, cw: num
   rows.forEach(([label, v, c], k) => {
     g.fillStyle = INK.dim;
     g.font = `800 15px ${SANS}`;
-    g.fillText(label, x + 14, y + 126 + k * 25);
+    g.fillText(label, x + 14, y + 122 + k * 23);
     g.fillStyle = c;
     g.font = `900 19px ${MONO}`;
     g.textAlign = 'right';
-    g.fillText(fmt(v, q?.decimals ?? 2), x + cw - 14, y + 127 + k * 25);
+    g.fillText(fmt(v, q?.decimals ?? 2), x + cw - 14, y + 123 + k * 23);
     g.textAlign = 'left';
   });
   const size = p.sizing.find((z) => z.micros > 0);
   g.fillStyle = INK.dim;
   g.font = `800 14px ${SANS}`;
-  if (size) g.fillText(clip(g, `${size.micros} ${INSTRUMENTS[p.symbol].micro} on ${shortAccount(size.accountId)} ($${size.risk} risk)`, cw - 28), x + 14, y + ch - 42);
-  else if (p.distance != null) g.fillText(`${fmt(Math.abs(p.distance), q?.decimals ?? 2)} pts from the entry`, x + 14, y + ch - 42);
+  if (size) g.fillText(clip(g, `${size.micros} ${INSTRUMENTS[p.symbol].micro} on ${shortAccount(size.accountId)} ($${size.risk} risk)`, cw - 28), x + 14, y + ch - 36);
+  else if (p.distance != null) g.fillText(`${fmt(Math.abs(p.distance), q?.decimals ?? 2)} pts from the entry`, x + 14, y + ch - 36);
   g.fillStyle = color;
   g.font = `900 17px ${SANS}`;
   g.fillText(STAGE_LABEL[p.stage] ?? p.stage.toUpperCase(), x + 14, y + ch - 14);
@@ -952,21 +1005,22 @@ export class BossScreen extends Screen {
       g.fillText(pct(q.changePct), x + 12, 184);
       drawChart(g, x + 6, 194, cw - 12, 190, s.bars[sym].slice(-60), q, s.levels[sym], { vwap: true });
     });
-    const live = s.proposals.filter((p) => p.stage === 'live' || p.stage === 'ready').slice(0, 3);
+    const live = s.proposals.filter((p) => p.stage === 'live' || p.stage === 'ready').slice(0, 2);
+    guardBar(g, 12, 400, this.W - 24, 44, s, Date.now());
     g.fillStyle = INK.panel2;
-    rr(g, 12, 402, this.W - 24, 162, 12);
+    rr(g, 12, 452, this.W - 24, 112, 12);
     g.fill();
     g.fillStyle = INK.text;
     g.font = `900 22px ${SANS}`;
-    g.fillText(`Paper today ${s.paper.todayR >= 0 ? '+' : ''}${s.paper.todayR}R · ${money(s.paper.todayDollars)} a micro`, 28, 436);
-    g.font = `800 20px ${SANS}`;
+    g.fillText(`Paper today ${s.paper.todayR >= 0 ? '+' : ''}${s.paper.todayR}R · ${money(s.paper.todayDollars)} a micro`, 28, 484);
+    g.font = `800 19px ${SANS}`;
     if (!live.length) {
       g.fillStyle = INK.dim;
-      g.fillText('Nothing at a level right now.', 28, 474);
+      g.fillText('Nothing at a level right now.', 28, 518);
     }
     live.forEach((p, i) => {
       g.fillStyle = STAGE_COLOR[p.stage] ?? INK.dim;
-      g.fillText(clip(g, `${p.symbol} ${PLAYBOOK_BY_ID[p.playbook].short} ${p.side ?? ''} · ${STAGE_LABEL[p.stage]} · ${p.title}`, this.W - 60), 28, 474 + i * 30);
+      g.fillText(clip(g, `${p.symbol} ${PLAYBOOK_BY_ID[p.playbook].short} ${p.side ?? ''} · ${STAGE_LABEL[p.stage]} · ${p.title}`, this.W - 60), 28, 518 + i * 28);
     });
   }
 }

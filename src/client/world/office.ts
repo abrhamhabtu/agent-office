@@ -752,24 +752,25 @@ function buildDesk(def: DeskDef, index: number, trimMat: THREE.Material): DeskVi
   }
   // Modesty panel facing away from the worker
   group.add(mesh(box(width - 0.3, 0.32, 0.03), trimMat, 0, height - 0.26, -depth / 2 + 0.06));
-  // Little desk decorations
+  // Little desk decorations, in the far left corner: the laptop sits left of middle and the monitor
+  // takes the right (see trading/desks.ts), the way a trader's desk is laid out.
   const deco = index % 3;
   if (deco === 0) {
-    const mug = mesh(new THREE.CylinderGeometry(0.06, 0.05, 0.12, 10), toon(PALETTE.chairs[index % 6]), width / 2 - 0.25, height + 0.06, -0.2);
+    const mug = mesh(new THREE.CylinderGeometry(0.06, 0.05, 0.12, 10), toon(PALETTE.chairs[index % 6]), -width / 2 + 0.12, height + 0.06, -0.38);
     group.add(mug);
   } else if (deco === 1) {
-    const p = plant(0.35);
-    p.position.set(-width / 2 + 0.25, height, -0.25);
+    const p = plant(0.3);
+    p.position.set(-width / 2 + 0.13, height, -0.36);
     group.add(p);
   } else {
     const books = new THREE.Group();
-    ['#e63946', '#457b9d', '#f4a261'].forEach((c, i) => books.add(mesh(box(0.08, 0.24, 0.18), toon(c), i * 0.09, 0.12, 0)));
-    books.position.set(width / 2 - 0.35, height, -0.3);
+    ['#e63946', '#457b9d'].forEach((c, i) => books.add(mesh(box(0.07, 0.22, 0.16), toon(c), i * 0.08, 0.11, 0)));
+    books.position.set(-width / 2 + 0.08, height, -0.4);
     group.add(books);
   }
 
   const laptopAnchor = new THREE.Object3D();
-  laptopAnchor.position.set(0, height, -0.06);
+  laptopAnchor.position.set(-0.36, height, -0.06);
   laptopAnchor.scale.setScalar(1.3);
   group.add(laptopAnchor);
 
@@ -1628,23 +1629,34 @@ function buildLoft(group: THREE.Group, colliders: Collider[], interactables: Int
   desk.add(mesh(roundedBox(2.6, 0.1, 1.2, 0.1), woodMat, 0, 0.78, 0));
   desk.add(mesh(box(2.4, 0.66, 0.08), toon('#8a5a3b'), 0, 0.4, -0.5));
   for (const sx of [-1, 1]) desk.add(mesh(box(0.1, 0.72, 1.0), toon('#8a5a3b'), sx * 1.15, 0.37, 0));
-  // Two monitors, angled in toward the chair: Minesweeper (ui/arcade.ts) on the left, the markets on the right.
-  const monitor = (x: number, turn: number) => {
+  // The battle station: two big slim-bezel monitors on one arm, curved in toward the chair (Minesweeper,
+  // ui/arcade.ts, on the left; your markets on the right), a keyboard and mouse on a desk mat.
+  const bezel = toon('#16181f');
+  const metal = toon('#9aa3b2');
+  desk.add(mesh(new THREE.CylinderGeometry(0.035, 0.035, 0.62, 12), metal, 0, 1.1, -0.42));
+  desk.add(mesh(roundedBox(0.34, 0.03, 0.22, 0.012), metal, 0, 0.845, -0.42));
+  desk.add(mesh(roundedBox(1.9, 0.04, 0.05, 0.015), metal, 0, 1.3, -0.4));
+  const monitor = (side: -1 | 1) => {
     const m = new THREE.Group();
-    m.add(mesh(roundedBox(0.9, 0.55, 0.06, 0.03), toon(PALETTE.ink), 0, 0, 0));
-    m.add(mesh(box(0.08, 0.2, 0.08), toon(PALETTE.ink), 0, -0.25, 0));
-    m.position.set(x, 1.18, -0.2);
-    m.rotation.y = turn;
+    m.add(mesh(roundedBox(1.08, 0.64, 0.035, 0.018), bezel, 0, 0, 0));
+    // A thin light strip along the bottom bezel, like a gaming monitor.
+    m.add(mesh(new THREE.BoxGeometry(0.5, 0.008, 0.01), toon('#5cc8ff', { emissive: '#5cc8ff' }), 0, -0.312, 0.02, false));
+    m.position.set(side * 0.55, 1.3, -0.34 + 0.06);
+    m.rotation.y = -side * 0.24;
     desk.add(m);
     return m;
   };
-  const left = monitor(-0.5, 0.18);
-  const screen = mesh(new THREE.PlaneGeometry(0.8, 0.45), new THREE.MeshBasicMaterial({ color: '#4cc9f0' }), 0, 0, 0.035, false);
+  const left = monitor(-1);
+  const screen = mesh(new THREE.PlaneGeometry(1.02, 0.575), new THREE.MeshBasicMaterial({ color: '#4cc9f0' }), 0, 0.01, 0.019, false);
   left.add(screen);
-  const right = monitor(0.5, -0.18);
-  const markets = mesh(new THREE.PlaneGeometry(0.8, 0.45), new THREE.MeshBasicMaterial({ color: '#0f1522', toneMapped: false }), 0, 0, 0.035, false);
+  const right = monitor(1);
+  const markets = mesh(new THREE.PlaneGeometry(1.02, 0.575), new THREE.MeshBasicMaterial({ color: '#0f1522', toneMapped: false }), 0, 0.01, 0.019, false);
   right.add(markets);
-  desk.add(mesh(new THREE.CylinderGeometry(0.06, 0.05, 0.12, 10), toon('#ffd166'), 0.9, 0.89, 0.15));
+  desk.add(mesh(roundedBox(1.5, 0.008, 0.46, 0.04), toon('#2b2d42'), 0.05, 0.834, 0.18, false));
+  desk.add(mesh(roundedBox(0.7, 0.025, 0.2, 0.012), toon('#e9ecef'), -0.05, 0.85, 0.16));
+  desk.add(mesh(new THREE.BoxGeometry(0.64, 0.004, 0.16), toon('#adb5bd'), -0.05, 0.864, 0.16, false));
+  desk.add(mesh(new THREE.SphereGeometry(0.05, 12, 8).scale(0.8, 0.45, 1.2), toon('#e9ecef'), 0.5, 0.85, 0.18));
+  desk.add(mesh(new THREE.CylinderGeometry(0.06, 0.05, 0.12, 10), toon('#ffd166'), 1.05, 0.89, 0.2));
   const plate = textPlane('👑 BOSS', { bg: '#ffd166', size: 48 });
   plate.scale.multiplyScalar(0.55);
   plate.position.set(0, 0.5, -0.55);

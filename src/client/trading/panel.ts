@@ -1,5 +1,5 @@
 import type { FloorRole, Proposal, TradingSnapshot } from '../../shared/trading';
-import { INSTRUMENTS, PLAYBOOK_BY_ID, PLAYBOOKS, PROP_ACCOUNTS, SYMBOLS } from '../../shared/trading';
+import { DAILY_STOP, INSTRUMENTS, PLAYBOOK_BY_ID, PLAYBOOKS, PROP_ACCOUNTS, SYMBOLS } from '../../shared/trading';
 import { h, openModal } from '../ui/dom';
 import { trading } from './feed';
 import { accountLabel, fmt, money, pct, STAGE_COLOR, STAGE_LABEL } from './screens';
@@ -10,7 +10,7 @@ const TABS: { id: PanelTab; label: string }[] = [
   { id: 'proposals', label: '🎯 Proposals' },
   { id: 'news', label: '📰 News' },
   { id: 'playbook', label: '📋 Playbook' },
-  { id: 'accounts', label: '🛡️ Accounts' },
+  { id: 'accounts', label: '🛡️ Risk guard' },
   { id: 'paper', label: '📒 Paper' },
   { id: 'backtest', label: '🧪 Backtest' },
   { id: 'alerts', label: '🔔 Alerts & journal' },
@@ -108,19 +108,57 @@ export function openTrading(role: FloorRole, start?: PanelTab) {
       // Where each idea came from stays tucked inside; the boards just name the setup.
       ...PLAYBOOKS.map((p) => card(h('details', {}, h('summary', { style: `color:${p.color};font-weight:800;cursor:pointer` }, `${p.name} · ${p.agent}'s desk`), dim(p.rule), dim(`Source: ${p.mentor} (from Trade Pilot’s playbooks)`)))),
     ],
-    accounts: (s) => [
-      dim('Law of 10: risk a tenth of the drawdown you have left, recompiled after every trade. Type your balance in, or link a ProjectX account (Connections) and it follows your real balance. Rules are from Trade Pilot; check them with the firm before you pay.'),
-      ...s.accounts.map((a) => {
-        const bal = h('input', { type: 'number', value: String(a.balance), step: '0.01', style: 'width:130px', disabled: a.source === 'projectx' });
-        const link = h('select', {}, h('option', { value: '' }, 'Not linked'), ...s.journal.accounts.map((x) => h('option', { value: String(x.id), selected: a.source === 'projectx' && a.balance === x.balance }, `${x.name} (${money(x.balance)})`)));
-        return card(
-          row(h('input', { type: 'checkbox', checked: a.active, title: 'Size proposals for this account', onchange: (e: Event) => run(trading.post('/api/trading/account', { id: a.rules.id, active: (e.target as HTMLInputElement).checked })) }), h('b', {}, `${a.rules.firm} · ${a.rules.program}`), dim(a.rules.kind === 'funded' ? 'funded' : 'evaluation'), h('span.grow', {}), mono(`risk $${a.riskPerTrade}/trade`, WARN)),
-          row(dim('Balance'), bal, h('button.btn', { onclick: () => run(trading.post('/api/trading/account', { id: a.rules.id, balance: Number(bal.value) }), 'Saved') }, 'Save'), s.journal.accounts.length ? row(dim('ProjectX'), link, h('button.btn', { onclick: () => run(trading.post('/api/trading/account', { id: a.rules.id, projectxId: link.value ? Number(link.value) : null })) }, 'Link')) : null),
-          row(mono(`cushion ${money(a.cushion)} / ${money(a.rules.drawdown)}`, a.cushion > a.rules.drawdown * 0.5 ? GOOD : BAD), dim(`fails at ${money(a.threshold)} · ${money(a.toTarget)} to the ${money(a.rules.profitTarget)} target · ${a.rules.drawdownType.replace('-', ' ')} drawdown · consistency ${a.rules.consistencyPercent}% · ${a.rules.minTradingDays} days min · up to ${a.rules.maxMicros} micros`)),
-          a.source === 'projectx' ? dim(`Today on ProjectX: ${money(a.todayPnl)}`) : null,
+    accounts: (s) => {
+      const gd = s.guard;
+      const ink = (l: 'ok' | 'warn' | 'stop') => (l === 'ok' ? GOOD : l === 'warn' ? WARN : BAD);
+      // The position sizer: a market and a stop, and what every account can take on it right now.
+      const market = h('select', {}, ...SYMBOLS.map((sym) => h('option', { value: sym, selected: sym === s.markets[0] }, `${sym} (${INSTRUMENTS[sym].micro})`)));
+      const stopIn = h('input', { type: 'number', min: '0', step: '0.25', placeholder: 'stop, points', style: 'width:120px' });
+      const out = h('div', { style: 'display:grid;gap:4px' }, dim('Type the stop distance to size the trade.'));
+      const size = () => {
+        const sym = market.value as (typeof SYMBOLS)[number];
+        const pts = Number(stopIn.value);
+        if (!(pts > 0)) return out.replaceChildren(dim('Type the stop distance to size the trade.'));
+        const perMicro = pts * INSTRUMENTS[sym].microPointValue;
+        out.replaceChildren(
+          dim(`One ${INSTRUMENTS[sym].micro} risks $${perMicro.toFixed(2)} on a ${pts}-point stop.`),
+          ...gd.accounts.map((ag) => {
+            const a = s.accounts.find((x) => x.rules.id === ag.accountId)!;
+            const n = ag.maxRisk ? Math.min(a.rules.maxMicros, Math.floor(ag.maxRisk / perMicro)) : 0;
+            return row(h('b', { style: 'min-width:190px' }, accountLabel(ag.accountId)), n ? mono(`${n} ${INSTRUMENTS[sym].micro}`, GOOD) : mono('NO TRADE', BAD), dim(n ? `risks $${(n * perMicro).toFixed(0)} of $${ag.maxRisk} allowed` : ag.maxRisk ? 'the stop is too wide for this account’s risk' : ag.reasons.find((r) => r.level === 'stop')?.label ?? 'stopped'));
+          }),
         );
-      }),
-    ],
+      };
+      market.addEventListener('change', size);
+      stopIn.addEventListener('input', size);
+      return [
+        card(
+          row(mono(gd.level === 'ok' ? 'CLEAR' : gd.level === 'warn' ? 'CAREFUL' : 'STAND DOWN', ink(gd.level)), h('b', {}, gd.headline)),
+          ...gd.reasons.map((r) => h('div', { style: `color:${ink(r.level)};font-weight:700` }, `${r.level === 'ok' ? '✓' : r.level === 'warn' ? '⚠' : '⛔'} ${r.label}`)),
+          dim(`Daily stop: ${DAILY_STOP.losses} losses or down ${DAILY_STOP.risks} risks, then you’re done. News: no new trades 15 minutes before a high-impact print until 5 after. Flat by 13:00 PT.`),
+        ),
+        heading('Position sizer'),
+        card(row(market, stopIn), out),
+        heading('Accounts'),
+        dim('Law of 10: risk a tenth of the drawdown you have left, recompiled after every trade. Link ProjectX (Connections) to follow the real balance and fills, or log trades here by hand. Rules are from Trade Pilot: check them with the firm.'),
+        ...s.accounts.map((a) => {
+          const ag = gd.accounts.find((x) => x.accountId === a.rules.id);
+          const bal = h('input', { type: 'number', value: String(a.balance), step: '0.01', style: 'width:120px', disabled: a.source === 'projectx' });
+          const pnl = h('input', { type: 'number', step: '0.01', placeholder: '+/− $', style: 'width:90px' });
+          const link = h('select', {}, h('option', { value: '' }, 'Not linked'), ...s.journal.accounts.map((x) => h('option', { value: String(x.id), selected: a.source === 'projectx' && a.balance === x.balance }, `${x.name} (${money(x.balance)})`)));
+          return card(
+            row(h('input', { type: 'checkbox', checked: a.active, title: 'Size proposals for this account', onchange: (e: Event) => run(trading.post('/api/trading/account', { id: a.rules.id, active: (e.target as HTMLInputElement).checked })) }), h('b', {}, `${a.rules.firm} · ${a.rules.program}`), dim(a.rules.kind === 'funded' ? 'funded' : 'evaluation'), h('span.grow', {}), ag ? mono(ag.level === 'stop' ? 'STOPPED' : `risk $${ag.maxRisk}`, ink(ag.level)) : dim('not active')),
+            ...(ag?.reasons ?? []).map((r) => h('div', { style: `color:${ink(r.level)};font-weight:700` }, `${r.level === 'ok' ? '✓' : r.level === 'warn' ? '⚠' : '⛔'} ${r.label}`)),
+            row(mono(`today ${money(a.todayPnl)}`, a.todayPnl >= 0 ? GOOD : BAD), dim(`${a.tradesToday} trades · ${a.lossesToday}/${DAILY_STOP.losses} losses`), ag ? dim(`· daily stop $${ag.dailyStopLeft} away`) : null, ag?.dayCap ? dim(`· best-day cap ~$${ag.dayCap}`) : null),
+            a.source === 'manual'
+              ? row(dim('Log a trade'), pnl, h('button.btn', { onclick: () => run(trading.post('/api/trading/account', { id: a.rules.id, log: Number(pnl.value) }), 'Logged') }, 'Log'), dim('Balance'), bal, h('button.btn', { onclick: () => run(trading.post('/api/trading/account', { id: a.rules.id, balance: Number(bal.value) }), 'Saved') }, 'Save'), a.tradesToday ? h('button.btn', { onclick: () => run(trading.post('/api/trading/account', { id: a.rules.id, resetToday: true }), 'Today cleared') }, 'Clear today') : null)
+              : null,
+            s.journal.accounts.length ? row(dim('ProjectX'), link, h('button.btn', { onclick: () => run(trading.post('/api/trading/account', { id: a.rules.id, projectxId: link.value ? Number(link.value) : null })) }, 'Link')) : null,
+            row(mono(`cushion ${money(a.cushion)} / ${money(a.rules.drawdown)}`, a.cushion > a.rules.drawdown * 0.5 ? GOOD : BAD), dim(`fails at ${money(a.threshold)} · ${money(a.toTarget)} to the ${money(a.rules.profitTarget)} target · ${a.rules.drawdownType.replace('-', ' ')} drawdown · consistency ${a.rules.consistencyPercent}% of ${a.rules.consistencyBasis === 'profitTarget' ? 'the target' : 'total profit'} · ${a.rules.minTradingDays} days min · up to ${a.rules.maxMicros} micros`)),
+          );
+        }),
+      ];
+    },
     paper: (s) => [
       dim('The playbooks paper-trade themselves: every setup that triggers is filled on the signal candle’s close and tracked to its stop, its target, or flat at 13:00 PT. P&L is for one micro.'),
       row(...s.paper.stats.map((st) => card(h('b', { style: `color:${PLAYBOOK_BY_ID[st.playbook].color}` }, PLAYBOOK_BY_ID[st.playbook].name), mono(`${st.totalR >= 0 ? '+' : ''}${st.totalR}R`, tone(st.totalR)), dim(`${st.trades} trades · ${Math.round(st.winRate * 100)}% win · ${money(st.dollars)}/micro`)))),

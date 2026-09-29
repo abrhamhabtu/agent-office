@@ -3,7 +3,10 @@ import test from 'node:test';
 import type { Bar, PaperTrade } from '../src/shared/trading.ts';
 import { floorRole, lawOf10, microsFor, PROP_ACCOUNTS, seatJob } from '../src/shared/trading.ts';
 import { Profile, replayDay, sessionMinute, tradingDay } from '../src/server/trading/engine.ts';
-import { parseAlert, playbookFor, sessionAt, simulateEval } from '../src/server/trading/desk.ts';
+import { parseAlert, playbookFor, sessionAt, simulateEval, TradingDesk } from '../src/server/trading/desk.ts';
+import { mkdtempSync, rmSync } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { parseChart } from '../src/server/trading/market.ts';
 import { parseRss } from '../src/server/trading/news.ts';
 import { gatewayUrl, tradesFromFills } from '../src/server/trading/projectx.ts';
@@ -190,4 +193,25 @@ test('Back Office proves, every other floor rings the bell, and each floor names
   assert.match(seatJob('bell', 'desk-1')!, /VWAP/);
   assert.match(seatJob('office', 'desk-1')!, /backtest/i);
   assert.equal(seatJob('bell', 'beanbag-1'), undefined);
+});
+
+test('the risk guard stops an account after three losses, and a logged trade moves its balance', (t) => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'desk-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const desk = new TradingDesk(dir);
+  const before = desk.snapshot().guard.accounts.find((a) => a.accountId === 'topstep-50k')!;
+  assert.ok(before.maxRisk >= 0);
+  for (const loss of [-50, -60, -40]) assert.equal(desk.setAccount('topstep-50k', { log: loss }), undefined);
+  const s = desk.snapshot();
+  const acct = s.accounts.find((a) => a.rules.id === 'topstep-50k')!;
+  assert.equal(acct.lossesToday, 3);
+  assert.equal(acct.todayPnl, -150);
+  assert.equal(acct.balance, 50_000 - 150);
+  const g = s.guard.accounts.find((a) => a.accountId === 'topstep-50k')!;
+  assert.equal(g.level, 'stop');
+  assert.equal(g.maxRisk, 0);
+  assert.match(g.reasons[0]!.label, /daily stop/);
+  // Another account is untouched (whatever the clock says about the market).
+  assert.ok(!s.guard.accounts.find((a) => a.accountId === 'lucidflex-50k')!.reasons.some((r) => /daily stop hit/.test(r.label)));
+  assert.match(desk.setAccount('topstep-50k', { log: 1e9 }) ?? '', /doesn’t look right/);
 });

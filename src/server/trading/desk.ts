@@ -2,9 +2,10 @@ import { randomBytes } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import type {
+  AccountGuard, GuardLevel, RiskGuard,
   AccountState, BacktestSummary, Bar, Bias, EvalRun, Levels, PaperBook, PaperTrade, PlaybookId, PlaybookItem, PlaybookStats, Proposal, ProposalAction, PropRules, SessionInfo, Symbol, TradingSnapshot, TvAlert,
 } from '../../shared/trading.js';
-import { INSTRUMENTS, lawOf10, microsFor, PLAYBOOK_BY_ID, PLAYBOOKS, PROP_ACCOUNTS, SYMBOLS } from '../../shared/trading.js';
+import { DAILY_STOP, INSTRUMENTS, lawOf10, microsFor, PLAYBOOK_BY_ID, PLAYBOOKS, PROP_ACCOUNTS, SYMBOLS } from '../../shared/trading.js';
 import { byTradingDay, pacific, replayDay, RTH_CLOSE, RTH_OPEN, sessionMinute, tradingDay, type DayResult } from './engine.js';
 import { Market } from './market.js';
 import { NewsDesk } from './news.js';
@@ -19,7 +20,7 @@ interface Saved {
   webhookKey: string;
   marks: Record<string, 'taken' | 'skipped'>;
   checklist: { day: string; done: string[] };
-  accounts: Record<string, { active: boolean; balance: number; peak: number; projectxId?: number }>;
+  accounts: Record<string, { active: boolean; balance: number; peak: number; projectxId?: number; today?: { day: string; pnl: number; trades: number; losses: number } }>;
   tradePilot: { url: string | null; key: string | null };
   alerts: TvAlert[];
   /** The markets the proposals cover. */
@@ -336,12 +337,21 @@ export class TradingDesk {
       const peak = Math.max(s.peak, balance);
       const threshold = Math.min(peak - rules.drawdown, rules.lockProfit == null ? Infinity : rules.size + rules.lockProfit);
       const cushion = Math.max(0, balance - threshold);
-      const todayPnl = linked ? px.today.filter((t) => t.accountId === String(linked.id)).reduce((a, t) => a + t.pnl, 0) : 0;
-      return { rules, balance, peak, threshold, cushion, riskPerTrade: lawOf10(cushion), toTarget: Math.max(0, rules.size + rules.profitTarget - balance), todayPnl: Math.round(todayPnl), source: linked ? 'projectx' : 'manual', active: s.active };
+      // Today: the real fills when ProjectX is linked, otherwise what was logged by hand for today.
+      const day = tradingDay(Date.now());
+      const fills = linked ? px.today.filter((t) => t.accountId === String(linked.id)) : [];
+      const manual = s.today?.day === day ? s.today : { pnl: 0, trades: 0, losses: 0 };
+      const todayPnl = linked ? fills.reduce((a, t) => a + t.pnl, 0) : manual.pnl;
+      return {
+        rules, balance, peak, threshold, cushion, riskPerTrade: lawOf10(cushion), toTarget: Math.max(0, rules.size + rules.profitTarget - balance), todayPnl: Math.round(todayPnl),
+        lossesToday: linked ? fills.filter((t) => t.pnl < 0).length : manual.losses,
+        tradesToday: linked ? fills.length : manual.trades,
+        source: linked ? 'projectx' : 'manual', active: s.active,
+      };
     });
   }
 
-  setAccount(id: string, patch: { active?: unknown; balance?: unknown; projectxId?: unknown }): string | undefined {
+  setAccount(id: string, patch: { active?: unknown; balance?: unknown; projectxId?: unknown; log?: unknown; resetToday?: unknown }): string | undefined {
     const s = this.saved.accounts[id];
     const rules = PROP_ACCOUNTS.find((a) => a.id === id);
     if (!s || !rules) return 'No such account';
@@ -353,6 +363,17 @@ export class TradingDesk {
       // A balance typed in is where the account stands: its peak is at least that, and a reset starts the trail over.
       s.peak = b === rules.size ? rules.size : Math.max(s.peak, b);
     }
+    // A trade logged by hand (for an account ProjectX doesn't follow): its P&L moves today and the balance.
+    if (patch.log !== undefined) {
+      const pnl = Number(patch.log);
+      if (!Number.isFinite(pnl) || Math.abs(pnl) > rules.drawdown * 2) return 'That P&L doesn’t look right';
+      const day = tradingDay(Date.now());
+      const t = s.today?.day === day ? s.today : { day, pnl: 0, trades: 0, losses: 0 };
+      s.today = { day, pnl: Math.round((t.pnl + pnl) * 100) / 100, trades: t.trades + 1, losses: t.losses + (pnl < 0 ? 1 : 0) };
+      s.balance = Math.round((s.balance + pnl) * 100) / 100;
+      if (rules.drawdownType === 'trailing-intraday') s.peak = Math.max(s.peak, s.balance);
+    }
+    if (patch.resetToday === true) delete s.today;
     if (patch.projectxId === null) delete s.projectxId;
     else if (patch.projectxId !== undefined) {
       const n = Number(patch.projectxId);
@@ -363,8 +384,61 @@ export class TradingDesk {
     return undefined;
   }
 
+  // ---- The risk guard ----------------------------------------------------------------------------------
+  /**
+   * Can you take a trade right now, and how big? High-impact news (15 minutes before to 5 after), the last
+   * quarter hour before the close, your daily stop (three losses, or down two risks), how close the account
+   * is to its threshold, and the consistency rule's cap on one day's profit.
+   */
+  private guard(accounts: AccountState[], now: number): RiskGuard {
+    const sess = sessionAt(now);
+    const reasons: RiskGuard['reasons'] = [];
+    const cal = this.news.items(now).filter((n) => n.kind === 'calendar' && n.impact === 'high');
+    const lock = cal.find((n) => n.at - now <= 15 * 60_000 && now - n.at <= 5 * 60_000);
+    const soon = cal.filter((n) => n.at > now).sort((a, b) => a.at - b.at)[0];
+    const mins = (ms: number) => {
+      const m = Math.max(0, Math.round(ms / 60_000));
+      return m >= 60 ? `${Math.floor(m / 60)}h ${m % 60}m` : `${m}m`;
+    };
+    const title = (h: string) => h.split(' · ')[0]!;
+    if (lock) reasons.push({ label: lock.at > now ? `${title(lock.headline)} in ${mins(lock.at - now)}: no new trades until 5 minutes after` : `${title(lock.headline)} just printed: let the spike settle`, level: 'stop' });
+    else if (soon && soon.at - now <= 60 * 60_000) reasons.push({ label: `${title(soon.headline)} in ${mins(soon.at - now)}: be flat or tight before it`, level: 'warn' });
+    else reasons.push({ label: soon ? `No high-impact news for ${mins(soon.at - now)}` : 'No high-impact news left this week', level: 'ok' });
+    if (sess.weekend || sess.phase === 'closed') reasons.push({ label: 'Market closed', level: 'warn' });
+    else if (sess.minutes >= RTH_CLOSE - 15 && sess.minutes < RTH_CLOSE) reasons.push({ label: 'Last 15 minutes: flat by the 13:00 close, no new trades', level: 'stop' });
+    else if (sess.phase === 'overnight' || sess.phase === 'premarket') reasons.push({ label: 'Outside the New York session: thinner tape, smaller size', level: 'warn' });
+    else if (sess.phase === 'ORB') reasons.push({ label: 'Opening range still setting (until 06:45)', level: 'warn' });
+    else reasons.push({ label: 'New York session open', level: 'ok' });
+    const worst = (xs: { level: GuardLevel }[]): GuardLevel => (xs.some((x) => x.level === 'stop') ? 'stop' : xs.some((x) => x.level === 'warn') ? 'warn' : 'ok');
+    const market = worst(reasons);
+    const per: AccountGuard[] = accounts
+      .filter((a) => a.active)
+      .map((a) => {
+        const r: AccountGuard['reasons'] = [];
+        const stopDollars = DAILY_STOP.risks * a.riskPerTrade;
+        const dailyStopLeft = Math.max(0, stopDollars + Math.min(0, a.todayPnl));
+        if (a.lossesToday >= DAILY_STOP.losses) r.push({ label: `${a.lossesToday} losses today: daily stop hit, walk away`, level: 'stop' });
+        else if (a.todayPnl <= -stopDollars) r.push({ label: `Down ${Math.abs(a.todayPnl)} today (two risks): daily stop hit`, level: 'stop' });
+        else if (a.lossesToday === DAILY_STOP.losses - 1) r.push({ label: `${a.lossesToday} losses today: one more ends the day`, level: 'warn' });
+        const frac = a.cushion / a.rules.drawdown;
+        if (a.cushion <= 0) r.push({ label: 'At the threshold: the account is done', level: 'stop' });
+        else if (frac < 0.25) r.push({ label: `Only $${Math.round(a.cushion)} of drawdown left: stop, reset, come back tomorrow`, level: 'stop' });
+        else if (frac < 0.5) r.push({ label: `Half the drawdown gone ($${Math.round(a.cushion)} left): Law of 10 already sized you down`, level: 'warn' });
+        const dayCap = a.rules.consistencyPercent ? Math.round((a.rules.consistencyPercent / 100) * a.rules.profitTarget) : null;
+        if (dayCap != null && a.todayPnl >= dayCap) r.push({ label: `Up $${a.todayPnl} today: at the ${a.rules.consistencyPercent}% consistency cap ($${dayCap}), stop for the day`, level: 'stop' });
+        else if (dayCap != null && a.todayPnl >= dayCap * 0.8) r.push({ label: `Near the consistency cap ($${dayCap} a day)`, level: 'warn' });
+        if (!r.length) r.push({ label: `Clear: risk up to $${a.riskPerTrade}, daily stop $${dailyStopLeft} away`, level: 'ok' });
+        const level = worst([...r, { level: market === 'stop' ? 'stop' : 'ok' }]);
+        return { accountId: a.rules.id, level, reasons: r, maxRisk: level === 'stop' ? 0 : a.riskPerTrade, dailyStopLeft, dayCap };
+      });
+    const level = market === 'stop' ? 'stop' : per.length && per.every((p) => p.level === 'stop') ? 'stop' : market === 'warn' || per.some((p) => p.level !== 'ok') ? 'warn' : 'ok';
+    const first = reasons.find((x) => x.level === level) ?? per.flatMap((p) => p.reasons).find((x) => x.level === level);
+    const headline = level === 'ok' ? 'Clear to trade' : level === 'stop' ? `Stand down: ${first?.label ?? 'every account is stopped'}` : `Careful: ${first?.label ?? ''}`;
+    return { level, headline, reasons, news: lock ? { title: title(lock.headline), at: lock.at } : soon ? { title: title(soon.headline), at: soon.at } : null, accounts: per };
+  }
+
   // ---- Proposals ----------------------------------------------------------------------------------------
-  private proposals(accounts: AccountState[], risky: boolean): Proposal[] {
+  private proposals(accounts: AccountState[], risky: boolean, guard: RiskGuard): Proposal[] {
     const out: Proposal[] = [];
     const day = tradingDay(Date.now());
     for (const sym of this.saved.markets) {
@@ -377,7 +451,7 @@ export class TradingDesk {
         const r = v.entry != null && v.stop != null && v.target != null && v.entry !== v.stop ? Math.round((Math.abs(v.target - v.entry) / Math.abs(v.entry - v.stop)) * 10) / 10 : null;
         const stopPts = v.entry != null && v.stop != null ? Math.abs(v.entry - v.stop) : 0;
         const checks = [...v.checks];
-        if (v.stage === 'ready' || v.stage === 'watching') checks.push({ label: 'No high-impact print within 15 minutes', ok: !risky });
+        if (v.stage === 'ready' || v.stage === 'watching') checks.push({ label: 'Risk guard clear', ok: guard.level !== 'stop' });
         out.push({
           id,
           symbol: sym,
@@ -392,9 +466,13 @@ export class TradingDesk {
           target: v.target,
           r,
           distance: v.entry != null && q ? Math.round((v.entry - q.last) * 100) / 100 : null,
-          sizing: accounts.filter((a) => a.active).map((a) => ({ accountId: a.rules.id, micros: stopPts ? microsFor(sym, a.riskPerTrade, stopPts, a.rules.maxMicros) : 0, risk: a.riskPerTrade })),
+          sizing: accounts.filter((a) => a.active).map((a) => {
+            const g = guard.accounts.find((x) => x.accountId === a.rules.id);
+            const risk = g ? g.maxRisk : a.riskPerTrade;
+            return { accountId: a.rules.id, micros: stopPts && risk ? microsFor(sym, risk, stopPts, a.rules.maxMicros) : 0, risk };
+          }),
           mark: this.saved.marks[id] ?? null,
-          note: risky && v.stage === 'ready' ? 'High-impact news is close: stand aside until it prints.' : v.note,
+          note: guard.level === 'stop' && (v.stage === 'ready' || v.stage === 'watching') ? `🛡️ ${guard.headline}` : risky && v.stage === 'ready' ? 'High-impact news is close: stand aside until it prints.' : v.note,
         });
       }
     }
@@ -569,6 +647,7 @@ export class TradingDesk {
     const quotes = this.market.quotes();
     const accounts = this.accounts();
     const risky = !!this.news.riskyNews(now);
+    const guard = this.guard(accounts, now);
     const levels = {} as Record<Symbol, Levels>;
     const bars = {} as Record<Symbol, Bar[]>;
     for (const sym of SYMBOLS) {
@@ -586,7 +665,8 @@ export class TradingDesk {
       levels,
       bars,
       news: this.news.items(now),
-      proposals: this.proposals(accounts, risky),
+      proposals: this.proposals(accounts, risky, guard),
+      guard,
       paper: this.paperBook(),
       backtest: this.backtest,
       playbook: this.checklist(),

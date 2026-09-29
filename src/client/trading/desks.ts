@@ -6,7 +6,7 @@ import { Worker } from '../world/character';
 import { Laptop } from '../world/laptop';
 import type { DeskView } from '../world/office';
 import { mesh, roundedBox, toon } from '../world/toon';
-import { accountRow, clip, drawChart, fives, fmt, INK, money, pct, Screen, sparkline, STAGE_COLOR, STAGE_LABEL, type ChartOpts } from './screens';
+import { accountRow, clip, guardBar, drawChart, fives, fmt, INK, money, pct, Screen, sparkline, STAGE_COLOR, STAGE_LABEL, type ChartOpts } from './screens';
 
 // The trading desks: a monitor on every desk showing that seat's job live (its playbook's chart, the news,
 // the accounts, the journal, the backtest), the way a trading floor's desks each have their own screens,
@@ -145,8 +145,9 @@ class DeskMonitor extends Screen {
         return;
       }
       case 'accounts': {
-        this.title('Prop accounts · Law of 10', pod.color);
-        s.accounts.filter((a) => a.active).slice(0, 5).forEach((a, i) => accountRow(g, 8, 56 + i * 60, this.W - 16, 54, a));
+        this.title('Risk guard · Law of 10', pod.color);
+        guardBar(g, 8, 52, this.W - 16, 34, s, now);
+        s.accounts.filter((a) => a.active).slice(0, 5).forEach((a, i) => accountRow(g, 8, 94 + i * 53, this.W - 16, 49, a));
         return;
       }
       case 'journal': {
@@ -305,7 +306,7 @@ export interface TradingDesks {
 
 export function buildTradingDesks(desks: Map<string, DeskView>): TradingDesks {
   const { height, depth } = DESK_SIZE;
-  const W = 0.95;
+  const W = 0.86;
   const H = W * (360 / 640);
   const monitors: { n: number; screen: DeskMonitor; at: THREE.Vector3; drawn: number; role: FloorRole | null }[] = [];
   const frameMat = toon('#1b2033');
@@ -314,16 +315,16 @@ export function buildTradingDesks(desks: Map<string, DeskView>): TradingDesks {
     const n = Number(/^desk-(\d+)$/.exec(def.id)?.[1]);
     if (!view || !n) continue;
     const screen = new DeskMonitor(n);
-    // On a stand at the back of the desk, facing the chair, just clear of the laptop's lid.
+    // On a stand to the right of the laptop, turned in toward the chair: laptop and monitor side by side.
     const mon = new THREE.Group();
     mon.add(mesh(roundedBox(W + 0.06, H + 0.06, 0.05, 0.02), frameMat, 0, 0, 0));
     const face = new THREE.Mesh(new THREE.PlaneGeometry(W, H), new THREE.MeshBasicMaterial({ map: screen.texture, toneMapped: false }));
     face.position.z = 0.028;
     mon.add(face);
-    mon.add(mesh(new THREE.BoxGeometry(0.06, 0.34, 0.05), frameMat, 0, -H / 2 - 0.15, -0.02, false));
-    mon.add(mesh(roundedBox(0.34, 0.03, 0.2, 0.01), frameMat, 0, -H / 2 - 0.32, 0, false));
-    mon.position.set(0, height + 0.32 + H / 2, -depth / 2 + 0.2);
-    mon.rotation.x = -0.06;
+    mon.add(mesh(new THREE.BoxGeometry(0.05, 0.2, 0.05), frameMat, 0, -H / 2 - 0.08, -0.03, false));
+    mon.add(mesh(roundedBox(0.3, 0.025, 0.2, 0.01), frameMat, 0, -H / 2 - 0.18, -0.01, false));
+    mon.position.set(0.56, height + 0.19 + H / 2, -depth / 2 + 0.24);
+    mon.rotation.set(-0.05, -0.32, 0, 'YXZ');
     view.group.add(mon);
     monitors.push({ n, screen, at: new THREE.Vector3(def.x, 1.2, def.z), drawn: -1, role: null });
   }
