@@ -83,6 +83,8 @@ export interface Office {
   tvScreen: THREE.Mesh;
   /** The monitor on the boss's desk upstairs, where Minesweeper plays (ui/arcade.ts). */
   bossScreen: THREE.Mesh;
+  /** The boss's second monitor, beside the first: the markets. */
+  bossMarkets: THREE.Mesh;
   /** Open slide from the boss's loft to the floor beside the stairs. */
   slide: OfficeSlide;
   /** The monitor on the west wall showing how busy the office's machine is (world/machine.ts). */
@@ -1230,7 +1232,7 @@ export function buildOffice(): Office {
     night.halos.push({ at: new THREE.Vector3(x, lampY - 0.12, z), size: 1.3, color: '#ffe08a' });
   }
 
-  const bossScreen = buildLoft(group, colliders, interactables, looks);
+  const { screen: bossScreen, markets: bossMarkets } = buildLoft(group, colliders, interactables, looks);
   const slide = buildSlide();
   group.add(slide.group);
   colliders.push(...slide.colliders);
@@ -1337,7 +1339,7 @@ export function buildOffice(): Office {
     group.add(label);
     boardLabels.set(key, { mesh: label, text });
   };
-  return { group, colliders, interactables, desks, setBeanbags, boardMeshes, setBoardLabel, tvScreen, bossScreen, slide, machineScreen, meetingBoard: meeting.board, meetingSign: meeting.sign, fixtures: () => fixtures, elevator, gong, jukebox, cabinet, whiteboard, tee, green, hoop, stack, setProjectName, setLook, setLevel, night, plants, update };
+  return { group, colliders, interactables, desks, setBeanbags, boardMeshes, setBoardLabel, tvScreen, bossScreen, bossMarkets, slide, machineScreen, meetingBoard: meeting.board, meetingSign: meeting.sign, fixtures: () => fixtures, elevator, gong, jukebox, cabinet, whiteboard, tee, green, hoop, stack, setProjectName, setLook, setLevel, night, plants, update };
 }
 
 /** A chair at the meeting table, with its laptop on the table in front of it. */
@@ -1512,7 +1514,7 @@ interface Looks {
  * The upstairs office: a loft on posts in the south-east corner, with glass on the two sides that
  * face the desks, reached by stairs along the south wall.
  */
-function buildLoft(group: THREE.Group, colliders: Collider[], interactables: Interactable[], looks: Looks): THREE.Mesh {
+function buildLoft(group: THREE.Group, colliders: Collider[], interactables: Interactable[], looks: Looks): { screen: THREE.Mesh; markets: THREE.Mesh } {
   const { minX, maxX, minZ, maxZ, y: floorY, height } = LOFT;
   const w = maxX - minX;
   const d = maxZ - minZ;
@@ -1626,11 +1628,22 @@ function buildLoft(group: THREE.Group, colliders: Collider[], interactables: Int
   desk.add(mesh(roundedBox(2.6, 0.1, 1.2, 0.1), woodMat, 0, 0.78, 0));
   desk.add(mesh(box(2.4, 0.66, 0.08), toon('#8a5a3b'), 0, 0.4, -0.5));
   for (const sx of [-1, 1]) desk.add(mesh(box(0.1, 0.72, 1.0), toon('#8a5a3b'), sx * 1.15, 0.37, 0));
-  desk.add(mesh(roundedBox(0.9, 0.55, 0.06, 0.03), toon(PALETTE.ink), 0, 1.18, -0.2));
-  desk.add(mesh(box(0.08, 0.2, 0.08), toon(PALETTE.ink), 0, 0.93, -0.2));
-  // Minesweeper plays on it (ui/arcade.ts).
-  const screen = mesh(new THREE.PlaneGeometry(0.8, 0.45), new THREE.MeshBasicMaterial({ color: '#4cc9f0' }), 0, 1.18, -0.165, false);
-  desk.add(screen);
+  // Two monitors, angled in toward the chair: Minesweeper (ui/arcade.ts) on the left, the markets on the right.
+  const monitor = (x: number, turn: number) => {
+    const m = new THREE.Group();
+    m.add(mesh(roundedBox(0.9, 0.55, 0.06, 0.03), toon(PALETTE.ink), 0, 0, 0));
+    m.add(mesh(box(0.08, 0.2, 0.08), toon(PALETTE.ink), 0, -0.25, 0));
+    m.position.set(x, 1.18, -0.2);
+    m.rotation.y = turn;
+    desk.add(m);
+    return m;
+  };
+  const left = monitor(-0.5, 0.18);
+  const screen = mesh(new THREE.PlaneGeometry(0.8, 0.45), new THREE.MeshBasicMaterial({ color: '#4cc9f0' }), 0, 0, 0.035, false);
+  left.add(screen);
+  const right = monitor(0.5, -0.18);
+  const markets = mesh(new THREE.PlaneGeometry(0.8, 0.45), new THREE.MeshBasicMaterial({ color: '#0f1522', toneMapped: false }), 0, 0, 0.035, false);
+  right.add(markets);
   desk.add(mesh(new THREE.CylinderGeometry(0.06, 0.05, 0.12, 10), toon('#ffd166'), 0.9, 0.89, 0.15));
   const plate = textPlane('👑 BOSS', { bg: '#ffd166', size: 48 });
   plate.scale.multiplyScalar(0.55);
@@ -1707,5 +1720,5 @@ function buildLoft(group: THREE.Group, colliders: Collider[], interactables: Int
   outside.position.set(cx, roofY + 0.2, minZ - 0.02);
   outside.rotation.y = Math.PI;
   group.add(outside);
-  return screen;
+  return { screen, markets };
 }

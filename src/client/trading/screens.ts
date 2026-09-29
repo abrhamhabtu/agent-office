@@ -134,6 +134,7 @@ export interface ChartOpts {
   prior?: boolean;
   value?: boolean;
   zones?: boolean;
+  sr?: boolean;
   profile?: boolean;
   grid?: boolean;
   tag?: boolean;
@@ -151,6 +152,7 @@ export function drawChart(g: CanvasRenderingContext2D, x: number, y: number, w: 
     if (opts.onVwap && lv.onVwap != null) near.push(lv.onVwap);
     if (opts.or) near.push(...[lv.orHigh, lv.orLow].filter((v): v is number => v != null));
     if (opts.value) near.push(...[lv.vah, lv.poc, lv.val].filter((v): v is number => v != null));
+    if (opts.sr) near.push(...lv.sr.map((l) => l.price));
   }
   if (opts.plan) near.push(...[opts.plan.entry, opts.plan.stop, opts.plan.target].filter((v): v is number => v != null));
   // Levels only count when they're near the tape; a far level shouldn't squash the candles.
@@ -236,6 +238,8 @@ export function drawChart(g: CanvasRenderingContext2D, x: number, y: number, w: 
       line(lv.val, 'rgba(241,91,181,.85)', [8, 5], 'VAL');
       line(lv.poc, '#f15bb5', [], 'POC', 3);
     }
+    if (opts.sr)
+      for (const l of lv.sr) line(l.price, l.kind === 'support' ? 'rgba(46,230,166,.8)' : 'rgba(255,93,115,.8)', [12, 5], `${l.label.replace('Yesterday’s', 'PD').replace('Overnight', 'ON').replace('Tested level', `S/R ×${l.touches}`)}`, 2.5);
     if (opts.onVwap) line(lv.onVwap, 'rgba(255,159,90,.9)', [4, 4], 'ON VWAP');
     if (opts.vwap) {
       line(lv.vwapU1, 'rgba(255,209,102,.35)', [6, 6]);
@@ -297,7 +301,7 @@ export function fives(bars: Bar[]): Bar[] {
   return out;
 }
 
-function sparkline(g: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, curve: number[], color?: string) {
+export function sparkline(g: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, curve: number[], color?: string) {
   if (curve.length < 2) {
     g.strokeStyle = INK.line;
     g.beginPath();
@@ -441,7 +445,7 @@ export class PlaybookBoard extends Screen {
     const x0 = 600;
     const cw = (this.W - x0 - 20 - 12) / 2;
     const ch = 244;
-    s.bias.forEach((b, i) => {
+    s.bias.filter((b) => s.markets.includes(b.symbol)).forEach((b, i) => {
       const x = x0 + (i % 2) * (cw + 12);
       const y = 94 + Math.floor(i / 2) * (ch + 10);
       const q = quoteOf(s, b.symbol);
@@ -481,9 +485,9 @@ export class ProposalsBoard extends Screen {
   draw(s: TradingSnapshot, _role: FloorRole, now: number) {
     const g = this.g;
     const hot = s.proposals.filter((p) => p.stage === 'live' || p.stage === 'ready').length;
-    this.header('🎯 Trade proposals', hot ? `${hot} at a level` : 'waiting on the tape', s, INK.warn);
+    this.header('🎯 Trade proposals', `${s.markets.join(' · ')}${hot ? ` · ${hot} at a level` : ''}`, s, INK.warn);
     const list = s.proposals.filter((p) => p.stage !== 'off' && p.mark !== 'skipped').slice(0, 8);
-    if (!list.length) return this.empty('Nothing to propose right now', 'The playbooks are watching NQ, ES, gold and BTC');
+    if (!list.length) return this.empty('Nothing to propose right now', `The playbooks are watching ${s.markets.join(', ')}`);
     const cols = 4;
     const cw = (this.W - 40 - (cols - 1) * 12) / cols;
     const ch = 244;
@@ -523,7 +527,7 @@ function proposalCard(g: CanvasRenderingContext2D, x: number, y: number, cw: num
   }
   g.fillStyle = book.color;
   g.font = `900 16px ${SANS}`;
-  g.fillText(`${book.name} · ${book.mentor}`, x + 14, y + 74);
+  g.fillText(book.name, x + 14, y + 74);
   g.fillStyle = INK.text;
   g.font = `800 17px ${SANS}`;
   g.fillText(clip(g, p.title, cw - 28), x + 14, y + 98);
@@ -659,7 +663,7 @@ export class BacktestBoard extends Screen {
       g.font = `700 15px ${SANS}`;
       // Which market it works best on.
       const per = bt.stats.filter((x) => x.playbook === p.id && x.symbol !== 'ALL' && x.trades >= 3).sort((a, b) => b.avgR - a.avgR);
-      g.fillText(per.length ? `Best: ${per[0]!.symbol} ${per[0]!.avgR >= 0 ? '+' : ''}${per[0]!.avgR}R/trade · ${p.mentor}` : p.mentor, xs[0]!, y + 58);
+      g.fillText(per.length ? `Best: ${per[0]!.symbol} ${per[0]!.avgR >= 0 ? '+' : ''}${per[0]!.avgR}R a trade` : 'Not enough trades yet', xs[0]!, y + 58);
       if (!st) return;
       g.font = `900 22px ${MONO}`;
       g.fillStyle = INK.text;
@@ -709,7 +713,7 @@ export class EvalBoard extends Screen {
       g.fillText(clip(g, p.name, 240), 36, y + 44);
       g.fillStyle = INK.dim;
       g.font = `700 15px ${SANS}`;
-      g.fillText(p.mentor, 36, y + 68);
+      g.fillText(p.short, 36, y + 68);
       accts.forEach((a, i) => {
         const e = bt.evals.find((x) => x.playbook === p.id && x.accountId === a.id);
         const x = x0 + i * cw + 4;
@@ -802,142 +806,7 @@ export class PaperBoard extends Screen {
   }
 }
 
-// ---- The screens hung over each pod ------------------------------------------------------------------------
-/** What the screen over a pod shows: the pod's playbook on its market, or the accounts, or the books. */
-export class PodScreen extends Screen {
-  constructor(private pod: number) {
-    super(1024, 460);
-  }
-  draw(s: TradingSnapshot, role: FloorRole, now: number) {
-    const g = this.g;
-    g.fillStyle = INK.bg;
-    g.fillRect(0, 0, this.W, this.H);
-    if (role === 'office') return this.pod < 2 ? this.backtest(s, this.pod) : this.paper(s, this.pod - 2);
-    if (this.pod === 3) return this.risk(s, now);
-    const id: PlaybookId = this.pod === 0 ? 'vwap-pullback' : this.pod === 1 ? 'supply-demand' : 'failed-auction';
-    const book = PLAYBOOK_BY_ID[id];
-    // The market where this playbook is closest to a trade, NQ by default.
-    const order: Record<string, number> = { live: 0, ready: 1, won: 2, lost: 2, watching: 3 };
-    const mine = s.proposals.filter((p) => p.playbook === id || (id === 'vwap-pullback' && p.playbook === 'double-break'));
-    const best = [...mine].sort((a, b) => (order[a.stage] ?? 9) - (order[b.stage] ?? 9))[0];
-    const sym: Symbol = best && (order[best.stage] ?? 9) <= 2 ? best.symbol : 'NQ';
-    const q = quoteOf(s, sym);
-    const plan = mine.find((p) => p.symbol === sym && (order[p.stage] ?? 9) <= 3) ?? null;
-    g.fillStyle = book.color;
-    g.fillRect(0, 0, this.W, 8);
-    g.fillStyle = INK.text;
-    g.font = `900 34px ${SANS}`;
-    g.fillText(`${sym} · ${book.name}`, 20, 50);
-    if (q) {
-      g.textAlign = 'right';
-      g.fillStyle = tone(q.change);
-      g.font = `900 30px ${MONO}`;
-      g.fillText(fmt(q.last, q.decimals), this.W - 20, 48);
-      g.textAlign = 'left';
-    }
-    if (plan) {
-      g.fillStyle = STAGE_COLOR[plan.stage] ?? INK.dim;
-      g.font = `900 20px ${SANS}`;
-      g.fillText(clip(g, `${STAGE_LABEL[plan.stage]}  ${plan.title}`, this.W - 40), 20, 80);
-    }
-    if (!q) return;
-    const bars = id === 'supply-demand' ? fives(s.bars[sym]).slice(-40) : s.bars[sym].slice(-90);
-    drawChart(g, 12, 96, this.W - 24, this.H - 108, bars, q, s.levels[sym], {
-      vwap: id === 'vwap-pullback',
-      onVwap: id === 'vwap-pullback',
-      or: id === 'vwap-pullback',
-      zones: id === 'supply-demand',
-      value: id === 'failed-auction',
-      profile: id === 'failed-auction',
-      grid: true,
-      tag: true,
-      plan,
-    });
-  }
-  private risk(s: TradingSnapshot, now: number) {
-    const g = this.g;
-    g.fillStyle = '#06d6a0';
-    g.fillRect(0, 0, this.W, 8);
-    g.fillStyle = INK.text;
-    g.font = `900 32px ${SANS}`;
-    g.fillText('🛡️ Prop accounts · Law of 10', 20, 50);
-    const active = s.accounts.filter((a) => a.active).slice(0, 5);
-    active.forEach((a, i) => accountRow(g, 20, 68 + i * 58, this.W - 40, 52, a));
-    // The last TradingView alert or journal trade, along the bottom.
-    const alert = s.alerts[0];
-    const trade = s.journal.today[0];
-    g.fillStyle = INK.panel2;
-    rr(g, 20, this.H - 64, this.W - 40, 50, 10);
-    g.fill();
-    g.font = `800 19px ${SANS}`;
-    g.fillStyle = INK.text;
-    const line = alert && (!trade || alert.at > trade.exitAt)
-      ? `🔔 ${age(alert.at, now)} ago · TradingView: ${alert.setup} ${alert.symbol} ${alert.side ?? ''}${alert.price ? ` @ ${alert.price}` : ''}`
-      : trade
-        ? `📓 ${trade.symbol} ${trade.side} ×${trade.qty} · ${money(trade.pnl)} · ${age(trade.exitAt, now)} ago`
-        : s.journal.connected ? '📓 No trades yet today' : '📓 Connect ProjectX to journal your real fills';
-    g.fillText(clip(g, line, this.W - 70), 36, this.H - 32);
-  }
-  private backtest(s: TradingSnapshot, half: number) {
-    const g = this.g;
-    const ids: PlaybookId[] = half === 0 ? ['vwap-pullback', 'double-break'] : ['supply-demand', 'failed-auction'];
-    g.fillStyle = '#f15bb5';
-    g.fillRect(0, 0, this.W, 8);
-    g.fillStyle = INK.text;
-    g.font = `900 32px ${SANS}`;
-    g.fillText(`🧪 Equity curves · ${s.backtest?.days.length ?? 0} days`, 20, 50);
-    ids.forEach((id, k) => {
-      const p = PLAYBOOK_BY_ID[id];
-      const y = 70 + k * 190;
-      g.fillStyle = INK.panel;
-      rr(g, 20, y, this.W - 40, 178, 12);
-      g.fill();
-      g.fillStyle = p.color;
-      g.font = `900 24px ${SANS}`;
-      g.fillText(p.name, 36, y + 34);
-      const per = SYMBOLS.map((sym) => s.backtest?.stats.find((x) => x.playbook === id && x.symbol === sym)).filter((x) => !!x);
-      per.forEach((st, i) => {
-        const x = 36 + i * ((this.W - 72) / 4);
-        const w = (this.W - 72) / 4 - 16;
-        g.fillStyle = INSTRUMENTS[st.symbol as Symbol].ink;
-        g.font = `900 18px ${MONO}`;
-        g.fillText(`${st.symbol} ${st.totalR >= 0 ? '+' : ''}${st.totalR}R`, x, y + 66);
-        g.fillStyle = INK.dim;
-        g.font = `700 14px ${SANS}`;
-        g.fillText(`${st.trades} tr · ${Math.round(st.winRate * 100)}%`, x, y + 86);
-        sparkline(g, x, y + 98, w, 64, st.curve, INSTRUMENTS[st.symbol as Symbol].ink);
-      });
-    });
-  }
-  private paper(s: TradingSnapshot, half: number) {
-    const g = this.g;
-    const syms: Symbol[] = half === 0 ? ['NQ', 'ES'] : ['GC', 'BTC'];
-    g.fillStyle = '#06d6a0';
-    g.fillRect(0, 0, this.W, 8);
-    g.fillStyle = INK.text;
-    g.font = `900 32px ${SANS}`;
-    g.fillText(`📒 Paper · ${syms.join(' & ')}`, 20, 50);
-    syms.forEach((sym, k) => {
-      const x = 20 + k * ((this.W - 40) / 2 + 0);
-      const w = (this.W - 40) / 2 - 10;
-      const q = quoteOf(s, sym);
-      const open = s.paper.today.find((t) => t.symbol === sym && t.outcome === 'open');
-      if (q) drawChart(g, x, 70, w, 220, s.bars[sym].slice(-60), q, s.levels[sym], { vwap: true, tag: false, plan: open ? ({ entry: open.entry, stop: open.stop, target: open.target } as Proposal) : null });
-      const list = s.paper.today.filter((t) => t.symbol === sym).slice(0, 3);
-      g.font = `800 17px ${SANS}`;
-      if (!list.length) {
-        g.fillStyle = INK.dim;
-        g.fillText('No paper trades yet today', x + 6, 326);
-      }
-      list.forEach((t, i) => {
-        g.fillStyle = t.outcome === 'open' ? INK.info : tone(t.r);
-        g.fillText(clip(g, `${PLAYBOOK_BY_ID[t.playbook].short} ${t.side} ${t.outcome === 'open' ? 'LIVE' : ''} ${t.r >= 0 ? '+' : ''}${t.r}R`, w - 10), x + 6, 326 + i * 32);
-      });
-    });
-  }
-}
-
-function accountRow(g: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, a: AccountState) {
+export function accountRow(g: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, a: AccountState) {
   g.fillStyle = INK.panel;
   rr(g, x, y, w, h, 10);
   g.fill();
@@ -1053,4 +922,51 @@ export function paintLaptopChart(g: CanvasRenderingContext2D, w: number, h: numb
   g.textAlign = 'left';
   const bars = view === 'zones' ? fives(s.bars[symbol]).slice(-36) : s.bars[symbol].slice(-64);
   drawChart(g, 14, h * 0.2, w - 28, h * 0.64, bars, q, s.levels[symbol], { vwap: view === 'vwap', onVwap: view === 'vwap', or: view === 'vwap', zones: view === 'zones', value: view === 'profile', profile: view === 'profile', grid: true, tag: true });
+}
+
+/** The boss's second monitor: your markets at a glance, the day's paper result, and what's live. */
+export class BossScreen extends Screen {
+  constructor() {
+    super(1024, 576);
+  }
+  draw(s: TradingSnapshot) {
+    const g = this.g;
+    this.header('👑 Your markets', bellText(s).replace('🔔 ', ''), s, INK.warn);
+    const syms = s.markets;
+    const cw = (this.W - 24 - (syms.length - 1) * 10) / Math.max(1, syms.length);
+    syms.forEach((sym, i) => {
+      const q = quoteOf(s, sym);
+      const x = 12 + i * (cw + 10);
+      g.fillStyle = INK.panel;
+      rr(g, x, 90, cw, 300, 12);
+      g.fill();
+      if (!q) return;
+      g.fillStyle = q.ink;
+      g.font = `900 28px ${MONO}`;
+      g.fillText(sym, x + 12, 124);
+      g.fillStyle = INK.text;
+      g.font = `900 26px ${MONO}`;
+      g.fillText(fmt(q.last, q.decimals), x + 12, 158);
+      g.fillStyle = tone(q.change);
+      g.font = `800 18px ${MONO}`;
+      g.fillText(pct(q.changePct), x + 12, 184);
+      drawChart(g, x + 6, 194, cw - 12, 190, s.bars[sym].slice(-60), q, s.levels[sym], { vwap: true });
+    });
+    const live = s.proposals.filter((p) => p.stage === 'live' || p.stage === 'ready').slice(0, 3);
+    g.fillStyle = INK.panel2;
+    rr(g, 12, 402, this.W - 24, 162, 12);
+    g.fill();
+    g.fillStyle = INK.text;
+    g.font = `900 22px ${SANS}`;
+    g.fillText(`Paper today ${s.paper.todayR >= 0 ? '+' : ''}${s.paper.todayR}R · ${money(s.paper.todayDollars)} a micro`, 28, 436);
+    g.font = `800 20px ${SANS}`;
+    if (!live.length) {
+      g.fillStyle = INK.dim;
+      g.fillText('Nothing at a level right now.', 28, 474);
+    }
+    live.forEach((p, i) => {
+      g.fillStyle = STAGE_COLOR[p.stage] ?? INK.dim;
+      g.fillText(clip(g, `${p.symbol} ${PLAYBOOK_BY_ID[p.playbook].short} ${p.side ?? ''} · ${STAGE_LABEL[p.stage]} · ${p.title}`, this.W - 60), 28, 474 + i * 30);
+    });
+  }
 }

@@ -172,7 +172,14 @@ interface Ctx {
   value: { poc: number; vah: number; val: number } | null;
   profileBars: number;
   zones: Zone[];
+  sr: SrLevel[];
   avgVol: number;
+}
+
+export interface SrLevel {
+  price: number;
+  touches: number;
+  label: string;
 }
 
 interface Signal {
@@ -533,7 +540,120 @@ function failedAuction(symbol: Symbol): Scanner {
   };
 }
 
-const SCANNERS: ((s: Symbol) => Scanner)[] = [vwapPullback, doubleBreak, supplyDemand, failedAuction];
+// Support and resistance: a level price has respected (three touches or more on the 5m, or yesterday's and
+// the overnight extremes). Bounce off it on a rejection candle, or trade the break and retest. Each level
+// once a day, the stop just past it, the target at the next level (or two risks out).
+function supportResistance(symbol: Symbol): Scanner {
+  const buf = INSTRUMENTS[symbol].buffers.zone;
+  const tick = INSTRUMENTS[symbol].tick;
+  const used = new Set<number>();
+  const broke = new Map<number, { dir: 1 | -1; at: number }>();
+  let taken = 0;
+  let checks: ScanView['checks'] = [];
+  const tolOf = (c: Ctx) => Math.max(tick * 4, c.atr5 * 0.25);
+  const nextLevel = (c: Ctx, from: number, d: 1 | -1) => {
+    const beyond = c.sr.map((l) => l.price).filter((p) => (p - from) * d > 0);
+    return beyond.length ? (d > 0 ? Math.min(...beyond) : Math.max(...beyond)) : null;
+  };
+  return {
+    id: 'support-resistance',
+    step(c, open) {
+      if (!c.sr.length || !c.prev) return null;
+      const { b, prev } = c;
+      const tol = tolOf(c);
+      // Breaks: a close clean through a level, from the other side.
+      for (const l of c.sr) {
+        if (prev.close <= l.price + tol && b.close > l.price + tol && prev.close < l.price) broke.set(l.price, { dir: 1, at: c.i });
+        if (prev.close >= l.price - tol && b.close < l.price - tol && prev.close > l.price) broke.set(l.price, { dir: -1, at: c.i });
+      }
+      if (open || taken >= 3 || c.m < RTH_OPEN || c.m >= 720) return null;
+      for (const l of c.sr) {
+        if (used.has(l.price)) continue;
+        const brk = broke.get(l.price);
+        // Bounce: came from above into support and rejected it (or the mirror at resistance).
+        const supportBounce = prev.close > l.price && b.low <= l.price + tol && b.close > l.price && (Math.min(b.open, b.close) - b.low >= (b.high - b.low) * 0.5 || (b.close > b.open && b.close > prev.high));
+        const resistBounce = prev.close < l.price && b.high >= l.price - tol && b.close < l.price && (b.high - Math.max(b.open, b.close) >= (b.high - b.low) * 0.5 || (b.close < b.open && b.close < prev.low));
+        // Break and retest: broke through within the last 20 bars, came back to it, and held.
+        const retestLong = brk?.dir === 1 && c.i - brk.at > 1 && c.i - brk.at <= 20 && b.low <= l.price + tol && b.close > l.price && b.close > b.open;
+        const retestShort = brk?.dir === -1 && c.i - brk.at > 1 && c.i - brk.at <= 20 && b.high >= l.price - tol && b.close < l.price && b.close < b.open;
+        const d: 1 | -1 | 0 = supportBounce || retestLong ? 1 : resistBounce || retestShort ? -1 : 0;
+        if (!d) continue;
+        const kind = retestLong || retestShort ? 'break and retest' : 'bounce';
+        checks = [
+          { label: `${l.label} ${l.price.toFixed(2)} (${l.touches} touches)`, ok: true },
+          { label: kind === 'bounce' ? 'Rejection candle at the level' : 'Broke it, came back, held', ok: true },
+        ];
+        const entry = b.close;
+        const stop = round(l.price - d * buf, tick);
+        const risk = (entry - stop) * d;
+        if (risk <= 0) continue;
+        const nxt = nextLevel(c, entry, d);
+        const target = nxt != null && (nxt - entry) * d >= 1.5 * risk ? nxt : round(entry + d * 2 * risk, tick);
+        used.add(l.price);
+        taken++;
+        return { side: d > 0 ? 'long' : 'short', entry, stop, target, why: `${kind === 'bounce' ? 'Bounced off' : 'Retested and held'} ${l.label.toLowerCase()} ${l.price.toFixed(2)}` };
+      }
+      return null;
+    },
+    view(c) {
+      if (!c || !c.sr.length) return view('off', 'Marking the levels');
+      if (taken >= 3) return view('done', 'Three level trades today: done');
+      const price = c.b.close;
+      const tol = tolOf(c);
+      const below = c.sr.filter((l) => l.price < price && !used.has(l.price)).sort((a, b) => b.price - a.price)[0];
+      const above = c.sr.filter((l) => l.price > price && !used.has(l.price)).sort((a, b) => a.price - b.price)[0];
+      const pick = !below ? above : !above ? below : price - below.price <= above.price - price ? below : above;
+      if (!pick) return view('watching', 'No level near price');
+      const d = pick.price < price ? 1 : -1;
+      const stop = round(pick.price - d * buf, tick);
+      const nxt = nextLevel(c, pick.price, d as 1 | -1);
+      const risk = Math.abs(pick.price - stop);
+      const target = nxt != null && Math.abs(nxt - pick.price) >= 1.5 * risk ? nxt : round(pick.price + d * 2 * risk, tick);
+      const near = Math.abs(price - pick.price) <= Math.max(tol * 2, c.atr1 * 1.5);
+      const inWindow = c.m >= RTH_OPEN && c.m < 720;
+      return view(!inWindow ? 'off' : near ? 'ready' : 'watching', `${d > 0 ? 'Support' : 'Resistance'} at ${pick.price.toFixed(2)}: ${d > 0 ? 'buy' : 'sell'} the rejection`, {
+        side: d > 0 ? 'long' : 'short',
+        checks: [
+          { label: `${pick.label} (${pick.touches} touches)`, ok: pick.touches >= 3 || /yesterday|overnight/i.test(pick.label) },
+          { label: 'Price at the level', ok: near },
+          { label: 'Rejection candle (wick or engulfing)', ok: false },
+        ],
+        entry: round(pick.price, tick),
+        stop,
+        target,
+        note: 'Or wait for a clean break and trade the retest.',
+      });
+    },
+  };
+}
+
+/** Levels the 5m swings keep turning at: pivots within a quarter of an ATR of each other, three or more of them. */
+function swingLevels(fives: Bar[], atr: number | null): SrLevel[] {
+  if (fives.length < 10 || !atr) return [];
+  const pivots: number[] = [];
+  for (let i = 2; i < fives.length - 2; i++) {
+    const b = fives[i]!;
+    const around = [fives[i - 2]!, fives[i - 1]!, fives[i + 1]!, fives[i + 2]!];
+    if (around.every((x) => x.high < b.high)) pivots.push(b.high);
+    if (around.every((x) => x.low > b.low)) pivots.push(b.low);
+  }
+  pivots.sort((a, b) => a - b);
+  const out: SrLevel[] = [];
+  const tol = atr * 0.25;
+  let group: number[] = [];
+  const flush = () => {
+    if (group.length >= 3) out.push({ price: group.reduce((a, v) => a + v, 0) / group.length, touches: group.length, label: 'Tested level' });
+    group = [];
+  };
+  for (const p of pivots) {
+    if (group.length && p - group[0]! > tol) flush();
+    group.push(p);
+  }
+  flush();
+  return out;
+}
+
+const SCANNERS: ((s: Symbol) => Scanner)[] = [vwapPullback, doubleBreak, supplyDemand, supportResistance, failedAuction];
 
 /** Finds new zones on the 5m chart: a small basing candle, then an impulse that leaves it. */
 function spotZone(fives: Bar[], atr: number | null, zones: Zone[]) {
@@ -608,6 +728,27 @@ export function replayDay(symbol: Symbol, bars: Bar[], prior: Bar[], opts: { liv
   const day = bars.length ? tradingDay(bars[0]!.ts) : '';
   let volSum = 0;
   let ctx: Ctx | null = null;
+  let sr: SrLevel[] = [];
+  let srAtFives = -1;
+  const pdh = pdSource.length ? Math.max(...pdSource.map((b) => b.high)) : null;
+  const pdl = pdSource.length ? Math.min(...pdSource.map((b) => b.low)) : null;
+  /** The levels on the chart right now: yesterday's and the overnight extremes, and the 5m's tested levels. */
+  const levelsNow = (m: number, price: number): SrLevel[] => {
+    if (srAtFives !== fives.length) {
+      srAtFives = fives.length;
+      sr = swingLevels(fives.slice(-160), atr5.value);
+    }
+    const named: SrLevel[] = [];
+    if (pdh != null) named.push({ price: pdh, touches: 1, label: 'Yesterday’s high' });
+    if (pdl != null) named.push({ price: pdl, touches: 1, label: 'Yesterday’s low' });
+    if (m >= RTH_OPEN && onHigh != null && onLow != null) named.push({ price: onHigh, touches: 1, label: 'Overnight high' }, { price: onLow, touches: 1, label: 'Overnight low' });
+    // A tested level right on top of a named one is the named one.
+    const tol = (atr5.value ?? 0) * 0.25;
+    const all = [...named, ...sr.filter((l) => !named.some((n) => Math.abs(n.price - l.price) <= tol))];
+    // Only what's within reach of the tape matters today.
+    const reach = (atr5.value ?? 0) * 12;
+    return all.filter((l) => !reach || Math.abs(l.price - price) <= reach).map((l) => ({ ...l, price: round(l.price, spec.tick) }));
+  };
   const pv = spec.microPointValue;
 
   const close = (id: PlaybookId, at: number, price: number, outcome: PaperTrade['outcome']) => {
@@ -668,6 +809,7 @@ export function replayDay(symbol: Symbol, bars: Bar[], prior: Bar[], opts: { liv
       value: profile.value(),
       profileBars: profile.bars,
       zones,
+      sr: levelsNow(m, b.close),
       avgVol: volSum / (i + 1),
     };
     for (const s of scanners) {
@@ -724,6 +866,7 @@ export function replayDay(symbol: Symbol, bars: Bar[], prior: Bar[], opts: { liv
     vah: q(value?.vah),
     val: q(value?.val),
     zones: zones.filter((z) => z.state !== 'broken').map((z) => ({ ...z })),
+    sr: (ctx?.sr ?? []).map((l) => ({ price: l.price, kind: l.price <= (last?.close ?? l.price) ? ('support' as const) : ('resistance' as const), touches: l.touches, label: l.label })),
   };
   const views = {} as Record<PlaybookId, ScanView>;
   for (const s of scanners) {

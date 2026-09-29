@@ -658,6 +658,8 @@ export async function startServer(cfg: Config) {
         return done(typeof b.id === 'string' && desk.toggleChecklist(b.id) ? undefined : 'That one is worked out from the tape');
       case '/api/trading/proposal':
         return done(desk.act(String(b.id), String(b.action) as ProposalAction));
+      case '/api/trading/markets':
+        return done(desk.setMarkets(b.markets));
       case '/api/trading/account':
         return done(desk.setAccount(String(b.id), b));
       case '/api/trading/backtest':

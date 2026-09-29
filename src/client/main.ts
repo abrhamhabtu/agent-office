@@ -54,8 +54,8 @@ import { openServices } from './ui/services';
 import { floorRole, PLAYBOOK_BY_ID, PODS, podOf, seatJob, SYMBOLS, type FloorRole } from '../shared/trading';
 import { trading } from './trading/feed';
 import { openTrading, type PanelTab } from './trading/panel';
-import { BacktestBoard, EvalBoard, MarketMap, NewsBoard, PaperBoard, PlaybookBoard, ProposalsBoard, TickerStrip, bellText, type Screen as TradingScreen } from './trading/screens';
-import { buildPodScreens } from './trading/pods';
+import { BacktestBoard, BossScreen, EvalBoard, MarketMap, NewsBoard, PaperBoard, PlaybookBoard, ProposalsBoard, TickerStrip, bellText, type Screen as TradingScreen } from './trading/screens';
+import { buildTradingDesks } from './trading/desks';
 import { openQueue } from './ui/queue';
 import { openUpgrade, restarting, showRestarting, showUpgraded } from './ui/upgrade';
 import { openHelp, renderCaffeine, renderChat, renderPeople, renderWorkers, updateSpeaking } from './ui/hud';
@@ -223,8 +223,14 @@ const BOARD_SET: Record<FloorRole, Record<'issues' | 'queue' | 'pulls' | 'servic
   };
 })();
 const tape = new TickerStrip();
-const pods = buildPodScreens();
-office.group.add(pods.group);
+const tradingDesks = buildTradingDesks(office.desks);
+const bossMarkets = new BossScreen();
+{
+  const mat = office.bossMarkets.material as THREE.MeshBasicMaterial;
+  mat.map = bossMarkets.texture;
+  mat.color.set('#ffffff');
+  mat.needsUpdate = true;
+}
 function paintTrading() {
   const role = tradingRole();
   const snap = trading.snap;
@@ -238,7 +244,7 @@ function paintTrading() {
     office.setBoardLabel(key, b.label);
     b.screen.render(snap, role);
   }
-  pods.render(snap, role);
+  bossMarkets.render(snap, role);
 }
 /** The name of a seat on this floor: its job on the trading floor, if it has one. */
 function deskName(id: string): string {
@@ -274,8 +280,7 @@ trading.onAlert((a) => {
   sound.alertDing();
   const book = a.playbook ? PLAYBOOK_BY_ID[a.playbook] : null;
   toast(`🔔 TradingView · ${a.setup}${a.symbol ? ` ${a.symbol}` : ''}${a.side ? ` ${a.side.toUpperCase()}` : ''}${a.price ? ` @ ${a.price}` : ''}`);
-  const pod = !book ? 3 : book.id === 'supply-demand' ? 1 : book.id === 'failed-auction' ? 2 : 0;
-  pods.flash(pod);
+  const pod = !book ? 3 : book.id === 'supply-demand' || book.id === 'support-resistance' ? 1 : book.id === 'failed-auction' ? 2 : 0;
   for (const [, v] of workerViews) if (podOf(v.deskId) === pod) v.model.cheer(4);
   idleAgents[STATIONS.findIndex((d) => d.station === 'pulls')]?.model.cheer(4);
 });
@@ -3490,6 +3495,7 @@ function frame(ts: number) {
     if (!desk.station) v.laptop.update(dt, store.screens.get(id), Math.hypot(desk.x - camPos.x, desk.z - camPos.z));
   }
   for (const a of idleAgents) if (a.view.vacancy.visible) a.model.update(dt, t);
+  if (!upTop) tradingDesks.update(dt, t, camPos, tradingRole(), trading.snap, trading.tick);
   departures.update(dt, t);
   arrivals.update(dt);
   dog.update(dt);

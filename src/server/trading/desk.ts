@@ -22,6 +22,8 @@ interface Saved {
   accounts: Record<string, { active: boolean; balance: number; peak: number; projectxId?: number }>;
   tradePilot: { url: string | null; key: string | null };
   alerts: TvAlert[];
+  /** The markets the proposals cover. */
+  markets: Symbol[];
 }
 
 const DEFAULT_ACTIVE = new Set(['lucidflex-50k', 'lucidflex-100k', 'topstep-50k', 'tof-50k', 'apex-50k']);
@@ -190,6 +192,7 @@ export class TradingDesk {
       accounts: s.accounts ?? {},
       tradePilot: s.tradePilot ?? { url: null, key: null },
       alerts: Array.isArray(s.alerts) ? s.alerts.slice(-30) : [],
+      markets: Array.isArray(s.markets) && s.markets.every((m) => (SYMBOLS as readonly string[]).includes(m)) && s.markets.length ? s.markets : ['NQ', 'GC', 'BTC'],
     };
     for (const a of PROP_ACCOUNTS) this.saved.accounts[a.id] ??= { active: DEFAULT_ACTIVE.has(a.id), balance: a.size, peak: a.size };
     try {
@@ -364,7 +367,7 @@ export class TradingDesk {
   private proposals(accounts: AccountState[], risky: boolean): Proposal[] {
     const out: Proposal[] = [];
     const day = tradingDay(Date.now());
-    for (const sym of SYMBOLS) {
+    for (const sym of this.saved.markets) {
       const res = this.live.get(sym);
       if (!res) continue;
       const q = this.market.quotes().find((x) => x.symbol === sym);
@@ -398,6 +401,14 @@ export class TradingDesk {
     // What's live and ready first, then what's being watched.
     const order: Record<string, number> = { live: 0, ready: 1, won: 2, lost: 2, closed: 2, watching: 3, done: 4, failed: 4, off: 5 };
     return out.sort((a, b) => (order[a.stage] ?? 9) - (order[b.stage] ?? 9));
+  }
+
+  /** Which markets the proposals cover: at least one. */
+  setMarkets(list: unknown): string | undefined {
+    if (!Array.isArray(list) || !list.length || !list.every((m) => (SYMBOLS as readonly unknown[]).includes(m))) return 'Pick at least one of NQ, ES, GC and BTC';
+    this.saved.markets = SYMBOLS.filter((s) => list.includes(s));
+    this.save();
+    return undefined;
   }
 
   act(id: string, action: ProposalAction): string | undefined {
@@ -562,7 +573,7 @@ export class TradingDesk {
     const bars = {} as Record<Symbol, Bar[]>;
     for (const sym of SYMBOLS) {
       const res = this.live.get(sym);
-      levels[sym] = res?.levels ?? { vwap: null, vwapU1: null, vwapL1: null, onVwap: null, orHigh: null, orLow: null, onHigh: null, onLow: null, priorHigh: null, priorLow: null, poc: null, vah: null, val: null, zones: [] };
+      levels[sym] = res?.levels ?? { vwap: null, vwapU1: null, vwapL1: null, onVwap: null, orHigh: null, orLow: null, onHigh: null, onLow: null, priorHigh: null, priorLow: null, poc: null, vah: null, val: null, zones: [], sr: [] };
       bars[sym] = this.market.barsOf(sym).slice(-150);
     }
     const journal = this.projectx.state();
@@ -586,6 +597,7 @@ export class TradingDesk {
       session: sessionAt(now),
       webhook: { path: '/api/trading/tradingview', key: this.saved.webhookKey },
       tradePilot: { url: this.saved.tradePilot.url, forwarding: !!(this.saved.tradePilot.url && this.saved.tradePilot.key) },
+      markets: this.saved.markets,
     };
   }
 }

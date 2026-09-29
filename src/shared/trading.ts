@@ -45,10 +45,10 @@ export function floorRole(name: string | undefined): FloorRole {
 /** What each floor's four pods are for, north-west first (the order DESKS fills them: 4 desks a pod). */
 export const PODS: Record<FloorRole, { name: string; icon: string; color: string }[]> = {
   bell: [
-    { name: 'VWAP desk · Evan Dyer', icon: '📈', color: '#00bbf9' },
-    { name: 'Supply & Demand · Octavia', icon: '🧱', color: '#9b5de5' },
-    { name: 'Failed Auction · Chanelle', icon: '🔨', color: '#f15bb5' },
-    { name: 'Risk & Journal', icon: '🛡️', color: '#06d6a0' },
+    { name: 'VWAP desk', icon: '📈', color: '#00bbf9' },
+    { name: 'Zones & levels', icon: '🧱', color: '#9b5de5' },
+    { name: 'Auction desk', icon: '🔨', color: '#f15bb5' },
+    { name: 'Risk & journal', icon: '🛡️', color: '#06d6a0' },
   ],
   office: [
     { name: 'Backtest lab', icon: '🧪', color: '#f15bb5' },
@@ -61,13 +61,13 @@ export const PODS: Record<FloorRole, { name: string; icon: string; color: string
 /** The seats with a job on each floor, by desk number (1-based). Past these a seat is just a desk. */
 const SEAT_JOBS: Record<FloorRole, string[]> = {
   bell: [
-    'Vex · VWAP pullback', 'Vex · double break', 'Tape · NQ & ES', 'Scout · news',
-    'Zona · supply zones', 'Zona · demand zones', 'Base · 5m structure', 'Gold desk · GC',
+    'Vex · VWAP pullback', 'Vex · double break', 'Tape · NQ', 'Scout · news',
+    'Zona · supply & demand', 'Ledge · support & resistance', 'Base · 5m structure', 'Gold desk · GC',
     'Auction · VAH / VAL', 'Auction · POC', 'Crypto desk · BTC', 'Profile · value area',
     'Bulwark · prop rules', 'Journal · trade review', 'Coach · psychology', 'Marshal · session chief',
   ],
   office: [
-    'Quill · VWAP backtests', 'Quill · double break tests', 'Replay · S&D backtests', 'Replay · auction backtests',
+    'Quill · VWAP backtests', 'Quill · double break tests', 'Replay · zone & level tests', 'Replay · auction backtests',
     'Sweep · parameter tests', 'Sweep · walk-forward', 'Stats · expectancy', 'Stats · drawdown',
     'Ledger · paper NQ', 'Ledger · paper ES', 'Ledger · paper GC', 'Ledger · paper BTC',
     'Grader · process grade', 'Grader · eval simulator', 'Scribe · daily report', 'Scribe · lessons',
@@ -87,12 +87,13 @@ export function podOf(deskId: string): number | undefined {
 
 // ---- The playbooks -----------------------------------------------------------------------------------
 
-export type PlaybookId = 'vwap-pullback' | 'double-break' | 'supply-demand' | 'failed-auction';
+export type PlaybookId = 'vwap-pullback' | 'double-break' | 'supply-demand' | 'support-resistance' | 'failed-auction';
 
 export interface PlaybookDef {
   id: PlaybookId;
   name: string;
   short: string;
+  /** Where the idea came from: shown in a playbook's detail, not on the boards. */
   mentor: string;
   /** The desk agent who calls it. */
   agent: string;
@@ -101,11 +102,12 @@ export interface PlaybookDef {
   rule: string;
 }
 
-/** Abe's playbooks from Trade Pilot: VWAP pullback and double break (Evan Dyer), supply & demand (Octavia), failed auction (Chanelle). */
+/** Abe's playbooks from Trade Pilot. */
 export const PLAYBOOKS: PlaybookDef[] = [
   { id: 'vwap-pullback', name: 'VWAP Pullback in Trend', short: 'VWAP PB', mentor: 'Evan Dyer', agent: 'Vex', color: '#00bbf9', rule: 'Trend set, price comes back to NY VWAP, bounce candle with the trend. One attempt a session.' },
   { id: 'double-break', name: 'VWAP Double Break', short: 'DBL BRK', mentor: 'Evan Dyer', agent: 'Vex', color: '#4cc9f0', rule: '15-min opening range sets, then price breaks the range AND NY VWAP the same way. Enter the retest.' },
   { id: 'supply-demand', name: 'Supply & Demand Zones', short: 'S&D', mentor: 'Octavia', agent: 'Zona', color: '#9b5de5', rule: 'Fresh 5m zone off the basing candle. First retest only, rejection close, stop past the zone.' },
+  { id: 'support-resistance', name: 'Support & Resistance', short: 'S/R', mentor: 'Trade Pilot', agent: 'Ledge', color: '#ffb703', rule: 'A level with 3+ touches (or yesterday’s and the overnight high and low). Bounce on a rejection candle, or break and retest. Stop past the level.' },
   { id: 'failed-auction', name: 'Failed Auction', short: 'AUCTION', mentor: 'Chanelle', agent: 'Auction', color: '#f15bb5', rule: 'Price pushed to VAL/VAH, auction stalls, a body closes back through the imbalance. Fixed stop, 1.5R.' },
 ];
 export const PLAYBOOK_BY_ID = Object.fromEntries(PLAYBOOKS.map((p) => [p.id, p])) as Record<PlaybookId, PlaybookDef>;
@@ -178,6 +180,8 @@ export interface Levels {
   vah: number | null;
   val: number | null;
   zones: Zone[];
+  /** Support and resistance: prior day and overnight extremes, and 5m levels touched three times or more. */
+  sr: { price: number; kind: 'support' | 'resistance'; touches: number; label: string }[];
 }
 
 export type Impact = 'high' | 'med' | 'low';
@@ -439,6 +443,8 @@ export interface TradingSnapshot {
   /** The TradingView webhook: where to point an alert, and the key it needs. */
   webhook: { path: string; key: string };
   tradePilot: { url: string | null; forwarding: boolean };
+  /** The markets the proposals cover (the rest still tick along on the market board). */
+  markets: Symbol[];
 }
 
 export type ProposalAction = 'take' | 'skip' | 'reset';

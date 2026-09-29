@@ -60,6 +60,29 @@ test('the VWAP pullback takes its one trade off the bounce, stop under the touch
   assert.ok(res.levels.vwap! > 0 && res.levels.orHigh! > res.levels.orLow!);
 });
 
+test('support and resistance buys the rejection of yesterday’s low, stop just under it', () => {
+  const prior: Bar[] = [];
+  // Yesterday's session: 20,000 to 20,100.
+  for (let i = 0; i < 390; i++) prior.push(bar(OPEN - 86_400_000 + i * 60_000, 20_050 + Math.sin(i / 20) * 45, 20_050 + Math.sin((i + 1) / 20) * 45, 5));
+  const pdl = Math.min(...prior.map((b) => b.low));
+  const today: Bar[] = [];
+  let p = pdl + 60;
+  for (let t = OPEN - 60 * 60_000; t < OPEN; t += 60_000) today.push(bar(t, p, p, 1));
+  // Drifts down into yesterday's low…
+  let i = 0;
+  while (p - 2 > pdl + 3) today.push(bar(OPEN + i++ * 60_000, p, (p -= 2), 1, 200));
+  // …wicks through it and closes back above: the rejection.
+  today.push({ ts: OPEN + i++ * 60_000, open: p, high: p + 1, low: pdl - 2, close: p + 1.5, volume: 400 });
+  p += 1.5;
+  for (let k = 0; k < 40; k++) today.push(bar(OPEN + i++ * 60_000, p, (p += 2), 1, 300));
+  const res = replayDay('NQ', today, prior);
+  // (Tested levels on the way down may have their own trades; the one at yesterday's low is the long.)
+  const long = res.trades.find((t) => t.playbook === 'support-resistance' && t.side === 'long');
+  assert.ok(long, JSON.stringify(res.trades));
+  assert.ok(long.stop < pdl && long.entry > pdl, JSON.stringify(long));
+  assert.match(long.why, /Yesterday’s low/i);
+});
+
 test('every paper trade aims the way its side says, and closes by the end of the day', () => {
   const { today, prior } = trendDay();
   for (const t of replayDay('NQ', today, prior).trades) {

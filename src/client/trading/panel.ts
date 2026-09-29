@@ -1,5 +1,5 @@
 import type { FloorRole, Proposal, TradingSnapshot } from '../../shared/trading';
-import { INSTRUMENTS, PLAYBOOK_BY_ID, PLAYBOOKS, PROP_ACCOUNTS } from '../../shared/trading';
+import { INSTRUMENTS, PLAYBOOK_BY_ID, PLAYBOOKS, PROP_ACCOUNTS, SYMBOLS } from '../../shared/trading';
 import { h, openModal } from '../ui/dom';
 import { trading } from './feed';
 import { accountLabel, fmt, money, pct, STAGE_COLOR, STAGE_LABEL } from './screens';
@@ -61,7 +61,7 @@ export function openTrading(role: FloorRole, start?: PanelTab) {
     if (p.mark !== 'skipped') buttons.push(h('button.btn', { onclick: () => run(trading.act(p.id, 'skip')) }, 'Skip'));
     if (p.mark) buttons.push(h('button.btn', { onclick: () => run(trading.act(p.id, 'reset')) }, 'Undo'));
     return card(
-      row(mono(p.symbol, INSTRUMENTS[p.symbol].ink), p.side ? mono(p.side.toUpperCase(), p.side === 'long' ? GOOD : BAD) : null, h('b', { style: `color:${book.color}` }, `${book.name} · ${book.mentor}`), h('span.grow', {}), mono(STAGE_LABEL[p.stage] ?? p.stage, STAGE_COLOR[p.stage]), p.r != null ? mono(`${p.r}R`) : null),
+      row(mono(p.symbol, INSTRUMENTS[p.symbol].ink), p.side ? mono(p.side.toUpperCase(), p.side === 'long' ? GOOD : BAD) : null, h('b', { style: `color:${book.color}` }, book.name), h('span.grow', {}), mono(STAGE_LABEL[p.stage] ?? p.stage, STAGE_COLOR[p.stage]), p.r != null ? mono(`${p.r}R`) : null),
       h('b', {}, p.title),
       p.entry != null ? row(mono(`entry ${fmt(p.entry, d)}`), mono(`stop ${fmt(p.stop, d)}`, BAD), mono(`target ${fmt(p.target, d)}`, GOOD), q ? dim(`last ${fmt(q.last, d)}${p.distance != null ? ` · ${fmt(Math.abs(p.distance), d)} pts away` : ''}`) : null) : null,
       p.checks.length ? h('div', {}, ...p.checks.map(check)) : null,
@@ -75,8 +75,12 @@ export function openTrading(role: FloorRole, start?: PanelTab) {
     proposals: (s) => {
       const shown = s.proposals.filter((p) => p.stage !== 'off');
       const off = s.proposals.filter((p) => p.stage === 'off');
+      const pick = (sym: (typeof SYMBOLS)[number]) => {
+        const next = s.markets.includes(sym) ? s.markets.filter((m) => m !== sym) : [...s.markets, sym];
+        return run(trading.post('/api/trading/markets', { markets: next }));
+      };
       return [
-        dim('Every playbook replays today’s real 1-minute bars on NQ, ES, gold and BTC. Sizes are Law of 10 per active account. The office never places an order.'),
+        row(dim('Markets:'), ...SYMBOLS.map((sym) => h('button.btn', { type: 'button', class: s.markets.includes(sym) ? 'on' : '', title: INSTRUMENTS[sym].name, onclick: () => pick(sym) }, sym)), h('span.grow', {}), dim('Every playbook replays today’s real 1-minute bars. Law-of-10 sizes per active account. Never an order.')),
         ...shown.map((p) => proposalCard(p, s)),
         off.length ? card(h('b', {}, 'Off hours'), dim(off.map((p) => `${p.symbol} ${PLAYBOOK_BY_ID[p.playbook].short}: ${p.title}`).join(' · '))) : null,
       ];
@@ -101,7 +105,8 @@ export function openTrading(role: FloorRole, start?: PanelTab) {
       heading('Bias'),
       ...s.bias.map((b) => card(row(mono(b.symbol, INSTRUMENTS[b.symbol].ink), mono(b.direction.toUpperCase(), b.direction === 'long' ? GOOD : b.direction === 'short' ? BAD : undefined), b.fit ? h('span', { style: `color:${PLAYBOOK_BY_ID[b.fit].color};font-weight:800` }, `fits ${PLAYBOOK_BY_ID[b.fit].name}`) : null), ...b.lines.map((l) => dim(`• ${l}`)))),
       heading('The playbooks'),
-      ...PLAYBOOKS.map((p) => card(h('b', { style: `color:${p.color}` }, `${p.name} · ${p.mentor} (${p.agent}'s desk)`), dim(p.rule))),
+      // Where each idea came from stays tucked inside; the boards just name the setup.
+      ...PLAYBOOKS.map((p) => card(h('details', {}, h('summary', { style: `color:${p.color};font-weight:800;cursor:pointer` }, `${p.name} · ${p.agent}'s desk`), dim(p.rule), dim(`Source: ${p.mentor} (from Trade Pilot’s playbooks)`)))),
     ],
     accounts: (s) => [
       dim('Law of 10: risk a tenth of the drawdown you have left, recompiled after every trade. Type your balance in, or link a ProjectX account (Connections) and it follows your real balance. Rules are from Trade Pilot; check them with the firm before you pay.'),
@@ -136,7 +141,7 @@ export function openTrading(role: FloorRole, start?: PanelTab) {
         ...PLAYBOOKS.map((p) => {
           const rows = bt.stats.filter((x) => x.playbook === p.id);
           return card(
-            h('b', { style: `color:${p.color}` }, `${p.name} · ${p.mentor}`),
+            h('b', { style: `color:${p.color}` }, p.name),
             h(
               'table',
               { style: 'width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums' },
