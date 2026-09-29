@@ -32,10 +32,10 @@ function obstacles(): { rects: Rect[]; circles: Circle[] } {
     const [cx, cz] = deskPoint(d, 0, 0.9);
     circles.push([cx, cz, 0.35]); // the chair
   }
-  rects.push([10, 11, -2.2, 2.2]); // couch
-  rects.push([12.2, 13.8, -0.8, 0.8]); // coffee table
-  circles.push([12.5, 3.5, 0.5], [14.5, -3.4, 0.5]); // beanbags
-  rects.push([-17, -10.75, 11.7, 12.7]); // kitchen counter and fridge
+  rects.push([12.5, 13.5, -2.2, 2.2]); // couch
+  rects.push([14.7, 16.3, -0.8, 0.8]); // coffee table
+  circles.push([15, 3.5, 0.5], [17, -3.4, 0.5]); // beanbags
+  rects.push([-19.5, -13.25, 11.7, 12.7]); // kitchen counter and fridge
   for (const [x, z, s] of PLANTS) circles.push([x, z, 0.3 * s]);
   // The loft's posts, the stairs up to it, and the elevator shaft.
   for (const x of [LOFT.minX + 0.15, (LOFT.minX + LOFT.maxX) / 2]) circles.push([x, LOFT.minZ + 0.15, 0.14]);

@@ -1,11 +1,11 @@
 import * as THREE from 'three';
 import { FLAG_BOLD, FLAG_DIM, FLAG_INVERSE, RGB_FLAG, type Run } from '../../shared/protocol';
 import { mesh, roundedBox, toon } from './toon';
-import { SYMBOLS } from '../../shared/trading';
+import { SYMBOLS, type Symbol } from '../../shared/trading';
 import { trading } from '../trading/feed';
 import { paintLaptopChart, paintLaptopTape } from '../trading/screens';
 
-/** Hands each new laptop the next contract to chart, so a floor's monitors cover MNQ, MES, MBT and BTC. */
+/** Hands each new laptop the next market to chart, until its desk says which one its pod reads. */
 let nextSymbol = 0;
 
 export const TERM_THEME = {
@@ -167,6 +167,8 @@ export class Laptop {
   private placeholder = 'booting…';
   private drawnTick = -1;
   private symbol = SYMBOLS[nextSymbol++ % SYMBOLS.length]!;
+  /** What the chart shows while the terminal is empty: the market, read the way the desk's pod reads it. */
+  chartFor: () => { symbol: Symbol; view: 'vwap' | 'zones' | 'profile' } = () => ({ symbol: this.symbol, view: 'vwap' });
 
   constructor() {
     this.canvas.width = 1024;
@@ -221,7 +223,10 @@ export class Laptop {
       this.drawnTick = trading.tick;
       const { width, height } = this.canvas;
       // Nothing on the terminal yet: the chart. Otherwise the terminal, with the four tickers along its foot.
-      if (!screen && trading.snap) paintLaptopChart(this.ctx, width, height, trading.snap, this.symbol);
+      if (!screen && trading.snap) {
+        const c = this.chartFor();
+        paintLaptopChart(this.ctx, width, height, trading.snap, c.symbol, c.view);
+      }
       else paintScreen(this.ctx, width, height, screen, this.placeholder, 22);
       if (screen) paintLaptopTape(this.ctx, width, height, trading.snap);
       this.texture.needsUpdate = true;

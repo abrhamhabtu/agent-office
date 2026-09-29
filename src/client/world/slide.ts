@@ -3,20 +3,22 @@ import { LOFT } from '../../shared/layout';
 import { mesh, toon } from './toon';
 import type { Collider, Interactable } from './office';
 
+/** How far west of where it was first laid out the loft's edge now is: the whole slide moves with it. */
+const DX = LOFT.minX - 9;
 /** The feet's route, from the boss's office to the open floor beside the stairs. */
 const ROUTE: readonly (readonly [number, number, number])[] = [
   [LOFT.minX + 0.7, LOFT.y, 9.65],
-  [8.8, 2.9, 9.6],
-  [7.9, 2.62, 9.25],
-  [7.15, 2.28, 8.6],
-  [6.8, 1.95, 7.7],
-  [6.15, 1.58, 6.9],
-  [5.2, 1.25, 6.75],
-  [4.2, 0.92, 7.15],
-  [3.5, 0.57, 7.85],
-  [2.9, 0.26, 8.3],
-  [2.15, 0.09, 8.45],
-  [1.3, 0.02, 8.45],
+  [DX + 8.8, 2.9, 9.6],
+  [DX + 7.9, 2.62, 9.25],
+  [DX + 7.15, 2.28, 8.6],
+  [DX + 6.8, 1.95, 7.7],
+  [DX + 6.15, 1.58, 6.9],
+  [DX + 5.2, 1.25, 6.75],
+  [DX + 4.2, 0.92, 7.15],
+  [DX + 3.5, 0.57, 7.85],
+  [DX + 2.9, 0.26, 8.3],
+  [DX + 2.15, 0.09, 8.45],
+  [DX + 1.3, 0.02, 8.45],
 ];
 
 export interface OfficeSlide {
@@ -33,7 +35,7 @@ export function buildSlide(): OfficeSlide {
   // Carry riders beyond the open end so walking back into the chute meets its collision boundary.
   const path = new THREE.CurvePath<THREE.Vector3>();
   path.add(chute);
-  path.add(new THREE.LineCurve3(chute.getPoint(1), new THREE.Vector3(-0.35, 0.02, 8.45)));
+  path.add(new THREE.LineCurve3(chute.getPoint(1), new THREE.Vector3(DX - 0.35, 0.02, 8.45)));
   // The office's own candy palette: a teal riding surface in an orange shell, with cream rolled edges.
   const metal = toon('#4ecdc4');
   const copper = toon('#ff8f3f');

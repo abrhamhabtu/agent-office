@@ -1,93 +1,218 @@
-import type { FloorRole, Proposal, Ticket, TradingSnapshot } from '../../shared/trading';
+import type { FloorRole, Proposal, TradingSnapshot } from '../../shared/trading';
+import { INSTRUMENTS, PLAYBOOK_BY_ID, PLAYBOOKS, PROP_ACCOUNTS } from '../../shared/trading';
 import { h, openModal } from '../ui/dom';
 import { trading } from './feed';
-import { fmt } from './screens';
+import { accountLabel, fmt, money, pct, STAGE_COLOR, STAGE_LABEL } from './screens';
 
-export type PanelTab = 'news' | 'proposals' | 'playbook' | 'connectors' | 'tickets';
+export type PanelTab = 'proposals' | 'news' | 'playbook' | 'accounts' | 'paper' | 'backtest' | 'alerts' | 'connections';
 
-const TABS: { id: PanelTab; label: string; floors: FloorRole[] }[] = [
-  { id: 'news', label: '📰 News', floors: ['pit', 'desk'] },
-  { id: 'proposals', label: '🎯 Proposals', floors: ['pit'] },
-  { id: 'tickets', label: '🎫 Tickets', floors: ['desk', 'pit'] },
-  { id: 'playbook', label: '📋 Playbook', floors: ['pit', 'desk'] },
-  { id: 'connectors', label: '🔌 Connectors', floors: ['pit', 'desk'] },
+const TABS: { id: PanelTab; label: string }[] = [
+  { id: 'proposals', label: '🎯 Proposals' },
+  { id: 'news', label: '📰 News' },
+  { id: 'playbook', label: '📋 Playbook' },
+  { id: 'accounts', label: '🛡️ Accounts' },
+  { id: 'paper', label: '📒 Paper' },
+  { id: 'backtest', label: '🧪 Backtest' },
+  { id: 'alerts', label: '🔔 Alerts & journal' },
+  { id: 'connections', label: '🔌 Connections' },
 ];
 
-const STAGE_NOTE: Record<string, string> = {
-  watching: 'Waiting for price to come to the entry',
-  ready: 'Price is at the entry',
-  paper: 'Taken on paper. Prove it, then graduate it',
-  graduated: 'Graduated: ticketed on The Desk',
-  skipped: 'Skipped today',
-};
+const GOOD = '#0a9d6a';
+const BAD = '#d63c55';
+const WARN = '#c98a00';
 
-/** The trading window: every board's detail in one place, with the buttons the boards can't have. */
+/** The trading window: every board's detail in one place, with the buttons and settings the boards can't have. */
 export function openTrading(role: FloorRole, start?: PanelTab) {
-  const tabs = TABS.filter((t) => t.floors.includes(role));
-  let tab: PanelTab = start && tabs.some((t) => t.id === start) ? start : tabs[0]!.id;
+  let tab: PanelTab = start ?? (role === 'office' ? 'backtest' : 'proposals');
   let note = '';
-  const body = h('div.body', { style: 'display:grid;gap:10px;max-height:70vh;overflow:auto' });
-  const nav = h('div.os-tabs');
+  const body = h('div.body', { style: 'display:grid;gap:10px;max-height:72vh;overflow:auto' });
+  const nav = h('div.os-tabs', { style: 'flex-wrap:wrap;padding:0 16px 8px' });
   const close = h('button.btn.close', { 'aria-label': 'Close' }, '✕');
   const foot = h('span.grow', {});
-  const el = h('div.modal', { role: 'dialog', 'aria-label': 'Trading', style: 'width:min(860px,100%)' }, h('header', {}, h('h2', {}, role === 'desk' ? '🌃 The Desk' : '📈 The Pit'), nav, close), body, h('footer', {}, foot));
+  const title = role === 'office' ? '🗄️ Back Office' : '🔔 Opening Bell';
+  const el = h('div.modal', { role: 'dialog', 'aria-label': 'Trading', style: 'width:min(980px,100%)' }, h('header', {}, h('h2', { style: 'flex:1' }, title), close), nav, body, h('footer', {}, foot));
   let off = () => {};
   const modal = openModal(el, { doing: 'reading the tape', onClose: () => off() });
   close.addEventListener('click', () => modal.close());
+  // Typing into a field shouldn't be wiped by the next snapshot.
+  let editing = false;
+  el.addEventListener('focusin', (e) => (editing = (e.target as HTMLElement).matches('input,select,textarea')));
+  el.addEventListener('focusout', () => (editing = false));
 
-  const act = async (id: string, action: 'paper' | 'graduate' | 'skip' | 'reset') => {
-    note = (await trading.act(id, action)) ?? '';
+  const run = async (p: Promise<string | undefined>, ok?: string) => {
+    note = (await p) ?? ok ?? '';
     render();
   };
 
-  const card = (...kids: (Node | string)[]) => h('div', { style: 'background:rgba(0,0,0,.05);border-radius:12px;padding:12px 14px;display:grid;gap:6px' }, ...kids);
-  const row = (...kids: (Node | string)[]) => h('div', { style: 'display:flex;gap:10px;align-items:center;flex-wrap:wrap' }, ...kids);
+  const card = (...kids: (Node | string | null)[]) => h('div', { style: 'background:rgba(0,0,0,.05);border-radius:12px;padding:12px 14px;display:grid;gap:6px' }, ...kids);
+  const row = (...kids: (Node | string | null)[]) => h('div', { style: 'display:flex;gap:10px;align-items:center;flex-wrap:wrap' }, ...kids);
   const mono = (t: string, color?: string) => h('span', { style: `font-family:ui-monospace,Menlo,monospace;font-weight:800;${color ? `color:${color}` : ''}` }, t);
+  const dim = (t: string) => h('span', { style: 'opacity:.65' }, t);
+  const heading = (t: string) => h('h3', { style: 'margin:6px 0 0' }, t);
+  const tone = (v: number) => (v >= 0 ? GOOD : BAD);
+  const check = (c: { label: string; ok: boolean }) => h('span', { style: `color:${c.ok ? GOOD : BAD};font-weight:700;margin-right:12px` }, `${c.ok ? '✓' : '○'} ${c.label}`);
 
   const proposalCard = (p: Proposal, s: TradingSnapshot) => {
-    const q = s.quotes.find((x) => x.symbol === p.symbol)!;
+    const q = s.quotes.find((x) => x.symbol === p.symbol);
+    const book = PLAYBOOK_BY_ID[p.playbook];
+    const d = q?.decimals ?? 2;
     const buttons: HTMLElement[] = [];
-    if (p.stage === 'watching' || p.stage === 'ready') buttons.push(h('button.btn', { onclick: () => act(p.id, 'paper') }, 'Take on paper'));
-    if (p.stage === 'paper') buttons.push(h('button.btn.primary', { onclick: () => act(p.id, 'graduate') }, 'Graduate to The Desk'));
-    if (p.stage !== 'skipped') buttons.push(h('button.btn', { onclick: () => act(p.id, 'skip') }, 'Skip'));
-    if (p.stage !== 'watching' && p.stage !== 'ready') buttons.push(h('button.btn', { onclick: () => act(p.id, 'reset') }, 'Reset'));
+    if (p.mark !== 'taken') buttons.push(h('button.btn', { onclick: () => run(trading.act(p.id, 'take')) }, '✋ I took it'));
+    if (p.mark !== 'skipped') buttons.push(h('button.btn', { onclick: () => run(trading.act(p.id, 'skip')) }, 'Skip'));
+    if (p.mark) buttons.push(h('button.btn', { onclick: () => run(trading.act(p.id, 'reset')) }, 'Undo'));
     return card(
-      row(mono(p.symbol, q.ink), mono(p.side.toUpperCase(), p.side === 'long' ? '#0a9d6a' : '#d63c55'), h('b', {}, p.title), h('span', { style: 'opacity:.6' }, `${p.agent} · ${p.strategy}`), mono(`${p.r}R`)),
-      row(mono(`entry ${fmt(p.entry, q.decimals)}`), mono(`stop ${fmt(p.stop, q.decimals)}`, '#d63c55'), mono(`target ${fmt(p.target, q.decimals)}`, '#0a9d6a'), h('span', { style: 'opacity:.6' }, `last ${fmt(q.last, q.decimals)}`)),
-      row(h('span', { style: 'opacity:.7' }, STAGE_NOTE[p.stage] ?? ''), h('span.grow', {}), ...buttons),
+      row(mono(p.symbol, INSTRUMENTS[p.symbol].ink), p.side ? mono(p.side.toUpperCase(), p.side === 'long' ? GOOD : BAD) : null, h('b', { style: `color:${book.color}` }, `${book.name} · ${book.mentor}`), h('span.grow', {}), mono(STAGE_LABEL[p.stage] ?? p.stage, STAGE_COLOR[p.stage]), p.r != null ? mono(`${p.r}R`) : null),
+      h('b', {}, p.title),
+      p.entry != null ? row(mono(`entry ${fmt(p.entry, d)}`), mono(`stop ${fmt(p.stop, d)}`, BAD), mono(`target ${fmt(p.target, d)}`, GOOD), q ? dim(`last ${fmt(q.last, d)}${p.distance != null ? ` · ${fmt(Math.abs(p.distance), d)} pts away` : ''}`) : null) : null,
+      p.checks.length ? h('div', {}, ...p.checks.map(check)) : null,
+      p.sizing.length && p.entry != null ? h('div', { style: 'opacity:.8' }, 'Law of 10: ', ...p.sizing.map((z) => h('span', { style: 'margin-right:14px' }, `${accountLabel(z.accountId)} `, mono(`${z.micros} ${INSTRUMENTS[p.symbol].micro}`), dim(` ($${z.risk})`)))) : null,
+      p.note ? dim(p.note) : null,
+      row(p.mark ? mono(p.mark === 'taken' ? '✋ YOU TOOK IT' : 'SKIPPED', p.mark === 'taken' ? GOOD : WARN) : dim(book.rule), h('span.grow', {}), ...buttons),
     );
   };
 
-  const ticketCard = (t: Ticket, s: TradingSnapshot) => {
-    const q = s.quotes.find((x) => x.symbol === t.symbol)!;
-    return card(
-      row(mono(t.symbol, q.ink), mono(`${t.side.toUpperCase()} ${t.contracts}×`), mono(`E ${fmt(t.entry, q.decimals)}`), mono(`S ${fmt(t.stop, q.decimals)}`, '#d63c55'), mono(`T ${fmt(t.target, q.decimals)}`, '#0a9d6a'), h('span.grow', {}), mono(t.cleared ? 'CLEARED' : 'STAND DOWN', t.cleared ? '#0a9d6a' : '#d63c55')),
-      row(h('span', { style: 'opacity:.7' }, `Risk $${t.riskDollars} · reward $${t.rewardDollars}`)),
-      ...t.checks.map((c) => h('div', { style: `color:${c.ok ? '#0a9d6a' : '#d63c55'};font-weight:700` }, `${c.ok ? '✓' : '✗'} ${c.label}`)),
-      h('div', { style: 'opacity:.65;font-size:.9em' }, 'Tick lays the ticket out; you place the order at your broker. The office never connects to one.'),
-    );
+  const views: Record<PanelTab, (s: TradingSnapshot) => (Node | null)[]> = {
+    proposals: (s) => {
+      const shown = s.proposals.filter((p) => p.stage !== 'off');
+      const off = s.proposals.filter((p) => p.stage === 'off');
+      return [
+        dim('Every playbook replays today’s real 1-minute bars on NQ, ES, gold and BTC. Sizes are Law of 10 per active account. The office never places an order.'),
+        ...shown.map((p) => proposalCard(p, s)),
+        off.length ? card(h('b', {}, 'Off hours'), dim(off.map((p) => `${p.symbol} ${PLAYBOOK_BY_ID[p.playbook].short}: ${p.title}`).join(' · '))) : null,
+      ];
+    },
+    news: (s) => {
+      const cal = s.news.filter((n) => n.kind === 'calendar').sort((a, b) => a.at - b.at);
+      const heads = s.news.filter((n) => n.kind === 'headline');
+      return [
+        heading('Economic calendar (US, Pacific time)'),
+        ...cal.map((n) =>
+          card(row(mono(n.time), mono(n.impact.toUpperCase(), n.impact === 'high' ? BAD : WARN), h('b', {}, n.headline.split(' · ')[0]!), h('span.grow', {}), n.actual ? mono(`actual ${n.actual}`, GOOD) : null, n.forecast ? dim(`cons ${n.forecast}`) : null, n.previous ? dim(`prev ${n.previous}`) : null)),
+        ),
+        heading('Headlines'),
+        ...heads.map((n) => card(row(mono(n.time), mono(n.impact.toUpperCase(), n.impact === 'high' ? BAD : n.impact === 'med' ? WARN : undefined), n.link ? h('a', { href: n.link, target: '_blank', rel: 'noopener noreferrer', style: 'font-weight:700' }, n.headline) : h('b', {}, n.headline), h('span.grow', {}), dim(`${n.source} · ${n.symbols.join(' ')}`)))),
+      ];
+    },
+    playbook: (s) => [
+      heading('The morning checklist'),
+      ...s.playbook.map((p) =>
+        card(row(h('input', { type: 'checkbox', checked: p.done, disabled: p.auto, onchange: () => run(trading.toggleChecklist(p.id)) }), h('b', { style: p.done ? 'opacity:.55;text-decoration:line-through' : '' }, p.label), h('span.grow', {}), dim(p.auto ? `auto · ${p.owner}` : p.owner))),
+      ),
+      heading('Bias'),
+      ...s.bias.map((b) => card(row(mono(b.symbol, INSTRUMENTS[b.symbol].ink), mono(b.direction.toUpperCase(), b.direction === 'long' ? GOOD : b.direction === 'short' ? BAD : undefined), b.fit ? h('span', { style: `color:${PLAYBOOK_BY_ID[b.fit].color};font-weight:800` }, `fits ${PLAYBOOK_BY_ID[b.fit].name}`) : null), ...b.lines.map((l) => dim(`• ${l}`)))),
+      heading('The playbooks'),
+      ...PLAYBOOKS.map((p) => card(h('b', { style: `color:${p.color}` }, `${p.name} · ${p.mentor} (${p.agent}'s desk)`), dim(p.rule))),
+    ],
+    accounts: (s) => [
+      dim('Law of 10: risk a tenth of the drawdown you have left, recompiled after every trade. Type your balance in, or link a ProjectX account (Connections) and it follows your real balance. Rules are from Trade Pilot; check them with the firm before you pay.'),
+      ...s.accounts.map((a) => {
+        const bal = h('input', { type: 'number', value: String(a.balance), step: '0.01', style: 'width:130px', disabled: a.source === 'projectx' });
+        const link = h('select', {}, h('option', { value: '' }, 'Not linked'), ...s.journal.accounts.map((x) => h('option', { value: String(x.id), selected: a.source === 'projectx' && a.balance === x.balance }, `${x.name} (${money(x.balance)})`)));
+        return card(
+          row(h('input', { type: 'checkbox', checked: a.active, title: 'Size proposals for this account', onchange: (e: Event) => run(trading.post('/api/trading/account', { id: a.rules.id, active: (e.target as HTMLInputElement).checked })) }), h('b', {}, `${a.rules.firm} · ${a.rules.program}`), dim(a.rules.kind === 'funded' ? 'funded' : 'evaluation'), h('span.grow', {}), mono(`risk $${a.riskPerTrade}/trade`, WARN)),
+          row(dim('Balance'), bal, h('button.btn', { onclick: () => run(trading.post('/api/trading/account', { id: a.rules.id, balance: Number(bal.value) }), 'Saved') }, 'Save'), s.journal.accounts.length ? row(dim('ProjectX'), link, h('button.btn', { onclick: () => run(trading.post('/api/trading/account', { id: a.rules.id, projectxId: link.value ? Number(link.value) : null })) }, 'Link')) : null),
+          row(mono(`cushion ${money(a.cushion)} / ${money(a.rules.drawdown)}`, a.cushion > a.rules.drawdown * 0.5 ? GOOD : BAD), dim(`fails at ${money(a.threshold)} · ${money(a.toTarget)} to the ${money(a.rules.profitTarget)} target · ${a.rules.drawdownType.replace('-', ' ')} drawdown · consistency ${a.rules.consistencyPercent}% · ${a.rules.minTradingDays} days min · up to ${a.rules.maxMicros} micros`)),
+          a.source === 'projectx' ? dim(`Today on ProjectX: ${money(a.todayPnl)}`) : null,
+        );
+      }),
+    ],
+    paper: (s) => [
+      dim('The playbooks paper-trade themselves: every setup that triggers is filled on the signal candle’s close and tracked to its stop, its target, or flat at 13:00 PT. P&L is for one micro.'),
+      row(...s.paper.stats.map((st) => card(h('b', { style: `color:${PLAYBOOK_BY_ID[st.playbook].color}` }, PLAYBOOK_BY_ID[st.playbook].name), mono(`${st.totalR >= 0 ? '+' : ''}${st.totalR}R`, tone(st.totalR)), dim(`${st.trades} trades · ${Math.round(st.winRate * 100)}% win · ${money(st.dollars)}/micro`)))),
+      heading(`Today: ${s.paper.todayR >= 0 ? '+' : ''}${s.paper.todayR}R · ${money(s.paper.todayDollars)} per micro`),
+      ...(s.paper.today.length ? s.paper.today : [null]).map((t) =>
+        t ? card(row(mono(t.symbol, INSTRUMENTS[t.symbol].ink), mono(t.side.toUpperCase(), t.side === 'long' ? GOOD : BAD), h('b', {}, PLAYBOOK_BY_ID[t.playbook].name), h('span.grow', {}), mono(t.outcome === 'open' ? `LIVE ${t.r}R` : `${t.r >= 0 ? '+' : ''}${t.r}R`, t.outcome === 'open' ? undefined : tone(t.r)), mono(money(t.dollars))), dim(`${t.why} · entry ${t.entry} stop ${t.stop} target ${t.target}${t.exit != null ? ` → ${t.exit} (${t.outcome})` : ''}`)) : dim('No paper trades yet today.'),
+      ),
+      heading('Before today'),
+      ...s.paper.recent.slice(0, 25).map((t) => row(mono(t.day), mono(t.symbol, INSTRUMENTS[t.symbol].ink), dim(PLAYBOOK_BY_ID[t.playbook].short), mono(t.side), h('span.grow', {}), mono(`${t.r >= 0 ? '+' : ''}${t.r}R`, tone(t.r)))),
+    ],
+    backtest: (s) => {
+      const bt = s.backtest;
+      if (!bt) return [dim('The backtest starts a few seconds after the office does.')];
+      return [
+        row(dim(bt.running ? 'Replaying…' : `${bt.days.length} trading days (${bt.days[0] ?? ''} → ${bt.days.at(-1) ?? ''}), run ${new Date(bt.ranAt).toLocaleTimeString()}`), h('span.grow', {}), h('button.btn', { disabled: bt.running, onclick: () => run(trading.post('/api/trading/backtest', {}), 'Backtest started') }, '↻ Run again')),
+        dim(bt.note),
+        bt.best ? card(h('b', {}, `Best edge this month: ${PLAYBOOK_BY_ID[bt.best.playbook].name} on ${bt.best.symbol}`), dim(`${bt.best.avgR >= 0 ? '+' : ''}${bt.best.avgR}R a trade over ${bt.best.trades} trades`)) : null,
+        ...PLAYBOOKS.map((p) => {
+          const rows = bt.stats.filter((x) => x.playbook === p.id);
+          return card(
+            h('b', { style: `color:${p.color}` }, `${p.name} · ${p.mentor}`),
+            h(
+              'table',
+              { style: 'width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums' },
+              h('tr', { style: 'opacity:.6;text-align:left' }, ...['Market', 'Trades', 'Win %', 'Avg R', 'Total R', 'Max DD', '$ / micro'].map((c) => h('th', {}, c))),
+              ...rows.map((r) => h('tr', { style: r.symbol === 'ALL' ? 'font-weight:900' : '' }, h('td', {}, r.symbol), h('td', {}, String(r.trades)), h('td', {}, `${Math.round(r.winRate * 100)}%`), h('td', { style: `color:${tone(r.avgR)}` }, String(r.avgR)), h('td', { style: `color:${tone(r.totalR)}` }, String(r.totalR)), h('td', {}, String(r.maxDrawdownR)), h('td', {}, money(r.dollars)))),
+            ),
+          );
+        }),
+        heading('Eval simulator (Law of 10, NQ/ES/GC trades in order)'),
+        ...PLAYBOOKS.map((p) => card(h('b', { style: `color:${p.color}` }, p.name), row(...PROP_ACCOUNTS.map((a) => {
+          const e = bt.evals.find((x) => x.playbook === p.id && x.accountId === a.id);
+          return e ? h('span', { style: 'margin-right:14px' }, `${a.firm} ${a.size / 1000}K: `, mono(e.result.toUpperCase(), e.result === 'passed' ? GOOD : e.result === 'busted' ? BAD : WARN), dim(` ${money(e.pnl)} in ${e.days}d`)) : null;
+        })))),
+      ];
+    },
+    alerts: (s) => [
+      heading('TradingView alerts'),
+      ...(s.alerts.length ? s.alerts.slice(0, 20).map((a) => card(row(mono(new Date(a.at).toLocaleTimeString()), mono(a.symbol || '—'), a.side ? mono(a.side.toUpperCase(), a.side === 'long' ? GOOD : BAD) : null, h('b', {}, a.setup), a.price ? mono(String(a.price)) : null, h('span.grow', {}), a.playbook ? dim(PLAYBOOK_BY_ID[a.playbook].name) : null), a.message ? dim(a.message) : null)) : [dim('No alerts yet. Set one up under 🔌 Connections: when your indicator fires, the office dings and the desk agent jumps.')]),
+      heading(`Journal${s.journal.connected ? ` · ProjectX (${s.journal.userName})` : ''}`),
+      ...(s.journal.today.length
+        ? s.journal.today.map((t) => card(row(mono(new Date(t.exitAt).toLocaleTimeString()), mono(t.symbol), mono(t.side.toUpperCase(), t.side === 'long' ? GOOD : BAD), mono(`×${t.qty}`), dim(`${fmt(t.entry)} → ${fmt(t.exit)}`), h('span.grow', {}), mono(money(t.pnl), tone(t.pnl)))))
+        : [dim(s.journal.connected ? 'No trades on your accounts in the last day.' : 'Connect ProjectX under 🔌 Connections to pull your real fills here. The Journal desk reviews them against the playbooks.')]),
+    ],
+    connections: (s) => {
+      const origin = location.origin;
+      const hook = `${origin}${s.webhook.path}?key=${s.webhook.key}`;
+      const user = h('input', { placeholder: 'ProjectX username', autocomplete: 'off', style: 'width:200px' });
+      const key = h('input', { placeholder: 'API key', type: 'password', autocomplete: 'off', style: 'width:260px' });
+      const base = h('input', { placeholder: 'https://api.topstepx.com/api', style: 'width:280px' });
+      const tpUrl = h('input', { placeholder: 'http://localhost:4040', value: s.tradePilot.url ?? '', style: 'width:220px' });
+      const tpKey = h('input', { placeholder: 'Trade Pilot signal key', type: 'password', autocomplete: 'off', style: 'width:240px' });
+      const template = JSON.stringify({ symbol: '{{ticker}}', side: 'long', setup: 'VWAP Double Break', price: '{{close}}', message: '{{strategy.order.comment}}' });
+      return [
+        heading('Live data'),
+        ...s.feeds.map((f) => card(row(mono(f.ok ? 'LIVE' : 'DOWN', f.ok ? GOOD : BAD), h('b', {}, f.name), h('span.grow', {}), f.lastAt ? dim(`updated ${new Date(f.lastAt).toLocaleTimeString()}`) : null), dim(f.note))),
+        heading('TradingView → the office'),
+        card(
+          dim('In TradingView, create an alert on your indicator or strategy, tick Webhook URL and paste this. When it fires, the office dings, the playbook’s desk agent jumps up, and the alert lands on the Risk & Journal screen.'),
+          row(h('input', { value: hook, readonly: true, style: 'flex:1;min-width:300px;font-family:ui-monospace,Menlo,monospace', onclick: (e: Event) => (e.target as HTMLInputElement).select() }), h('button.btn', { onclick: () => void navigator.clipboard?.writeText(hook).then(() => ((note = 'Webhook URL copied'), render())) }, 'Copy'), h('button.btn', { onclick: () => run(trading.post('/api/trading/webhook-key', {}), 'New key: update your alerts') }, 'New key')),
+          dim('Alert message (JSON, TradingView fills the {{…}}): name the setup so it rings the right desk.'),
+          h('code', { style: 'white-space:pre-wrap;font-size:12px' }, template),
+          dim(/localhost|127\.0\.0\.1/.test(origin) ? 'TradingView’s servers can’t reach localhost: open a tunnel (for example `cloudflared tunnel --url http://localhost:4600`) and use its https address in place of this one.' : 'TradingView only posts to https on port 443.'),
+        ),
+        heading('ProjectX (TopstepX, Lucid, Top One) → the journal'),
+        card(
+          s.journal.connected
+            ? row(mono('CONNECTED', GOOD), h('b', {}, s.journal.userName ?? ''), dim(`${s.journal.accounts.length} accounts · synced ${s.journal.syncedAt ? new Date(s.journal.syncedAt).toLocaleTimeString() : '—'}`), h('span.grow', {}), h('button.btn', { onclick: () => run(trading.post('/api/trading/projectx', { action: 'disconnect' }), 'Disconnected') }, 'Disconnect'))
+            : row(user, key, base, h('button.btn.primary', { onclick: () => run(trading.post('/api/trading/projectx', { userName: user.value, apiKey: key.value, baseUrl: base.value }), 'Connected') }, 'Connect')),
+          s.journal.error ? mono(s.journal.error, BAD) : null,
+          dim('Read-only: the office reads balances and fills, never orders. The key stays on this machine (readable only by you). Each firm has its own ProjectX gateway: TopstepX is the default; paste your firm’s API address if it’s different.'),
+        ),
+        heading('Trade Pilot'),
+        card(
+          dim('Send every paper setup and TradingView alert on to Trade Pilot’s signal inbox, so both apps see the same morning. Use the key from Trade Pilot’s TradingView connection.'),
+          row(tpUrl, tpKey, h('button.btn', { onclick: () => run(trading.post('/api/trading/tradepilot', { url: tpUrl.value, key: tpKey.value }), 'Saved') }, 'Save'), s.tradePilot.forwarding ? h('button.btn', { onclick: () => run(trading.post('/api/trading/tradepilot', { url: null }), 'Stopped') }, 'Stop') : null),
+          s.tradePilot.forwarding ? mono(`FORWARDING to ${s.tradePilot.url}`, GOOD) : dim('Not forwarding.'),
+        ),
+        heading('Broker'),
+        card(mono('LOCKED', BAD), dim('The office never connects to a broker or places an order. It proposes; you click.')),
+      ];
+    },
   };
 
+  // The tabs only change when you pick one, so a click never lands on a button the next snapshot replaced.
+  const renderNav = () => nav.replaceChildren(...TABS.map((t) => h('button.btn', { type: 'button', class: t.id === tab ? 'on' : '', onclick: () => ((tab = t.id), (note = ''), renderNav(), render()) }, t.label)));
   const render = () => {
     const s = trading.snap;
-    nav.replaceChildren(...tabs.map((t) => h('button.btn', { type: 'button', class: t.id === tab ? 'on' : '', onclick: () => ((tab = t.id), (note = ''), render()) }, t.label)));
-    foot.textContent = note || (s ? `${s.source === 'sample' ? 'Sample feed — not a market. ' : ''}Paper only. The office never places an order.` : 'Loading…');
+    const q = s?.quotes.map((x) => `${x.symbol} ${fmt(x.last, x.decimals)} ${pct(x.changePct)}`).join(' · ');
+    foot.textContent = note || (s ? (s.ready ? `${q} · proposals only, never orders` : 'Connecting to the market…') : 'Loading…');
     if (!s) return body.replaceChildren(h('p', {}, 'Waiting for the market desk…'));
-    if (tab === 'news') {
-      body.replaceChildren(...s.news.map((n) => card(row(mono(n.time), mono(n.impact.toUpperCase(), n.impact === 'high' ? '#d63c55' : n.impact === 'med' ? '#c98a00' : undefined), h('b', {}, n.headline), h('span.grow', {}), mono(n.symbols.join(' '))))));
-    } else if (tab === 'proposals') {
-      body.replaceChildren(...s.proposals.map((p) => proposalCard(p, s)));
-    } else if (tab === 'tickets') {
-      body.replaceChildren(...(s.tickets.length ? s.tickets.map((t) => ticketCard(t, s)) : [card(h('b', {}, 'No tickets yet'), h('span', { style: 'opacity:.7' }, 'Take a proposal on paper on The Pit, then graduate it. Bulwark checks it against the account rules here.'))]));
-    } else if (tab === 'playbook') {
-      body.replaceChildren(...s.playbook.map((p) => card(row(h('input', { type: 'checkbox', checked: p.done, onchange: async () => { await trading.togglePlaybook(p.id); render(); } }), h('b', { style: p.done ? 'opacity:.5;text-decoration:line-through' : '' }, p.label), h('span.grow', {}), h('span', { style: 'opacity:.6' }, p.owner)))));
-    } else {
-      body.replaceChildren(...s.connectors.map((c) => card(row(mono(c.status.toUpperCase(), c.status === 'live' ? '#0a9d6a' : c.status === 'locked' ? '#d63c55' : '#c98a00'), h('b', {}, c.name)), h('span', { style: 'opacity:.7' }, c.note))));
-    }
+    body.replaceChildren(...views[tab](s).filter((x): x is Node => !!x));
   };
   off = trading.on(() => {
-    // Redraw with the snapshot unless someone is midway through a click.
-    if (!body.matches(':hover')) render();
+    // Redraw with the snapshot unless someone is midway through a click or typing.
+    if (!editing && !body.matches(':hover')) render();
   });
+  renderNav();
   render();
 }

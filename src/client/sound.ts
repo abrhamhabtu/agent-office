@@ -37,7 +37,7 @@ export interface Listener extends Pos {
 
 // The kitchen props (office.ts puts the kitchen at x -14.5, z 12.2).
 const COFFEE_MACHINE: Pos = { x: -15.7, y: 1.4, z: 12.2 };
-const FRIDGE: Pos = { x: -11.3, y: 1.1, z: 12.2 };
+const FRIDGE: Pos = { x: -13.8, y: 1.1, z: 12.2 };
 /** Just outside the office's windows (not the loft's). */
 const WINDOWS: Pos[] = OPENINGS.filter((o) => o.y0 < 2).map((o) =>
   o.wall === 'south' || o.wall === 'north'
@@ -48,19 +48,17 @@ const WINDOWS: Pos[] = OPENINGS.filter((o) => o.y0 < 2).map((o) =>
 const GONG_AT: Pos = { x: GONG.x, y: GONG.height - 1.36, z: GONG.z };
 /** The arcade cabinet's speaker, under its screen. */
 const CABINET_AT: Pos = { x: CABINET.x - 0.2, y: 1.2, z: CABINET.z };
-/** A gong's overtones don't line up like a string's: [ratio to the lowest, loudness, seconds to die away]. */
-const GONG_PARTIALS: [number, number, number][] = [
-  [1, 0.8, 7],
-  [1.51, 0.75, 5.5],
-  [2.13, 0.65, 4.6],
-  [2.66, 0.55, 3.8],
-  [3.19, 0.45, 3.1],
-  [3.84, 0.38, 2.5],
-  [4.48, 0.3, 2],
-  [5.27, 0.22, 1.6],
-  [6.35, 0.16, 1.2],
-  [7.61, 0.1, 0.9],
-  [9.08, 0.07, 0.6],
+/** A small brass bell's overtones: [ratio to the lowest, loudness, seconds to ring out once struck for the last time]. */
+const BELL_PARTIALS: [number, number, number][] = [
+  [0.5, 0.25, 2.6],
+  [1, 1, 2.2],
+  [1.19, 0.45, 1.8],
+  [1.5, 0.3, 1.5],
+  [2, 0.55, 1.3],
+  [2.52, 0.35, 1],
+  [2.76, 0.4, 0.9],
+  [3.9, 0.22, 0.6],
+  [5.4, 0.12, 0.4],
 ];
 
 const rand = (a: number, b: number) => a + Math.random() * (b - a);
@@ -1040,12 +1038,13 @@ export class OfficeSound {
     this.count('creak');
   }
 
-  // ---- The gong ----------------------------------------------------------------------------------
+  // ---- The opening bell --------------------------------------------------------------------------
 
   /**
-   * The gong by the PR board rings: someone hit it, a pull request merged (a harder stroke), or the
-   * task queue emptied (three strokes, each bigger than the last). From where it hangs, so you hear
-   * which way it is.
+   * The exchange bell by the proposals board rings: someone walked up and rang it (a short ring), the
+   * opening bell (a long one, 06:30 PT), or the closing bell and a merge (in between). It's an electric
+   * trading-floor bell, not a gong: a clapper hammering a bright brass bell twenty-odd times a second,
+   * the whole thing ringing out when it stops. From where it hangs, so you hear which way it is.
    */
   gong(why: GongWhy) {
     this.unlock();
@@ -1053,58 +1052,77 @@ export class OfficeSound {
     if (!ctx) return;
     if (ctx.state === 'suspended') void ctx.resume();
     this.count(`gong.${why}`);
-    // Someone banging it is the room; a merge is news for the whole floor (and from another tab too,
-    // like the dings), so it carries further.
-    const out = why === 'hit' ? this.panner(GONG_AT, 4, 0.6) : this.panner(GONG_AT, 8, 0.45);
+    const out = why === 'hit' ? this.panner(GONG_AT, 4, 0.6) : this.panner(GONG_AT, 9, 0.4);
     out.connect(why === 'hit' ? this.ambience : this.alerts);
-    const t0 = ctx.currentTime + 0.03;
-    if (why === 'queue') [0.7, 0.85, 1.1].forEach((strength, i) => this.strike(out, t0 + i * 0.85, strength));
-    else this.strike(out, t0, why === 'merged' ? 1 : rand(0.6, 0.8));
+    this.ringBell(out, ctx.currentTime + 0.03, why === 'queue' ? 5 : why === 'merged' ? 3.2 : 1.4, why === 'hit' ? 0.75 : 1);
   }
 
-  /** One stroke of the mallet: a felt thump, the metal ringing, and a bright wash that blooms after. */
-  private strike(out: AudioNode, t0: number, strength: number) {
+  private ringBell(out: AudioNode, t0: number, seconds: number, strength: number) {
     const ctx = this.ctx!;
-    const f0 = 118 * rand(0.98, 1.02);
-    const ring = ctx.createGain();
-    ring.gain.value = 0.3 * strength;
-    ring.connect(out);
-    const long = 0.6 + 0.4 * strength;
-    for (const [ratio, amp, decay] of GONG_PARTIALS) {
-      const f = f0 * ratio;
-      const end = t0 + decay * long;
-      // Two of each a few cents apart, so the tone shimmers as it rings.
-      for (const cents of [-1, 1]) {
+    const f0 = 760 * rand(0.99, 1.01);
+    const rate = 22;
+    const period = 1 / rate;
+    const end = t0 + seconds;
+    // The clapper: every strike kicks the bell back up, and it sags a little before the next one.
+    const hammer = ctx.createGain();
+    hammer.gain.setValueAtTime(0.0001, t0);
+    for (let t = t0; t < end; t += period) {
+      hammer.gain.setValueAtTime(0.32 * strength, t);
+      hammer.gain.exponentialRampToValueAtTime(0.14 * strength, t + period * 0.92);
+    }
+    hammer.gain.setValueAtTime(0.3 * strength, end);
+    hammer.connect(out);
+    for (const [ratio, amp, ring] of BELL_PARTIALS) {
+      for (const cents of [-4, 4]) {
         const o = ctx.createOscillator();
-        // Struck hard, a gong starts a touch sharp and settles.
-        o.frequency.setValueAtTime(f * (1 + 0.012 * strength), t0);
-        o.frequency.exponentialRampToValueAtTime(f, t0 + 1.2);
-        o.detune.value = cents * rand(2, 5);
+        o.frequency.value = f0 * ratio;
+        o.detune.value = cents;
         const g = ctx.createGain();
+        // Each overtone rings out at its own pace once the clapper stops: the high ones go first.
         g.gain.setValueAtTime(0.0001, t0);
-        g.gain.exponentialRampToValueAtTime(amp * 0.5, t0 + 0.01 + ratio * 0.004);
-        g.gain.exponentialRampToValueAtTime(0.0001, end);
-        o.connect(g).connect(ring);
+        g.gain.exponentialRampToValueAtTime(amp * 0.5, t0 + 0.004);
+        g.gain.setValueAtTime(amp * 0.5, end);
+        g.gain.exponentialRampToValueAtTime(0.0001, end + ring);
+        o.connect(g).connect(hammer);
         o.start(t0);
-        o.stop(end + 0.05);
+        o.stop(end + ring + 0.05);
       }
     }
-    const thump = this.noise(this.buf.white);
-    const thumpG = ctx.createGain();
-    thumpG.gain.setValueAtTime(0.0001, t0);
-    thumpG.gain.exponentialRampToValueAtTime(0.45 * strength, t0 + 0.005);
-    thumpG.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.12);
-    thump.connect(biquad(ctx, 'lowpass', 420, 0.8)).connect(thumpG).connect(out);
-    thump.start(t0);
-    thump.stop(t0 + 0.15);
-    const wash = this.noise(this.buf.white, true);
-    const washG = ctx.createGain();
-    washG.gain.setValueAtTime(0, t0);
-    washG.gain.linearRampToValueAtTime(0.03 * strength, t0 + 0.45);
-    washG.gain.exponentialRampToValueAtTime(0.0001, t0 + 3.5 * long);
-    wash.connect(biquad(ctx, 'bandpass', 3200, 1.2)).connect(washG).connect(out);
-    wash.start(t0);
-    wash.stop(t0 + 3.5 * long + 0.05);
+    // The clapper's tick on the metal.
+    const click = this.noise(this.buf.white, true);
+    const clickG = ctx.createGain();
+    clickG.gain.setValueAtTime(0.0001, t0);
+    for (let t = t0; t < end; t += period) {
+      clickG.gain.setValueAtTime(0.09 * strength, t);
+      clickG.gain.exponentialRampToValueAtTime(0.0001, t + 0.012);
+    }
+    click.connect(biquad(ctx, 'highpass', 3500, 0.7)).connect(clickG).connect(out);
+    click.start(t0);
+    click.stop(end + 0.05);
+  }
+
+  /** A TradingView alert: two bright chimes, so it's heard over the room from another tab too. */
+  alertDing() {
+    this.unlock();
+    const ctx = this.ctx;
+    if (!ctx) return;
+    if (ctx.state === 'suspended') void ctx.resume();
+    this.count('tradingview');
+    [1318.5, 1760, 1318.5, 1760].forEach((f, i) => {
+      const t0 = ctx.currentTime + 0.02 + i * 0.16 + (i >= 2 ? 0.35 : 0);
+      for (const [ratio, amp] of [[1, 0.28], [2.76, 0.07], [5.4, 0.03]] as const) {
+        const o = ctx.createOscillator();
+        const g = ctx.createGain();
+        o.type = 'sine';
+        o.frequency.value = f * ratio;
+        g.gain.setValueAtTime(0.0001, t0);
+        g.gain.exponentialRampToValueAtTime(amp, t0 + 0.006);
+        g.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.9 / ratio);
+        o.connect(g).connect(this.alerts);
+        o.start(t0);
+        o.stop(t0 + 1);
+      }
+    });
   }
 
   // ---- The arcade -------------------------------------------------------------------------------

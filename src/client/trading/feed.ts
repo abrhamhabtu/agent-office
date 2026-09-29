@@ -1,11 +1,15 @@
-import type { ProposalAction, TradingSnapshot } from '../../shared/trading';
+import type { ProposalAction, TradingSnapshot, TvAlert } from '../../shared/trading';
 
-/** The market desk as the browser sees it: one snapshot, refreshed every second or two, and who wants to hear. */
+/** The market desk as the browser sees it: one snapshot, refreshed every second or so, and who wants to hear. */
 class TradingFeed {
   snap: TradingSnapshot | null = null;
   private listeners = new Set<() => void>();
+  private alertListeners = new Set<(a: TvAlert) => void>();
+  private bellListeners = new Set<(kind: 'open' | 'close') => void>();
   private timer = 0;
   private busy = false;
+  private seenAlerts: Set<string> | null = null;
+  private rungBell: number | null | undefined;
   /** Bumps on every snapshot, so a screen can tell whether it has anything new to draw. */
   tick = 0;
 
@@ -14,12 +18,22 @@ class TradingFeed {
     return () => this.listeners.delete(fn);
   }
 
+  /** A TradingView alert came in since the page loaded. */
+  onAlert(fn: (a: TvAlert) => void) {
+    this.alertListeners.add(fn);
+  }
+
+  /** The opening or closing bell rang (in the last minute and a half, while this page was open). */
+  onBell(fn: (kind: 'open' | 'close') => void) {
+    this.bellListeners.add(fn);
+  }
+
   start() {
     if (this.timer) return;
     void this.pull();
     this.timer = window.setInterval(() => {
       if (!document.hidden) void this.pull();
-    }, 1500);
+    }, 1200);
   }
 
   private async pull() {
@@ -38,10 +52,24 @@ class TradingFeed {
   private set(s: TradingSnapshot) {
     this.snap = s;
     this.tick++;
+    // Alerts and bells that happen while the page is open ring once; what was there before doesn't.
+    if (this.seenAlerts === null) this.seenAlerts = new Set(s.alerts.map((a) => a.id));
+    else
+      for (const a of [...s.alerts].reverse())
+        if (!this.seenAlerts.has(a.id)) {
+          this.seenAlerts.add(a.id);
+          for (const fn of this.alertListeners) fn(a);
+        }
+    const bell = s.session.lastBell;
+    if (this.rungBell === undefined) this.rungBell = bell?.at ?? null;
+    else if (bell && bell.at !== this.rungBell) {
+      this.rungBell = bell.at;
+      if (s.at - bell.at < 90_000) for (const fn of this.bellListeners) fn(bell.kind);
+    }
     for (const fn of this.listeners) fn();
   }
 
-  private async post(path: string, body: object): Promise<string | undefined> {
+  async post(path: string, body: object): Promise<string | undefined> {
     try {
       const res = await fetch(path, { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
       const json = (await res.json()) as TradingSnapshot & { error?: string };
@@ -53,8 +81,8 @@ class TradingFeed {
     return undefined;
   }
 
-  togglePlaybook(id: string) {
-    return this.post('/api/trading/playbook', { id });
+  toggleChecklist(id: string) {
+    return this.post('/api/trading/checklist', { id });
   }
 
   act(id: string, action: ProposalAction) {

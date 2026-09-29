@@ -51,10 +51,11 @@ import { openAsk } from './ui/ask';
 import { openTeam, routeTeamMessage } from './ui/team';
 import { openAccounts, routeAccountsMessage } from './ui/accounts';
 import { openServices } from './ui/services';
-import { floorRole } from '../shared/trading';
+import { floorRole, PLAYBOOK_BY_ID, PODS, podOf, seatJob, SYMBOLS, type FloorRole } from '../shared/trading';
 import { trading } from './trading/feed';
 import { openTrading, type PanelTab } from './trading/panel';
-import { ConnectorsBoard, MarketMap, NewsBoard, PlaybookBoard, ProposalsBoard, TickerStrip, TicketsBoard, bellText } from './trading/screens';
+import { BacktestBoard, EvalBoard, MarketMap, NewsBoard, PaperBoard, PlaybookBoard, ProposalsBoard, TickerStrip, bellText, type Screen as TradingScreen } from './trading/screens';
+import { buildPodScreens } from './trading/pods';
 import { openQueue } from './ui/queue';
 import { openUpgrade, restarting, showRestarting, showUpgraded } from './ui/upgrade';
 import { openHelp, renderCaffeine, renderChat, renderPeople, renderWorkers, updateSpeaking } from './ui/hud';
@@ -136,7 +137,7 @@ noOutline(holiday.group);
 /** What each board agent is for: its board's icon, what it offers on the card over its head, and an example ask. */
 const STATION_INFO: Record<StationKind, { icon: string; offer: string; does: string; example: string }> = {
   issues: { icon: '📰', offer: 'Ask me about the news', does: 'I sum up catalysts and flag what moves the tape', example: 'What high-impact news is left before 9:00 PT?' },
-  pulls: { icon: '🎯', offer: 'Ask me about setups', does: 'I stress-test the VWAP and S/R proposals', example: 'Walk me through the MNQ VWAP setup and what would invalidate it' },
+  pulls: { icon: '🎯', offer: 'Ask me about setups', does: 'I stress-test the live proposals from the playbooks', example: 'Walk me through the NQ VWAP pullback and what would invalidate it' },
   queue: { icon: '📋', offer: 'Ask me about the plan', does: 'I run the playbook and queue the code work', example: 'What is left on the playbook before the open?' },
 };
 /** The board agents waiting by their boards before anyone has asked them anything (see buildKiosk). */
@@ -199,55 +200,84 @@ const queueTex = new QueueBoardTexture();
 mountBoard(office.boardMeshes.queue, queueTex.texture, () => queueTex.render(store.queue, store.workers), ['queue', 'workers']);
 
 // ---- The trading floors ----------------------------------------------------------------------------
-// The office's boards show the market desk instead of GitHub: news on the wire, the day's setups, the playbook,
-// the connectors, and the market map on the TV. One snapshot feeds every screen (see trading/feed.ts).
-const tradingRole = () => floorRole(store.currentFloor()?.name);
-const newsScreen = new NewsBoard();
-const proposalsScreen = new ProposalsBoard();
-const ticketsScreen = new TicketsBoard();
-const playbookScreen = new PlaybookBoard();
-const connectorsScreen = new ConnectorsBoard();
-const marketMap = new MarketMap();
+// The office's boards show the market desk instead of GitHub. 🔔 Opening Bell: the news and calendar, the
+// morning playbook, the live proposals and the market. 🗄️ Back Office: the backtest, the eval simulator,
+// the paper book and the market. Screens hang over each pod, and the tape runs along the north wall.
+// One snapshot feeds every screen (see trading/feed.ts); the TV stays free for screen shares.
+const tradingRole = (): FloorRole => floorRole(store.currentFloor()?.name);
+const BOARD_SET: Record<FloorRole, Record<'issues' | 'queue' | 'pulls' | 'services', { screen: TradingScreen; label: string; tab: PanelTab }>> = (() => {
+  const market = { screen: new MarketMap(), label: '📊 Live market', tab: 'connections' as PanelTab };
+  return {
+    bell: {
+      issues: { screen: new NewsBoard(), label: '📰 News & calendar', tab: 'news' },
+      queue: { screen: new PlaybookBoard(), label: '📋 Morning playbook', tab: 'playbook' },
+      pulls: { screen: new ProposalsBoard(), label: '🎯 Trade proposals', tab: 'proposals' },
+      services: market,
+    },
+    office: {
+      issues: { screen: new BacktestBoard(), label: '🧪 Backtest lab', tab: 'backtest' },
+      queue: { screen: new EvalBoard(), label: '🏦 Prop eval simulator', tab: 'backtest' },
+      pulls: { screen: new PaperBoard(), label: '📒 Paper book', tab: 'paper' },
+      services: market,
+    },
+  };
+})();
 const tape = new TickerStrip();
+const pods = buildPodScreens();
+office.group.add(pods.group);
 function paintTrading() {
   const role = tradingRole();
   const snap = trading.snap;
-  const on = (mesh: THREE.Mesh, screen: { texture: THREE.Texture; render(s: typeof snap, r: typeof role): void }) => {
-    const mat = mesh.material as THREE.MeshBasicMaterial;
-    if (mat.map !== screen.texture) {
-      mat.map = screen.texture;
+  for (const key of ['issues', 'queue', 'pulls', 'services'] as const) {
+    const b = BOARD_SET[role][key];
+    const mat = office.boardMeshes[key].material as THREE.MeshBasicMaterial;
+    if (mat.map !== b.screen.texture) {
+      mat.map = b.screen.texture;
       mat.needsUpdate = true;
     }
-    screen.render(snap, role);
-  };
-  on(office.boardMeshes.issues, newsScreen);
-  on(office.boardMeshes.pulls, role === 'desk' ? ticketsScreen : proposalsScreen);
-  on(office.boardMeshes.queue, playbookScreen);
-  on(office.boardMeshes.services, connectorsScreen);
-  if (!tvStream) {
-    tvMat.map = marketMap.texture;
-    tvMat.needsUpdate = true;
+    office.setBoardLabel(key, b.label);
+    b.screen.render(snap, role);
   }
-  marketMap.render(snap, role);
+  pods.render(snap, role);
+}
+/** The name of a seat on this floor: its job on the trading floor, if it has one. */
+function deskName(id: string): string {
+  return seatJob(tradingRole(), id) ?? DESK_BY_ID.get(id)?.label ?? 'the desk';
+}
+/** What a laptop charts while its worker's terminal is empty: its pod's market, the way that pod reads it. */
+function laptopChart(deskId: string): { symbol: (typeof SYMBOLS)[number]; view: 'vwap' | 'zones' | 'profile' } {
+  const n = Number(/^desk-(\d+)$/.exec(deskId)?.[1] ?? 1);
+  const pod = podOf(deskId) ?? 0;
+  const symbol = SYMBOLS[(n - 1) % 4]!;
+  if (tradingRole() === 'office') return { symbol, view: 'vwap' };
+  return { symbol, view: pod === 1 ? 'zones' : pod === 2 ? 'profile' : 'vwap' };
 }
 // The tape runs the length of the north wall, above the boards.
 {
-  const strip = new THREE.Mesh(new THREE.PlaneGeometry(34, 34 * (128 / 2048)), new THREE.MeshBasicMaterial({ map: tape.texture, toneMapped: false }));
-  strip.position.set(0, 4.85, FLOOR.minZ + 0.07);
+  const len = FLOOR.maxX - FLOOR.minX - 2;
+  const strip = new THREE.Mesh(new THREE.PlaneGeometry(len, len * (128 / 2048)), new THREE.MeshBasicMaterial({ map: tape.texture, toneMapped: false }));
+  strip.position.set((FLOOR.minX + FLOOR.maxX) / 2, 4.85, FLOOR.minZ + 0.07);
   office.group.add(strip);
 }
-/** The bell rings for everyone at the open and the close: the next bell flips when one passes. */
-let lastBell: 'open' | 'close' | null = null;
-trading.on(() => {
-  paintTrading();
-  const s = trading.snap;
-  if (!s) return;
-  const kind = s.session.nextBell.kind;
-  if (lastBell && kind !== lastBell && !s.session.weekend) {
-    gongRang(lastBell === 'open' ? 'queue' : 'hit');
-    toast(lastBell === 'open' ? '🔔 The market is open' : '🔔 The session is closed — Ledger is grading the day');
+trading.on(paintTrading);
+// The bells: 06:30 PT opens the New York session, 13:00 PT closes it. Everyone in the office hears it.
+trading.onBell((kind) => {
+  if (kind === 'open') gongRang('queue');
+  else {
+    office.gong.strike(1);
+    sound.gong('merged');
   }
-  lastBell = kind;
+  toast(kind === 'open' ? '🔔 The opening bell: New York is open. Opening range sets at 06:45.' : '🔔 The closing bell: flat for the day. Back Office is grading it.');
+});
+// A TradingView alert: a ding, a toast, and the desk that trades that playbook jumps up.
+trading.onAlert((a) => {
+  sound.alertDing();
+  const book = a.playbook ? PLAYBOOK_BY_ID[a.playbook] : null;
+  toast(`🔔 TradingView · ${a.setup}${a.symbol ? ` ${a.symbol}` : ''}${a.side ? ` ${a.side.toUpperCase()}` : ''}${a.price ? ` @ ${a.price}` : ''}`);
+  const pod = !book ? 3 : book.id === 'supply-demand' ? 1 : book.id === 'failed-auction' ? 2 : 0;
+  pods.flash(pod);
+  for (const [, v] of workerViews) if (podOf(v.deskId) === pod) v.model.cheer(4);
+  idleAgents[STATIONS.findIndex((d) => d.station === 'pulls')]?.model.cheer(4);
 });
 store.on('floors', paintTrading);
 trading.start();
@@ -1240,6 +1270,7 @@ function syncWorkers() {
       // Called to a meeting just now: out of the elevator and over to the table, one after another.
       if (desk.def.room && !seatedAlready) arrivals.add(model, desk);
       const laptop = new Laptop();
+      laptop.chartFor = () => laptopChart(w.deskId);
       desk.laptopAnchor.add(laptop.root);
       noOutline(desk.group);
       desk.chair.rotation.y = 0;
@@ -1414,7 +1445,7 @@ function promptAtDesk(deskId: string) {
   if (!w) {
     if (officeIsFull()) return;
     openPrompt({
-      title: `✨ New task at ${desk.label}`,
+      title: `✨ New task at ${deskName(desk.id)}`,
       subtitle: 'A fresh worker will sit down and start on this right away.',
       warning: pressureNote(store.machine),
       submitLabel: 'Hire & start',
@@ -1445,7 +1476,7 @@ function hireAtDesk(deskId: string) {
   const desk = DESK_BY_ID.get(deskId)!;
   if (officeIsFull()) return;
   openPrompt({
-    title: `✨ Hire a worker at ${desk.label}`,
+    title: `✨ Hire a worker at ${deskName(desk.id)}`,
     subtitle: 'You can start with an empty prompt and send work later.',
     warning: pressureNote(store.machine),
     placeholder: 'Optional first task…',
@@ -1460,7 +1491,7 @@ function hireAtDesk(deskId: string) {
 function killWorker(id: string) {
   const w = store.workers.get(id);
   if (!w) return;
-  const where = DESK_BY_ID.get(w.deskId)?.label ?? 'the desk';
+  const where = deskName(w.deskId);
   const session = w.kind === 'shell' ? 'shared shell' : `${providerLabel(w.provider, store.project)} session`;
   if (w.meeting) {
     // The meeting's worktree is the whole table's: it's tidied away once they've all gone.
@@ -1550,7 +1581,7 @@ function goToDesk(deskId: string) {
   closeAllModals();
   standAt(desk);
   const w = store.workerAtDesk(deskId);
-  toast(w ? `You're at ${desk.label}, ${w.name}'s desk` : `You're at ${desk.label}`);
+  toast(w ? `You're at ${deskName(desk.id)}, ${w.name}'s desk` : `You're at ${deskName(desk.id)}`);
 }
 
 /** Behind the worker, looking over their shoulder at the laptop (or in front of a board agent's kiosk). */
@@ -1777,10 +1808,7 @@ function interact(target: Interactable | null, key: DeskKey, note = aimedNote) {
   if (note && key === 'O') return openIssue(note, net, boardActions());
   if (key !== 'E') return;
   if (target.kind === 'elevator') showElevator();
-  else if (target.kind === 'issues') openTrading(tradingRole(), 'news');
-  else if (target.kind === 'pulls') openTrading(tradingRole(), tradingRole() === 'desk' ? 'tickets' : 'proposals');
-  else if (target.kind === 'services') openTrading(tradingRole(), 'connectors');
-  else if (target.kind === 'queue') openTrading(tradingRole(), 'playbook');
+  else if (target.kind === 'issues' || target.kind === 'pulls' || target.kind === 'services' || target.kind === 'queue') openTrading(tradingRole(), BOARD_SET[tradingRole()][target.kind].tab);
   else if (target.kind === 'tv') watchShare();
   else if (target.kind === 'jukebox') showJukebox();
   else if (target.kind === 'bookshelf') showBookshelf();
@@ -2450,16 +2478,10 @@ function hintFor(it: Interactable): Hint {
     case 'station':
       return it.deskId ? stationHint(it.deskId) : { k: '', parts: [] };
     case 'issues':
-      return board('📰 News & catalysts');
     case 'pulls':
-      return board(tradingRole() === 'desk' ? '🎫 Trade tickets' : '🎯 Trade proposals');
     case 'services':
-      return board('🔌 Connectors');
-    case 'queue': {
-      const p = trading.snap?.playbook;
-      const left = p ? p.filter((x) => !x.done).length : 0;
-      return { k: String(left), parts: [title(`📋 Playbook${left ? ` · ${left} to do` : ''}`), key('E', 'Open')] };
-    }
+    case 'queue':
+      return board(BOARD_SET[tradingRole()][it.kind].label);
     case 'tv': {
       const any = currentShares().length > 0;
       return { k: String(any), parts: [title('📺 Office TV'), key('E', any ? 'Watch full screen' : 'Share your screen')] };
@@ -2606,7 +2628,7 @@ function deskHint(deskId: string): Hint {
     return {
       k: `${paused}|${full}|${m.workers}|${m.limit}|${!!m.pressure}`,
       parts: [
-        h('span.title', {}, `${DESK_BY_ID.get(deskId)!.label} · empty`),
+        h('span.title', {}, `${deskName(deskId)} · empty`),
         ...(full
           ? [h('span.cost', {}, `🚫 Office full · ${m.workers} of ${m.limit} workers`)]
           : [
@@ -3129,7 +3151,7 @@ function refreshShares() {
     tvStream = stream;
     tvVideo.srcObject = stream;
     if (stream) void tvVideo.play().catch(() => {});
-    tvMat.map = stream ? tvTexture : marketMap.texture;
+    tvMat.map = stream ? tvTexture : tvIdle;
     tvMat.needsUpdate = true;
   }
   const box = $('shares');
@@ -3166,10 +3188,11 @@ const waitingNow = () => waitingInOrder(store.workers.values());
 const noMedia = () => (window.isSecureContext ? undefined : 'Voice and screen sharing need HTTPS or localhost — use a TLS proxy, --self-signed, or an SSH tunnel');
 const hud = mountHud(
   [
-    { id: 'issues', icon: '📰', label: 'News', section: 'Open', count: () => trading.snap?.news.filter((n) => n.impact === 'high').length ?? 0, title: () => 'News and catalysts', run: () => openTrading(tradingRole(), 'news') },
-    { id: 'pulls', icon: '🎯', label: 'Proposals', section: 'Open', count: () => trading.snap?.proposals.filter((p) => p.stage === 'ready').length ?? 0, title: () => 'Setups from Vex and Ledge', run: () => openTrading(tradingRole(), tradingRole() === 'desk' ? 'tickets' : 'proposals') },
-    { id: 'queue', icon: '📋', label: 'Playbook', section: 'Open', count: () => trading.snap?.playbook.filter((p) => !p.done).length ?? 0, title: () => "Today's checklist", run: () => openTrading(tradingRole(), 'playbook') },
-    { id: 'services', icon: '🔌', label: 'Connectors', section: 'Open', title: () => 'TradingView, market data and the rest', run: () => openTrading(tradingRole(), 'connectors') },
+    { id: 'issues', icon: '🎯', label: 'Proposals', section: 'Open', count: () => trading.snap?.proposals.filter((p) => p.stage === 'ready' || p.stage === 'live').length ?? 0, title: () => 'Live setups from the playbooks', run: () => openTrading(tradingRole(), 'proposals') },
+    { id: 'pulls', icon: '📰', label: 'News', section: 'Open', count: () => trading.snap?.news.filter((n) => n.kind === 'calendar' && n.impact === 'high' && n.at > Date.now()).length ?? 0, title: () => 'The calendar and the wire', run: () => openTrading(tradingRole(), 'news') },
+    { id: 'queue', icon: '🛡️', label: 'Prop accounts', section: 'Open', title: () => 'Prop accounts and Law-of-10 risk', run: () => openTrading(tradingRole(), 'accounts') },
+    { id: 'services', icon: '🧪', label: 'Backtest', section: 'Open', title: () => 'The backtest, the paper book, the eval simulator', run: () => openTrading(tradingRole(), 'backtest') },
+    { id: 'trading-connections', icon: '🔌', label: 'Connections', section: 'Open', title: () => 'TradingView alerts, ProjectX, Trade Pilot and the feeds', run: () => openTrading(tradingRole(), 'connections') },
     { id: 'whiteboard', icon: '📝', label: 'Whiteboard', section: 'Open', title: () => 'Draw together, live', run: () => openWhiteboard(net) },
     // Up on the top bar while a meeting is on: what's being worked through in the meeting room.
     {

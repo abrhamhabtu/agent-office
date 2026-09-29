@@ -87,14 +87,14 @@ test('walks up and down the office stairs without jumping', (t) => {
   }));
   colliders.push({ minX: LOFT.minX, maxX: LOFT.maxX, minZ: LOFT.minZ, maxZ: LOFT.maxZ, bottom: 2.75, top: 3 });
   const { player, keys, frames } = controller(t, colliders);
-  player.pos.set(2.6, 0, 12);
+  player.pos.set(STAIRS.fromX - 0.4, 0, 12);
   keys('KeyD', 'ShiftLeft');
   frames(20, 0.05);
-  assert.ok(player.pos.x > 9.5, `stuck climbing at ${player.pos.toArray()}`);
+  assert.ok(player.pos.x > LOFT.minX + 0.5, `stuck climbing at ${player.pos.toArray()}`);
   assert.equal(player.pos.y, 3);
   keys('KeyA', 'ShiftLeft');
   frames(20, 0.05);
-  assert.ok(player.pos.x < 3, `stuck descending at ${player.pos.toArray()}`);
+  assert.ok(player.pos.x < STAIRS.fromX, `stuck descending at ${player.pos.toArray()}`);
   assert.equal(player.pos.y, 0);
 });
 
@@ -159,13 +159,15 @@ test('sits on the lounge couch until you walk off, then gets up clear of it', (t
 
 test("gets up from the boss's chair behind it, away from the desk", (t) => {
   const floor: Collider = { minX: LOFT.minX, maxX: LOFT.maxX, minZ: LOFT.minZ, maxZ: LOFT.maxZ, bottom: 2.75, top: 3 };
-  const desk: Collider = { minX: 12.7, maxX: 15.3, minZ: 9.6, maxZ: 10.8, bottom: 3, top: 3.8 };
+  // The big desk just in front of the chair (toward the glass), as office.ts builds it.
+  const chair = SEATING_BY_ID.get('boss-chair')!;
+  const desk: Collider = { minX: chair.x - 1.3, maxX: chair.x + 1.3, minZ: chair.z - 1.6, maxZ: chair.z - 0.4, bottom: 3, top: 3.8 };
   const { player, keys, frames } = controller(t, [floor, desk]);
-  player.sit(seatPlace(SEATING_BY_ID.get('boss-chair')!, 0));
+  player.sit(seatPlace(chair, 0));
   keys('Space');
   frames(1);
   assert.equal(player.seat, null);
-  assert.ok(player.pos.z > 11.9, `got up into the desk at ${player.pos.toArray()}`);
+  assert.ok(player.pos.z > chair.z + 0.7, `got up into the desk at ${player.pos.toArray()}`);
   keys();
   frames(60);
   assert.equal(player.pos.y, 3);

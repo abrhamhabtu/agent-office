@@ -37,7 +37,7 @@ test('the issues and PR agents keep their jobs, and may still be asked for somet
   assert.match(issues, /moves the tape/);
   const pulls = stationBrief('pulls');
   assert.match(pulls, /Setups/);
-  assert.match(pulls, /Vex \(VWAP\)/);
+  assert.match(pulls, /Evan Dyer/);
   for (const brief of [issues, pulls]) {
     assert.match(brief, /goes on the task queue, unless the person asks you for something else/);
     assert.match(brief, /say in a few lines what you did, with links/);

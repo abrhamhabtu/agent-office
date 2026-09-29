@@ -1,5 +1,5 @@
 import http from 'node:http';
-import { actOnProposal, snapshot as tradingSnapshot, togglePlaybook } from './trading.js';
+import { TradingDesk } from './trading/desk.js';
 import type { ProposalAction } from '../shared/trading.js';
 import https from 'node:https';
 import { randomBytes } from 'node:crypto';
@@ -218,6 +218,9 @@ export async function startServer(cfg: Config) {
 
   // --- The building: a floor per project, each with its own workers, boards and queue -----------
   const building = new Building(cfg.dataDir, cfg.projectsDir);
+  // The market desk behind the trading floors' boards: real prices, the playbooks, the paper book.
+  const desk = new TradingDesk(cfg.dataDir);
+  if (!process.env.AGENT_OFFICE_NO_MARKET) desk.start();
   if (cfg.projects) {
     const err = building.setProjectsDir(cfg.projects, 'the command line');
     if (err) console.error(`agent-office: --projects: ${err}`);
@@ -637,6 +640,45 @@ export async function startServer(cfg: Config) {
     return { q, chat: said.hits, terminals: shown.hits, more: said.more || shown.more };
   };
 
+  /** The trading floors' API: the snapshot every board draws, and the few things a person can change. */
+  const tradingRoute = async (p: string, req: http.IncomingMessage, res: http.ServerResponse) => {
+    const body = async () => {
+      try {
+        return JSON.parse((await readBody(req, 8192)) || '{}') as Record<string, unknown>;
+      } catch {
+        return {};
+      }
+    };
+    const done = (why: string | undefined) => (why ? send(res, 400, { error: why }) : send(res, 200, desk.snapshot()));
+    if (p === '/api/trading/snapshot' && req.method === 'GET') return send(res, 200, desk.snapshot(), { 'cache-control': 'no-store' });
+    if (req.method !== 'POST') return send(res, 404, { error: 'Not found' });
+    const b = await body();
+    switch (p) {
+      case '/api/trading/checklist':
+        return done(typeof b.id === 'string' && desk.toggleChecklist(b.id) ? undefined : 'That one is worked out from the tape');
+      case '/api/trading/proposal':
+        return done(desk.act(String(b.id), String(b.action) as ProposalAction));
+      case '/api/trading/account':
+        return done(desk.setAccount(String(b.id), b));
+      case '/api/trading/backtest':
+        void desk.runBacktest();
+        return done(undefined);
+      case '/api/trading/webhook-key':
+        desk.rotateKey();
+        return done(undefined);
+      case '/api/trading/tradepilot':
+        return done(desk.setTradePilot(b.url ?? null, b.key));
+      case '/api/trading/projectx':
+        if (b.action === 'disconnect') {
+          desk.projectx.disconnect();
+          return done(undefined);
+        }
+        return done(await desk.projectx.connect(b.userName, b.apiKey, b.baseUrl));
+      default:
+        return send(res, 404, { error: 'Not found' });
+    }
+  };
+
   const handler = async (req: http.IncomingMessage, res: http.ServerResponse) => {
     try {
       // A service tunnel (localhost:5173 -> the office): relay to that worker's server.
@@ -677,6 +719,22 @@ export async function startServer(cfg: Config) {
         return send(res, 200, { ok: true }, { 'set-cookie': auth.clearCookie(req) });
       }
       if (p === '/api/health') return send(res, 200, { ok: true });
+      // TradingView's servers post alerts here; the key in the URL (or the message) is their only credential.
+      if (p === '/api/trading/tradingview' && req.method === 'POST') {
+        const raw = await readBody(req, 16_000);
+        let key = url.searchParams.get('key');
+        if (!key) {
+          try {
+            const k = (JSON.parse(raw) as { key?: unknown }).key;
+            if (typeof k === 'string') key = k;
+          } catch {
+            // Plain-text alert: the key has to be in the URL.
+          }
+        }
+        if (!desk.checkKey(key)) return send(res, 401, { error: 'Missing or wrong key' });
+        const a = desk.alert(raw.replace(/"key"\s*:\s*"[^"]*",?/, ''));
+        return send(res, 200, { ok: true, id: a.id });
+      }
 
       if (p.startsWith('/assets/')) {
         const file = publicFile(p);
@@ -696,16 +754,7 @@ export async function startServer(cfg: Config) {
         return;
       }
       if (p === '/api/whoami') return send(res, 200, { ok: true, me: meOf(session.account?.id) });
-      if (p === '/api/trading/snapshot' && req.method === 'GET') return send(res, 200, tradingSnapshot());
-      if (p === '/api/trading/playbook' && req.method === 'POST') {
-        const body = JSON.parse((await readBody(req, 4096)) || '{}') as { id?: unknown };
-        return typeof body.id === 'string' && togglePlaybook(body.id) ? send(res, 200, tradingSnapshot()) : send(res, 400, { error: 'No such item' });
-      }
-      if (p === '/api/trading/proposal' && req.method === 'POST') {
-        const body = JSON.parse((await readBody(req, 4096)) || '{}') as { id?: unknown; action?: unknown };
-        const why = actOnProposal(String(body.id), String(body.action) as ProposalAction);
-        return why ? send(res, 400, { error: why }) : send(res, 200, tradingSnapshot());
-      }
+      if (p.startsWith('/api/trading/')) return await tradingRoute(p, req, res);
       if (p === '/api/agents/opencode/models' && req.method === 'GET') {
         try {
           return send(res, 200, { models: await openCodeModels.get() });
@@ -1948,6 +1997,7 @@ export async function startServer(cfg: Config) {
 
   /** With `keep` (a restart), workers' terminals keep running for the next office to pick up. */
   const shutdown = (keep = false) => {
+    desk.stop();
     clearInterval(heartbeat);
     clearInterval(resync);
     clearTimeout(floorsTimer);

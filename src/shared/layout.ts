@@ -2,7 +2,9 @@
 // Units are meters; +y is up. The office floor spans FLOOR.minX..maxX / minZ..maxZ at y = 0,
 // upstairs over a garage whose floor is level with the street (STREET_Y).
 
-export const FLOOR = { minX: -18, maxX: 18, minZ: -13, maxZ: 13 } as const;
+// A trading floor's worth of room: wider than the office it started as, with the extra depth in front
+// of the north wall's boards so the elevator opens onto open floor.
+export const FLOOR = { minX: -20.5, maxX: 20.5, minZ: -15, maxZ: 13 } as const;
 /** How high the ceiling is: a meter over the loft's roof (LOFT.y + LOFT.height), all the way across the room. */
 export const WALL_HEIGHT = 6.8;
 
@@ -25,9 +27,6 @@ const DESK_WIDTH = 2.2;
 const DESK_DEPTH = 1.1;
 export const DESK_SIZE = { width: DESK_WIDTH, depth: DESK_DEPTH, height: 0.78 } as const;
 
-/** The first desks are seats with a job: who sits where on the trading floor. */
-const DESK_LABELS = ['Scout · tape', 'Vex · VWAP', 'Ledge · S/R', 'Ledger · paper book', 'Quill · backtests', 'Bulwark · risk', 'Tick · tickets', 'Overflow'];
-
 function buildDesks(): DeskDef[] {
   const desks: DeskDef[] = [];
   const clusterX = [-10.5, -1.5];
@@ -44,7 +43,7 @@ function buildDesks(): DeskDef[] {
         [pod.front, 0],
       ] as const) {
         for (const dx of [-DESK_WIDTH / 2, DESK_WIDTH / 2]) {
-          desks.push({ id: `desk-${n}`, x: cx + dx, z, rotY, label: DESK_LABELS[n - 1] ?? `Desk ${n}` });
+          desks.push({ id: `desk-${n}`, x: cx + dx, z, rotY, label: `Desk ${n}` });
           n++;
         }
       }
@@ -63,19 +62,19 @@ export const BEANBAGS: DeskDef[] = (
   [
     // Out in the north-east corner past the gong, and between the PR board and the elevator, clear of
     // the gong's front and the elevator doors.
-    [15, -9.8, 0],
-    [5.4, -9.8, 0],
-    [-16.1, -9, Math.PI / 2],
-    [-16.1, -3, Math.PI / 2],
+    [FLOOR.maxX - 3.5, FLOOR.minZ + 3.2, 0],
+    [5.4, FLOOR.minZ + 3.2, 0],
+    [FLOOR.minX + 2.4, -10, Math.PI / 2],
+    [FLOOR.minX + 2.4, -6.5, Math.PI / 2],
     [-8.8, 10.2, Math.PI],
     [0.8, 10.2, Math.PI],
-    [12.2, -5.6, -Math.PI / 2],
-    [12.2, 5.6, -Math.PI / 2],
-    [-16.1, 3, Math.PI / 2],
+    [14.7, -5.6, -Math.PI / 2],
+    [14.7, 5.6, -Math.PI / 2],
+    [FLOOR.minX + 2.4, 4.5, Math.PI / 2],
     // Clear of the board agents' kiosks, and of the floor in front of them.
-    [-13.2, -9.8, 0],
+    [-13.2, FLOOR.minZ + 3.2, 0],
     [-12.6, 9.2, Math.PI / 2],
-    [-5.4, -9.8, 0],
+    [-5.4, FLOOR.minZ + 3.2, 0],
   ] as const
 ).map(([x, z, rotY], i) => ({ id: `beanbag-${i + 1}`, x, z, rotY, label: `Bean bag ${i + 1}`, beanbag: true }));
 
@@ -108,9 +107,9 @@ export const STATION_AGENT: Record<StationKind, { name: string; color: string }>
 };
 
 /** The upstairs office: a glass-walled loft on posts in the south-east corner, looking down on the desks. */
-export const LOFT = { minX: 9, maxX: FLOOR.maxX, minZ: 8, maxZ: FLOOR.maxZ, y: 3, height: 2.8 } as const;
+export const LOFT = { minX: 7.5, maxX: FLOOR.maxX, minZ: 7, maxZ: FLOOR.maxZ, y: 3, height: 2.8 } as const;
 /** Its stairs climb east along the south wall and arrive at the loft's west door. */
-export const STAIRS = { fromX: 3, toX: LOFT.minX, minZ: 11.2, maxZ: FLOOR.maxZ, steps: 15 } as const;
+export const STAIRS = { fromX: LOFT.minX - 6, toX: LOFT.minX, minZ: 11.2, maxZ: FLOOR.maxZ, steps: 15 } as const;
 
 /**
  * The meeting room: glass walls round the space under the boss office, from the loft's posts to the
@@ -118,8 +117,8 @@ export const STAIRS = { fromX: 3, toX: LOFT.minX, minZ: 11.2, maxZ: FLOOR.maxZ, 
  * MEETING_SEATS and server/meetings.ts). The glass stops under the loft's floor; the door is in the
  * north wall, facing the lounge.
  */
-export const MEETING_ROOM = { minX: LOFT.minX + 0.15, maxX: FLOOR.maxX, minZ: LOFT.minZ + 0.15, maxZ: FLOOR.maxZ, height: LOFT.y - 0.25, door: { x0: 10, x1: 11.4 } } as const;
-export const MEETING_TABLE = { x: 13.7, z: 10.55, width: 3.6, depth: 1.2, height: 0.76 } as const;
+export const MEETING_ROOM = { minX: LOFT.minX + 0.15, maxX: FLOOR.maxX, minZ: LOFT.minZ + 0.15, maxZ: FLOOR.maxZ, height: LOFT.y - 0.25, door: { x0: LOFT.minX + 1, x1: LOFT.minX + 2.4 } } as const;
+export const MEETING_TABLE = { x: 14.6, z: 10.1, width: 5.4, depth: 1.4, height: 0.76 } as const;
 /**
  * The chairs round the meeting table, in the order a meeting fills them: the head of the table at its
  * west end (whoever leads or writes the meeting up), then two down each side. (x, z) is where the
@@ -128,14 +127,16 @@ export const MEETING_TABLE = { x: 13.7, z: 10.55, width: 3.6, depth: 1.2, height
 export const MEETING_SEATS: DeskDef[] = (
   [
     [MEETING_TABLE.x - MEETING_TABLE.width / 2 + 0.35, MEETING_TABLE.z, -Math.PI / 2],
-    [MEETING_TABLE.x - 0.6, MEETING_TABLE.z - MEETING_TABLE.depth / 2 + 0.35, Math.PI],
-    [MEETING_TABLE.x - 0.6, MEETING_TABLE.z + MEETING_TABLE.depth / 2 - 0.35, 0],
-    [MEETING_TABLE.x + 1.1, MEETING_TABLE.z - MEETING_TABLE.depth / 2 + 0.35, Math.PI],
-    [MEETING_TABLE.x + 1.1, MEETING_TABLE.z + MEETING_TABLE.depth / 2 - 0.35, 0],
+    [MEETING_TABLE.x - 1.3, MEETING_TABLE.z - MEETING_TABLE.depth / 2 + 0.35, Math.PI],
+    [MEETING_TABLE.x - 1.3, MEETING_TABLE.z + MEETING_TABLE.depth / 2 - 0.35, 0],
+    [MEETING_TABLE.x + 0.4, MEETING_TABLE.z - MEETING_TABLE.depth / 2 + 0.35, Math.PI],
+    [MEETING_TABLE.x + 0.4, MEETING_TABLE.z + MEETING_TABLE.depth / 2 - 0.35, 0],
+    [MEETING_TABLE.x + 2.0, MEETING_TABLE.z - MEETING_TABLE.depth / 2 + 0.35, Math.PI],
+    [MEETING_TABLE.x + 2.0, MEETING_TABLE.z + MEETING_TABLE.depth / 2 - 0.35, 0],
   ] as const
 ).map(([x, z, rotY], i) => ({ id: `meeting-${i + 1}`, x, z, rotY, label: i === 0 ? 'Head of the table' : `Meeting chair ${i + 1}`, room: true }));
 /** The board on the meeting room's back (south) wall that shows the meeting's output file as it's written. */
-export const MEETING_BOARD = { x: MEETING_TABLE.x, y: 1.95, z: FLOOR.maxZ - 0.08, width: 3.6, height: 1.2 } as const;
+export const MEETING_BOARD = { x: MEETING_TABLE.x, y: 1.95, z: FLOOR.maxZ - 0.08, width: 4.6, height: 1.4 } as const;
 
 /** Any place a worker can be by id: the seats, the board agents' kiosks and the meeting room's chairs. */
 export const DESK_BY_ID = new Map([...SEATS, ...STATIONS, ...MEETING_SEATS].map((d) => [d.id, d]));
@@ -200,9 +201,9 @@ export const TV = { x: FLOOR.maxX - 0.1, y: 2.2, z: 0, width: 6.4, height: 3.6 }
  */
 export const MACHINE_MONITOR = { x: FLOOR.minX, y: 2.2, z: -6, width: 2.3, height: 1.3 } as const;
 /** The lounge jukebox, against the east wall south of the TV, facing into the room. `y` is its speaker. */
-export const JUKEBOX = { x: FLOOR.maxX - 0.42, y: 0.75, z: 5.4, width: 1.3, depth: 0.72, height: 1.85 } as const;
+export const JUKEBOX = { x: FLOOR.maxX - 0.42, y: 0.75, z: 4.6, width: 1.3, depth: 0.72, height: 1.85 } as const;
 /** The arcade cabinet, against the east wall between the jukebox and the loft, facing into the room. `width` runs along the wall. */
-export const CABINET = { x: FLOOR.maxX - 0.42, z: 7.05, width: 0.8, depth: 0.8, height: 1.9 } as const;
+export const CABINET = { x: FLOOR.maxX - 0.42, z: 6.1, width: 0.8, depth: 0.8, height: 1.9 } as const;
 
 /**
  * The bookshelf of the project's docs (every Markdown file in it, see shared/docs.ts): against the
@@ -211,18 +212,18 @@ export const CABINET = { x: FLOOR.maxX - 0.42, z: 7.05, width: 0.8, depth: 0.8, 
  */
 export const BOOKSHELF = { x: -6.5, z: FLOOR.maxZ - 0.21, width: 1.7, depth: 0.42, height: 2.3 } as const;
 
-export const SPAWN = { x: 8, z: 7 } as const;
+export const SPAWN = { x: 5, z: 4.5 } as const;
 
 /** The gong: on the north wall just past the elevator from the PR board, facing into the room. It rings when a PR merges. */
 export const GONG = { x: 11.8, z: FLOOR.minZ + 0.75, width: 1.9, height: 2.45 } as const;
 
 /** Potted plants around the room: where each stands, and how big it is. */
 export const PLANTS: readonly (readonly [x: number, z: number, scale: number])[] = [
-  [-17.2, -12.2, 1.4],
-  [17.2, -12.2, 1.5],
-  [17.2, 12.2, 1.3],
-  [-17.2, 8.5, 1.2],
-  [14.2, -12.2, 1.1],
+  [FLOOR.minX + 0.8, FLOOR.minZ + 0.8, 1.4],
+  [FLOOR.maxX - 0.8, FLOOR.minZ + 0.8, 1.5],
+  [FLOOR.maxX - 0.8, FLOOR.maxZ - 0.8, 1.3],
+  [FLOOR.minX + 0.8, 8.5, 1.2],
+  [14.4, FLOOR.minZ + 0.8, 1.1],
   [-6, 0, 1],
   [3.5, 0, 0.9],
   [8.5, 5, 1.1],
@@ -233,7 +234,7 @@ export const PLANTS: readonly (readonly [x: number, z: number, scale: number])[]
  * the lounge, facing into the room (+z). `width` and `height` are its writing surface, whose bottom
  * edge is `bottom` above the floor.
  */
-export const WHITEBOARD = { x: 5.4, z: -5.4, width: 4, height: 2.2, bottom: 0.5 } as const;
+export const WHITEBOARD = { x: -16.3, z: -0.9, width: 4, height: 2.2, bottom: 0.5 } as const;
 
 /**
  * The bottom floor of the building is its second storey: the street, and the open garage under the
@@ -386,10 +387,10 @@ export interface SeatDef {
  */
 export const SEATING: SeatDef[] = [
   // The lounge couch, its back to the room, facing the TV.
-  { id: 'couch', label: '🛋️ Couch', x: 10.5, y: 0, z: 0, rotY: Math.PI / 2, places: [-1.2, 0, 1.2], hips: 0.5, depth: -0.05, out: 0.9, tv: true },
+  { id: 'couch', label: '🛋️ Couch', x: 13, y: 0, z: 0, rotY: Math.PI / 2, places: [-1.2, 0, 1.2], hips: 0.5, depth: -0.05, out: 0.9, tv: true },
   // Beanbags either side of the lounge, turned to the TV.
-  { id: 'lounge-beanbag-1', label: '🫘 Beanbag', x: 12.5, y: 0, z: 3.5, rotY: Math.atan2(TV.x - 12.5, TV.z - 3.5), places: [0], hips: 0.42, depth: -0.1, out: 1.2 },
-  { id: 'lounge-beanbag-2', label: '🫘 Beanbag', x: 14.5, y: 0, z: -3.4, rotY: Math.atan2(TV.x - 14.5, TV.z + 3.4), places: [0], hips: 0.42, depth: -0.1, out: 1.2 },
+  { id: 'lounge-beanbag-1', label: '🫘 Beanbag', x: 15, y: 0, z: 3.5, rotY: Math.atan2(TV.x - 15, TV.z - 3.5), places: [0], hips: 0.42, depth: -0.1, out: 1.2 },
+  { id: 'lounge-beanbag-2', label: '🫘 Beanbag', x: 17, y: 0, z: -3.4, rotY: Math.atan2(TV.x - 17, TV.z + 3.4), places: [0], hips: 0.42, depth: -0.1, out: 1.2 },
   // Up in the boss office: the couch against the east wall, and the chair at the big desk, facing the glass.
   { id: 'loft-couch', label: '🛋️ Couch', x: LOFT.maxX - 0.65, y: LOFT.y, z: (LOFT.minZ + LOFT.maxZ) / 2, rotY: -Math.PI / 2, places: [-0.5, 0.5], hips: 0.5, depth: -0.05, out: 0.9 },
   { id: 'boss-chair', label: "🪑 Boss's chair", x: (LOFT.minX + LOFT.maxX) / 2 + 0.5, y: LOFT.y, z: (LOFT.minZ + LOFT.maxZ) / 2 + 0.7, rotY: Math.PI, places: [0], hips: 0.62, depth: -0.05, out: -0.8, game: true },

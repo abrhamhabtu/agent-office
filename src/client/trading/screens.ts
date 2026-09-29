@@ -1,29 +1,43 @@
 import * as THREE from 'three';
-import type { Bar, FloorRole, Levels, Quote, TradingSnapshot } from '../../shared/trading';
-import { SYMBOLS } from '../../shared/trading';
+import type { AccountState, Bar, FloorRole, Levels, PlaybookId, Proposal, Quote, Symbol, TradingSnapshot } from '../../shared/trading';
+import { INSTRUMENTS, PLAYBOOK_BY_ID, PLAYBOOKS, PROP_ACCOUNTS, SYMBOLS } from '../../shared/trading';
 
 // Every screen and board on the trading floors: canvases drawn from one snapshot, the way a desk's
 // monitors all read the same tape. Dark terminal cards on the office's warm walls.
 
-export const INK = { bg: '#0f1522', panel: '#18213a', line: '#26314f', text: '#e8edf5', dim: '#8391ad', up: '#2ee6a6', down: '#ff5d73', warn: '#ffd166', info: '#5cc8ff' };
+export const INK = { bg: '#0f1522', panel: '#18213a', panel2: '#1f2a47', line: '#2a3656', text: '#e8edf5', dim: '#8391ad', up: '#2ee6a6', down: '#ff5d73', warn: '#ffd166', info: '#5cc8ff', violet: '#b794f4' };
 const SANS = 'Nunito, ui-rounded, system-ui, sans-serif';
 const MONO = 'ui-monospace, Menlo, Consolas, monospace';
 
 export const fmt = (v: number | null | undefined, decimals = 2) => (v == null || !Number.isFinite(v) ? '—' : v.toLocaleString('en-US', { minimumFractionDigits: decimals, maximumFractionDigits: decimals }));
 const sign = (v: number) => (v > 0 ? '+' : v < 0 ? '−' : '');
 export const pct = (v: number) => `${sign(v)}${Math.abs(v).toFixed(2)}%`;
+export const money = (v: number) => `${v < 0 ? '−' : ''}$${Math.abs(Math.round(v)).toLocaleString('en-US')}`;
 const tone = (v: number) => (v >= 0 ? INK.up : INK.down);
+export const STAGE_COLOR: Record<string, string> = { live: INK.info, ready: INK.warn, won: INK.up, lost: INK.down, closed: INK.dim, watching: '#5d6b8f', done: INK.dim, failed: INK.down, off: '#3b4768' };
+export const STAGE_LABEL: Record<string, string> = { live: '● IN TRADE', ready: '● AT THE LEVEL', won: '✓ TARGET', lost: '✗ STOPPED', closed: 'FLAT', watching: 'WATCHING', done: 'DONE TODAY', failed: 'FAILED', off: 'OFF HOURS' };
 
 function rr(g: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number) {
   g.beginPath();
   g.roundRect(x, y, w, h, r);
 }
 
-function clip(g: CanvasRenderingContext2D, text: string, maxW: number): string {
+export function clip(g: CanvasRenderingContext2D, text: string, maxW: number): string {
   if (g.measureText(text).width <= maxW) return text;
   let t = text;
   while (t.length > 1 && g.measureText(`${t}…`).width > maxW) t = t.slice(0, -1);
   return `${t}…`;
+}
+
+function pill(g: CanvasRenderingContext2D, x: number, y: number, text: string, bg: string, fg = INK.bg, size = 18) {
+  g.font = `900 ${size}px ${SANS}`;
+  const w = g.measureText(text).width + size * 1.1;
+  g.fillStyle = bg;
+  rr(g, x, y, w, size * 1.6, size * 0.5);
+  g.fill();
+  g.fillStyle = fg;
+  g.fillText(text, x + size * 0.55, y + size * 1.17);
+  return w;
 }
 
 function texture(w: number, h: number) {
@@ -36,12 +50,26 @@ function texture(w: number, h: number) {
   return { canvas, g: canvas.getContext('2d')!, tex };
 }
 
+const quoteOf = (s: TradingSnapshot, sym: Symbol) => s.quotes.find((q) => q.symbol === sym);
+const age = (ts: number, now: number) => {
+  const m = Math.max(0, Math.round((now - ts) / 60_000));
+  return m < 60 ? `${m}m` : m < 1440 ? `${Math.round(m / 60)}h` : `${Math.round(m / 1440)}d`;
+};
+export const accountLabel = (id: string) => PROP_ACCOUNTS.find((a) => a.id === id)?.program ?? id;
+const shortAccount = (id: string) => {
+  const a = PROP_ACCOUNTS.find((x) => x.id === id);
+  return a ? `${a.firm} ${a.size / 1000}K` : id;
+};
+
 /** A screen: a canvas texture and how to redraw it from a snapshot. */
 export abstract class Screen {
   readonly texture: THREE.CanvasTexture;
   protected canvas: HTMLCanvasElement;
   protected g: CanvasRenderingContext2D;
-  constructor(protected W: number, protected H: number) {
+  constructor(
+    protected W: number,
+    protected H: number,
+  ) {
     const t = texture(W, H);
     this.canvas = t.canvas;
     this.g = t.g;
@@ -49,58 +77,97 @@ export abstract class Screen {
   }
   abstract draw(s: TradingSnapshot, role: FloorRole, now: number): void;
   render(s: TradingSnapshot | null, role: FloorRole) {
-    if (!s) return;
     const g = this.g;
     g.textAlign = 'left';
     g.textBaseline = 'alphabetic';
-    this.draw(s, role, Date.now());
+    if (!s || !s.ready) this.waiting(s);
+    else this.draw(s, role, Date.now());
     this.texture.needsUpdate = true;
   }
-  protected header(title: string, right: string, s: TradingSnapshot) {
+  private waiting(s: TradingSnapshot | null) {
+    const g = this.g;
+    g.fillStyle = INK.bg;
+    g.fillRect(0, 0, this.W, this.H);
+    g.fillStyle = INK.dim;
+    g.textAlign = 'center';
+    g.font = `900 ${Math.round(this.H * 0.07)}px ${SANS}`;
+    g.fillText('Connecting to the market…', this.W / 2, this.H / 2);
+    g.font = `700 ${Math.round(this.H * 0.04)}px ${SANS}`;
+    g.fillText(s ? 'Waiting for the first real prices' : 'Reaching the office', this.W / 2, this.H / 2 + this.H * 0.08);
+    g.textAlign = 'left';
+  }
+  protected header(title: string, right: string, s: TradingSnapshot, accent = INK.warn) {
     const g = this.g;
     g.fillStyle = INK.bg;
     g.fillRect(0, 0, this.W, this.H);
     g.fillStyle = INK.panel;
     g.fillRect(0, 0, this.W, 78);
+    g.fillStyle = accent;
+    g.fillRect(0, 74, this.W, 4);
     g.fillStyle = INK.text;
     g.font = `900 40px ${SANS}`;
-    g.fillText(title, 32, 52);
-    const titleW = g.measureText(title).width;
+    g.fillText(title, 28, 52);
     g.textAlign = 'right';
     g.fillStyle = INK.dim;
-    g.font = `800 26px ${MONO}`;
-    g.fillText(`${right}${right ? '  ·  ' : ''}${s.session.time} PT`, this.W - 32, 50);
+    g.font = `800 24px ${MONO}`;
+    g.fillText(`${right}${right ? '  ·  ' : ''}${s.session.time.slice(0, 5)} PT`, this.W - 28, 50);
     g.textAlign = 'left';
-    if (s.source === 'sample') {
-      g.font = `900 18px ${SANS}`;
-      g.fillStyle = 'rgba(255,209,102,.16)';
-      rr(g, 32 + titleW + 20, 26, 132, 30, 15);
-      g.fill();
-      g.fillStyle = INK.warn;
-      g.fillText('SAMPLE FEED', 32 + titleW + 34, 47);
-    }
+  }
+  protected empty(line1: string, line2: string) {
+    const g = this.g;
+    g.fillStyle = INK.dim;
+    g.textAlign = 'center';
+    g.font = `900 38px ${SANS}`;
+    g.fillText(line1, this.W / 2, this.H / 2 + 10);
+    g.font = `700 24px ${SANS}`;
+    g.fillText(line2, this.W / 2, this.H / 2 + 52);
+    g.textAlign = 'left';
   }
 }
 
-/** Candles, VWAP and the day's levels, scaled to what's on screen. */
-export function drawChart(g: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, bars: Bar[], q: Quote, lv: Levels | null, opts: { levels?: boolean; grid?: boolean; tag?: boolean } = {}) {
+// ---- Charts ------------------------------------------------------------------------------------------
+
+export interface ChartOpts {
+  vwap?: boolean;
+  onVwap?: boolean;
+  or?: boolean;
+  prior?: boolean;
+  value?: boolean;
+  zones?: boolean;
+  profile?: boolean;
+  grid?: boolean;
+  tag?: boolean;
+  plan?: Proposal | null;
+}
+
+/** Candles and whichever of the day's levels the playbook reads, scaled to what's on screen. */
+export function drawChart(g: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, bars: Bar[], q: Quote, lv: Levels | null, opts: ChartOpts = {}) {
   if (!bars.length) return;
   let lo = Math.min(...bars.map((b) => b.low));
   let hi = Math.max(...bars.map((b) => b.high));
-  if (opts.levels && lv) {
-    // Levels only count when they're near the tape; a far level shouldn't squash the candles.
-    const pad = (hi - lo) * 0.35;
-    for (const v of [lv.vwap, lv.vwapU1, lv.vwapL1, lv.orHigh, lv.orLow, lv.priorHigh, lv.priorLow]) if (v != null && v > lo - pad && v < hi + pad) {
-      lo = Math.min(lo, v);
-      hi = Math.max(hi, v);
-    }
+  const near: number[] = [];
+  if (lv) {
+    if (opts.vwap) near.push(...[lv.vwap, lv.vwapU1, lv.vwapL1].filter((v): v is number => v != null));
+    if (opts.onVwap && lv.onVwap != null) near.push(lv.onVwap);
+    if (opts.or) near.push(...[lv.orHigh, lv.orLow].filter((v): v is number => v != null));
+    if (opts.value) near.push(...[lv.vah, lv.poc, lv.val].filter((v): v is number => v != null));
   }
-  const span = hi - lo || q.tick;
+  if (opts.plan) near.push(...[opts.plan.entry, opts.plan.stop, opts.plan.target].filter((v): v is number => v != null));
+  // Levels only count when they're near the tape; a far level shouldn't squash the candles.
+  const pad = (hi - lo) * 0.5;
+  for (const v of near) if (v > lo - pad && v < hi + pad) ((lo = Math.min(lo, v)), (hi = Math.max(hi, v)));
+  const span = hi - lo || q.tick * 4;
   lo -= span * 0.06;
   hi += span * 0.06;
   const py = (v: number) => y + h - ((v - lo) / (hi - lo)) * h;
-  const tagW = opts.tag ? Math.min(150, w * 0.2) : 0;
-  const cw = (w - tagW) / bars.length;
+  const tagW = opts.tag ? Math.min(150, w * 0.18) : 0;
+  const plotW = w - tagW;
+  const cw = plotW / bars.length;
+  const fs = Math.max(11, Math.min(20, h * 0.055));
+  g.save();
+  g.beginPath();
+  g.rect(x, y, w, h);
+  g.clip();
   if (opts.grid) {
     g.strokeStyle = INK.line;
     g.lineWidth = 1;
@@ -108,34 +175,82 @@ export function drawChart(g: CanvasRenderingContext2D, x: number, y: number, w: 
       const gy = y + (h * i) / 4;
       g.beginPath();
       g.moveTo(x, gy);
-      g.lineTo(x + w - tagW, gy);
+      g.lineTo(x + plotW, gy);
       g.stroke();
     }
   }
-  const line = (v: number | null, color: string, dash: number[] = [], label?: string) => {
+  if (lv && opts.zones)
+    for (const z of lv.zones) {
+      if (z.bottom > hi || z.top < lo) continue;
+      const since = bars.findIndex((b) => b.ts >= z.at);
+      const x0 = since < 0 ? x : x + since * cw;
+      g.fillStyle = z.kind === 'demand' ? `rgba(46,230,166,${z.state === 'fresh' ? 0.22 : 0.08})` : `rgba(255,93,115,${z.state === 'fresh' ? 0.22 : 0.08})`;
+      g.fillRect(x0, py(z.top), x + plotW - x0, Math.max(3, py(z.bottom) - py(z.top)));
+      g.fillStyle = z.kind === 'demand' ? INK.up : INK.down;
+      g.font = `900 ${fs * 0.8}px ${SANS}`;
+      g.fillText(`${z.kind === 'demand' ? 'DEMAND' : 'SUPPLY'}${z.state === 'fresh' ? '' : ' · tested'}`, x0 + 6, py(z.top) + fs * 0.9);
+    }
+  if (opts.profile && bars.length) {
+    // A sideways volume profile of what's on screen, against the right edge.
+    const bins = 40;
+    const vol = new Array<number>(bins).fill(0);
+    for (const b of bars) {
+      const a = Math.floor(((b.low - lo) / (hi - lo)) * bins);
+      const z = Math.floor(((b.high - lo) / (hi - lo)) * bins);
+      for (let k = Math.max(0, a); k <= Math.min(bins - 1, z); k++) vol[k]! += b.volume / (z - a + 1);
+    }
+    const max = Math.max(...vol, 1);
+    for (let k = 0; k < bins; k++) {
+      const bw = (vol[k]! / max) * plotW * 0.28;
+      g.fillStyle = 'rgba(183,148,244,.22)';
+      g.fillRect(x + plotW - bw, y + h - ((k + 1) / bins) * h, bw, h / bins - 1);
+    }
+  }
+  const line = (v: number | null | undefined, color: string, dash: number[] = [], label?: string, width = 2) => {
     if (v == null || v < lo || v > hi) return;
     g.strokeStyle = color;
-    g.lineWidth = 2;
+    g.lineWidth = width;
     g.setLineDash(dash);
     g.beginPath();
     g.moveTo(x, py(v));
-    g.lineTo(x + w - tagW, py(v));
+    g.lineTo(x + plotW, py(v));
     g.stroke();
     g.setLineDash([]);
-    if (label && opts.tag) {
+    if (label) {
       g.fillStyle = color;
-      g.font = `800 ${Math.max(11, h * 0.06)}px ${MONO}`;
-      g.fillText(label, x + w - tagW + 6, py(v) + 4);
+      g.font = `900 ${fs * 0.85}px ${MONO}`;
+      g.fillText(label, x + 6, py(v) - 4);
     }
   };
-  if (opts.levels && lv) {
-    line(lv.vwapU1, 'rgba(255,209,102,.35)', [6, 6]);
-    line(lv.vwapL1, 'rgba(255,209,102,.35)', [6, 6]);
-    line(lv.priorHigh, 'rgba(156,110,255,.7)', [3, 5], 'PDH');
-    line(lv.priorLow, 'rgba(156,110,255,.7)', [3, 5], 'PDL');
-    line(lv.orHigh, 'rgba(92,200,255,.7)', [10, 4], 'ORH');
-    line(lv.orLow, 'rgba(92,200,255,.7)', [10, 4], 'ORL');
-    line(lv.vwap, INK.warn, [], 'VWAP');
+  if (lv) {
+    if (opts.prior) {
+      line(lv.priorHigh, 'rgba(156,110,255,.7)', [3, 5], 'PDH');
+      line(lv.priorLow, 'rgba(156,110,255,.7)', [3, 5], 'PDL');
+    }
+    if (opts.or) {
+      line(lv.orHigh, 'rgba(92,200,255,.8)', [10, 4], 'ORH');
+      line(lv.orLow, 'rgba(92,200,255,.8)', [10, 4], 'ORL');
+    }
+    if (opts.value) {
+      line(lv.vah, 'rgba(241,91,181,.85)', [8, 5], 'VAH');
+      line(lv.val, 'rgba(241,91,181,.85)', [8, 5], 'VAL');
+      line(lv.poc, '#f15bb5', [], 'POC', 3);
+    }
+    if (opts.onVwap) line(lv.onVwap, 'rgba(255,159,90,.9)', [4, 4], 'ON VWAP');
+    if (opts.vwap) {
+      line(lv.vwapU1, 'rgba(255,209,102,.35)', [6, 6]);
+      line(lv.vwapL1, 'rgba(255,209,102,.35)', [6, 6]);
+      line(lv.vwap, INK.warn, [], 'VWAP', 3);
+    }
+  }
+  const p = opts.plan;
+  if (p && p.entry != null && p.stop != null && p.target != null) {
+    const x0 = x + plotW * 0.72;
+    g.fillStyle = 'rgba(46,230,166,.18)';
+    g.fillRect(x0, Math.min(py(p.entry), py(p.target)), plotW - (x0 - x), Math.abs(py(p.target) - py(p.entry)));
+    g.fillStyle = 'rgba(255,93,115,.18)';
+    g.fillRect(x0, Math.min(py(p.entry), py(p.stop)), plotW - (x0 - x), Math.abs(py(p.stop) - py(p.entry)));
+    line(p.entry, INK.text, [2, 3], undefined, 1.5);
   }
   const body = Math.max(1.5, cw * 0.62);
   bars.forEach((b, i) => {
@@ -150,142 +265,147 @@ export function drawChart(g: CanvasRenderingContext2D, x: number, y: number, w: 
     const top = py(Math.max(b.open, b.close));
     g.fillRect(cx - body / 2, top, body, Math.max(1.5, Math.abs(py(b.open) - py(b.close))));
   });
+  g.restore();
   if (opts.tag) {
     const last = bars[bars.length - 1]!.close;
     const ty = Math.min(y + h - 16, Math.max(y + 14, py(last)));
     g.fillStyle = tone(q.change);
-    rr(g, x + w - tagW, ty - 14, tagW - 4, 28, 6);
+    rr(g, x + plotW + 2, ty - 15, tagW - 4, 30, 6);
     g.fill();
     g.fillStyle = INK.bg;
     const label = fmt(last, q.decimals);
-    g.font = `900 ${Math.max(9, Math.min(h * 0.06, (tagW - 12) / (label.length * 0.62)))}px ${MONO}`;
+    g.font = `900 ${Math.max(9, Math.min(20, (tagW - 12) / (label.length * 0.62)))}px ${MONO}`;
     g.textAlign = 'center';
-    g.fillText(label, x + w - tagW / 2 - 2, ty + 5);
+    g.fillText(label, x + plotW + tagW / 2, ty + 6);
     g.textAlign = 'left';
   }
 }
 
-// ---- The Pit: news, proposals, playbook, connectors ----------------------------------------------
+/** Five-minute candles from ones, for the zone charts. */
+export function fives(bars: Bar[]): Bar[] {
+  const out: Bar[] = [];
+  for (const b of bars) {
+    const k = Math.floor(b.ts / 300_000) * 300_000;
+    const last = out[out.length - 1];
+    if (last && last.ts === k) {
+      last.high = Math.max(last.high, b.high);
+      last.low = Math.min(last.low, b.low);
+      last.close = b.close;
+      last.volume += b.volume;
+    } else out.push({ ...b, ts: k });
+  }
+  return out;
+}
+
+function sparkline(g: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, curve: number[], color?: string) {
+  if (curve.length < 2) {
+    g.strokeStyle = INK.line;
+    g.beginPath();
+    g.moveTo(x, y + h / 2);
+    g.lineTo(x + w, y + h / 2);
+    g.stroke();
+    return;
+  }
+  const pts = [0, ...curve];
+  const lo = Math.min(...pts);
+  const hi = Math.max(...pts);
+  const span = hi - lo || 1;
+  const py = (v: number) => y + h - ((v - lo) / span) * h;
+  g.strokeStyle = 'rgba(131,145,173,.4)';
+  g.setLineDash([3, 4]);
+  g.beginPath();
+  g.moveTo(x, py(0));
+  g.lineTo(x + w, py(0));
+  g.stroke();
+  g.setLineDash([]);
+  g.strokeStyle = color ?? tone(pts[pts.length - 1]!);
+  g.lineWidth = 3;
+  g.beginPath();
+  pts.forEach((v, i) => {
+    const px = x + (i / (pts.length - 1)) * w;
+    if (i) g.lineTo(px, py(v));
+    else g.moveTo(px, py(v));
+  });
+  g.stroke();
+}
+
+// ---- 📰 News & calendar -------------------------------------------------------------------------------
 export class NewsBoard extends Screen {
   constructor() {
     super(1200, 600);
   }
-  draw(s: TradingSnapshot) {
+  draw(s: TradingSnapshot, _role: FloorRole, now: number) {
     const g = this.g;
-    this.header('📰 News & catalysts', 'MNQ · MES · MBT · BTC', s);
-    const now = s.session.minutes;
-    // Upcoming first, then what already printed, most recent on top.
-    const items = [...s.news].sort((a, b) => ((a.at >= now ? 0 : 1) - (b.at >= now ? 0 : 1)) || (a.at >= now ? a.at - b.at : b.at - a.at)).slice(0, 7);
-    const rowH = 64;
-    items.forEach((n, i) => {
-      const y = 96 + i * (rowH + 4);
-      const past = n.at < now;
-      g.globalAlpha = past ? 0.45 : 1;
-      g.fillStyle = i % 2 ? INK.bg : INK.panel;
-      g.fillRect(20, y, this.W - 40, rowH);
-      g.fillStyle = INK.text;
-      g.font = `900 28px ${MONO}`;
-      g.fillText(n.time, 36, y + 42);
-      const c = n.impact === 'high' ? INK.down : n.impact === 'med' ? INK.warn : INK.dim;
-      g.fillStyle = c;
-      rr(g, 140, y + 16, 84, 32, 8);
-      g.fill();
-      g.fillStyle = INK.bg;
-      g.font = `900 19px ${SANS}`;
-      g.textAlign = 'center';
-      g.fillText(n.impact.toUpperCase(), 182, y + 39);
-      g.textAlign = 'left';
-      g.fillStyle = INK.text;
-      g.font = `800 27px ${SANS}`;
-      g.fillText(clip(g, `${n.kind === 'calendar' ? '🗓 ' : ''}${n.headline}`, 640), 244, y + 42);
-      g.fillStyle = INK.info;
-      g.font = `800 20px ${MONO}`;
-      g.textAlign = 'right';
-      g.fillText(n.symbols.join(' '), this.W - 36, y + 40);
-      g.textAlign = 'left';
-      g.globalAlpha = 1;
-    });
+    const cal = s.news.filter((n) => n.kind === 'calendar').sort((a, b) => a.at - b.at);
+    const next = cal.find((n) => n.impact === 'high' && n.at > now);
+    const until = next ? Math.round((next.at - now) / 60_000) : null;
+    this.header('📰 News & calendar', next ? `${clip(g, next.headline.split(' · ')[0]!, 200)} in ${until! >= 60 ? `${Math.floor(until! / 60)}h ${until! % 60}m` : `${until}m`}` : 'no high-impact left', s, INK.info);
+    // The calendar: what's left today and tomorrow, then what's already out today (dimmed).
+    const upcoming = cal.filter((n) => n.at > now - 30 * 60_000).slice(0, 7);
+    const colW = 640;
     g.fillStyle = INK.dim;
-    g.font = `700 20px ${SANS}`;
-    g.fillText('Sample headlines. Connect a news source and Scout reads the real ones.', 32, this.H - 14);
-  }
-}
-
-const stageColor = (stage: string) => (stage === 'ready' ? INK.warn : stage === 'paper' ? INK.info : stage === 'graduated' ? INK.up : stage === 'skipped' ? INK.dim : INK.line);
-
-export class ProposalsBoard extends Screen {
-  constructor() {
-    super(1200, 600);
-  }
-  draw(s: TradingSnapshot, role: FloorRole, now: number) {
-    const g = this.g;
-    const desk = role === 'desk';
-    this.header(desk ? '🎫 Trade tickets' : '🎯 Trade proposals', desk ? 'you click the order' : 'VWAP · S/R', s);
-    const list = (desk ? s.proposals.filter((p) => p.stage === 'graduated') : s.proposals.filter((p) => p.stage !== 'skipped')).slice(0, 8);
-    if (!list.length) {
-      g.fillStyle = INK.dim;
-      g.textAlign = 'center';
-      g.font = `900 40px ${SANS}`;
-      g.fillText(desk ? 'Nothing has graduated yet' : 'Nothing to propose', this.W / 2, 320);
-      g.font = `700 26px ${SANS}`;
-      g.fillText(desk ? 'Prove a setup on The Pit first' : 'Vex and Ledge are waiting on the tape', this.W / 2, 366);
-      g.textAlign = 'left';
-      return;
-    }
-    const cols = 4;
-    const cw = (this.W - 40 - (cols - 1) * 14) / cols;
-    const ch = 236;
-    list.forEach((p, i) => {
-      const x = 20 + (i % cols) * (cw + 14);
-      const y = 94 + Math.floor(i / cols) * (ch + 12);
-      const spec = s.quotes.find((q) => q.symbol === p.symbol)!;
-      const pulse = p.stage === 'ready' ? 0.5 + 0.5 * Math.sin(now / 260) : 0;
-      g.fillStyle = INK.panel;
-      rr(g, x, y, cw, ch, 14);
+    g.font = `900 18px ${SANS}`;
+    g.fillText('ECONOMIC CALENDAR · US', 28, 106);
+    upcoming.forEach((n, i) => {
+      const y = 118 + i * 64;
+      const past = n.at < now;
+      g.globalAlpha = past ? 0.5 : 1;
+      g.fillStyle = i % 2 ? INK.bg : INK.panel;
+      rr(g, 20, y, colW, 58, 10);
       g.fill();
-      g.lineWidth = p.stage === 'ready' ? 3 + pulse * 3 : 2;
-      g.strokeStyle = stageColor(p.stage);
-      g.stroke();
-      g.fillStyle = spec.ink;
-      g.font = `900 34px ${MONO}`;
-      g.fillText(p.symbol, x + 16, y + 44);
-      g.fillStyle = p.side === 'long' ? INK.up : INK.down;
-      rr(g, x + cw - 92, y + 16, 76, 30, 8);
-      g.fill();
-      g.fillStyle = INK.bg;
-      g.font = `900 19px ${SANS}`;
-      g.textAlign = 'center';
-      g.fillText(p.side.toUpperCase(), x + cw - 54, y + 38);
-      g.textAlign = 'left';
-      g.fillStyle = INK.dim;
-      g.font = `800 19px ${SANS}`;
-      g.fillText(`${p.agent} · ${p.strategy}`, x + 16, y + 72);
+      g.fillStyle = INK.text;
+      g.font = `900 22px ${MONO}`;
+      g.fillText(n.time, 32, y + 36);
+      pill(g, 130, y + 14, n.impact === 'high' ? 'HIGH' : 'MED', n.impact === 'high' ? INK.down : INK.warn, INK.bg, 15);
       g.fillStyle = INK.text;
       g.font = `800 22px ${SANS}`;
-      g.fillText(clip(g, p.title, cw - 32), x + 16, y + 102);
-      const rows: [string, number, string][] = [['ENTRY', p.entry, INK.text], ['STOP', p.stop, INK.down], ['TARGET', p.target, INK.up]];
-      rows.forEach(([label, v, c], k) => {
-        g.fillStyle = INK.dim;
-        g.font = `800 17px ${SANS}`;
-        g.fillText(label, x + 16, y + 132 + k * 28);
-        g.fillStyle = c;
-        g.font = `900 22px ${MONO}`;
+      const title = n.headline.split(' · ')[0]!;
+      g.fillText(clip(g, title, 300), 206, y + 28);
+      g.fillStyle = INK.dim;
+      g.font = `800 17px ${MONO}`;
+      const nums = [n.actual ? `act ${n.actual}` : '', n.forecast ? `cons ${n.forecast}` : '', n.previous ? `prev ${n.previous}` : ''].filter(Boolean).join('  ');
+      g.fillText(clip(g, nums, 420), 206, y + 50);
+      if (n.actual) {
+        g.fillStyle = INK.up;
         g.textAlign = 'right';
-        g.fillText(fmt(v, spec.decimals), x + cw - 16, y + 133 + k * 28);
+        g.font = `900 22px ${MONO}`;
+        g.fillText(n.actual, 20 + colW - 14, y + 36);
         g.textAlign = 'left';
-      });
-      g.fillStyle = stageColor(p.stage);
-      g.font = `900 19px ${SANS}`;
-      g.fillText(p.stage === 'ready' ? '● AT ENTRY' : p.stage.toUpperCase(), x + 16, y + ch - 14);
-      g.textAlign = 'right';
-      g.fillStyle = INK.warn;
-      g.font = `900 24px ${MONO}`;
-      g.fillText(`${p.r}R`, x + cw - 16, y + ch - 12);
-      g.textAlign = 'left';
+      }
+      g.globalAlpha = 1;
     });
+    if (!upcoming.length) {
+      g.fillStyle = INK.dim;
+      g.font = `800 24px ${SANS}`;
+      g.fillText('Nothing on the calendar', 32, 160);
+    }
+    // Headlines down the right.
+    const x = colW + 40;
+    const w = this.W - x - 20;
+    g.fillStyle = INK.dim;
+    g.font = `900 18px ${SANS}`;
+    g.fillText('THE WIRE', x, 106);
+    s.news
+      .filter((n) => n.kind === 'headline')
+      .slice(0, 8)
+      .forEach((n, i) => {
+        const y = 118 + i * 56;
+        g.fillStyle = n.impact === 'high' ? 'rgba(255,93,115,.14)' : INK.panel;
+        rr(g, x, y, w, 50, 10);
+        g.fill();
+        g.fillStyle = n.impact === 'high' ? INK.down : n.impact === 'med' ? INK.warn : INK.dim;
+        g.fillRect(x, y + 8, 5, 34);
+        g.fillStyle = INK.text;
+        g.font = `800 19px ${SANS}`;
+        g.fillText(clip(g, n.headline, w - 30), x + 16, y + 24);
+        g.fillStyle = INK.dim;
+        g.font = `800 15px ${MONO}`;
+        g.fillText(`${n.source} · ${age(n.at, now)} ago · ${n.symbols.join(' ')}`, x + 16, y + 44);
+      });
   }
 }
 
+// ---- 📋 The morning playbook: the checklist and the bias -------------------------------------------------
 export class PlaybookBoard extends Screen {
   constructor() {
     super(1200, 600);
@@ -293,168 +413,561 @@ export class PlaybookBoard extends Screen {
   draw(s: TradingSnapshot) {
     const g = this.g;
     const done = s.playbook.filter((p) => p.done).length;
-    this.header('📋 Playbook', `${done}/${s.playbook.length} done`, s);
+    this.header('📋 Morning playbook', `${done}/${s.playbook.length} ready`, s, INK.up);
     s.playbook.forEach((p, i) => {
-      const y = 100 + i * 66;
+      const y = 94 + i * 55;
       g.fillStyle = i % 2 ? INK.bg : INK.panel;
-      g.fillRect(20, y, this.W - 40, 62);
+      rr(g, 20, y, 560, 50, 8);
+      g.fill();
       g.strokeStyle = p.done ? INK.up : INK.dim;
-      g.lineWidth = 4;
-      rr(g, 40, y + 14, 34, 34, 8);
+      g.lineWidth = 3;
+      rr(g, 32, y + 12, 26, 26, 6);
       g.stroke();
       if (p.done) {
         g.fillStyle = INK.up;
-        g.font = `900 34px ${SANS}`;
-        g.fillText('✓', 43, y + 44);
+        g.font = `900 26px ${SANS}`;
+        g.fillText('✓', 34, y + 35);
       }
       g.fillStyle = p.done ? INK.dim : INK.text;
-      g.font = `800 28px ${SANS}`;
-      g.fillText(clip(g, p.label, 800), 96, y + 42);
-      g.fillStyle = INK.info;
-      g.font = `800 22px ${SANS}`;
-      g.textAlign = 'right';
-      g.fillText(p.owner, this.W - 40, y + 40);
-      g.textAlign = 'left';
-    });
-    g.fillStyle = INK.line;
-    g.fillRect(20, this.H - 34, this.W - 40, 10);
-    g.fillStyle = INK.up;
-    g.fillRect(20, this.H - 34, ((this.W - 40) * done) / Math.max(1, s.playbook.length), 10);
-  }
-}
-
-const STATUS_COLOR: Record<string, string> = { live: INK.up, sample: INK.warn, stub: INK.info, locked: INK.down, off: INK.dim };
-
-export class ConnectorsBoard extends Screen {
-  constructor() {
-    super(1200, 600);
-  }
-  draw(s: TradingSnapshot) {
-    const g = this.g;
-    this.header('🔌 Connectors', 'discover · allow · route', s);
-    s.connectors.forEach((c, i) => {
-      const y = 96 + i * 82;
-      g.fillStyle = INK.panel;
-      g.fillRect(20, y, this.W - 40, 74);
-      g.fillStyle = STATUS_COLOR[c.status] ?? INK.dim;
-      g.beginPath();
-      g.arc(58, y + 37, 12, 0, Math.PI * 2);
-      g.fill();
-      g.fillStyle = INK.text;
-      g.font = `900 30px ${SANS}`;
-      g.fillText(c.name, 90, y + 36);
-      g.fillStyle = INK.dim;
-      g.font = `700 21px ${SANS}`;
-      g.fillText(clip(g, c.note, 760), 90, y + 62);
-      g.fillStyle = STATUS_COLOR[c.status] ?? INK.dim;
-      g.font = `900 22px ${MONO}`;
-      g.textAlign = 'right';
-      g.fillText(c.status.toUpperCase(), this.W - 40, y + 44);
-      g.textAlign = 'left';
-    });
-  }
-}
-
-// ---- The Desk: Bulwark's read on each graduated setup ---------------------------------------------
-export class TicketsBoard extends Screen {
-  constructor() {
-    super(1200, 600);
-  }
-  draw(s: TradingSnapshot) {
-    const g = this.g;
-    this.header('✅ Bulwark · rules check', s.account.name, s);
-    if (!s.tickets.length) {
-      g.fillStyle = INK.dim;
-      g.textAlign = 'center';
-      g.font = `900 38px ${SANS}`;
-      g.fillText('No tickets yet', this.W / 2, 320);
-      g.font = `700 26px ${SANS}`;
-      g.fillText('A setup appears here once it graduates from The Pit', this.W / 2, 366);
-      g.textAlign = 'left';
-      return;
-    }
-    s.tickets.slice(0, 2).forEach((t, i) => {
-      const y = 96 + i * 250;
-      const q = s.quotes.find((x) => x.symbol === t.symbol)!;
-      g.fillStyle = INK.panel;
-      g.fillRect(20, y, this.W - 40, 236);
-      g.fillStyle = q.ink;
-      g.font = `900 40px ${MONO}`;
-      g.fillText(t.symbol, 40, y + 52);
-      g.fillStyle = t.side === 'long' ? INK.up : INK.down;
-      g.font = `900 30px ${SANS}`;
-      g.fillText(`${t.side.toUpperCase()} ${t.contracts}×`, 40, y + 96);
-      g.fillStyle = INK.text;
-      g.font = `900 24px ${MONO}`;
-      g.fillText(`E ${fmt(t.entry, q.decimals)}`, 40, y + 136);
-      g.fillStyle = INK.down;
-      g.fillText(`S ${fmt(t.stop, q.decimals)}`, 40, y + 168);
-      g.fillStyle = INK.up;
-      g.fillText(`T ${fmt(t.target, q.decimals)}`, 40, y + 200);
-      g.fillStyle = INK.dim;
       g.font = `800 20px ${SANS}`;
-      g.fillText(`risk $${t.riskDollars} · reward $${t.rewardDollars}`, 260, y + 52);
-      t.checks.slice(0, 7).forEach((c, k) => {
-        g.fillStyle = c.ok ? INK.up : INK.down;
-        g.font = `900 22px ${SANS}`;
-        g.fillText(`${c.ok ? '✓' : '✗'} ${c.label}`, 260 + (k % 2) * 460, y + 92 + Math.floor(k / 2) * 32);
-      });
+      g.fillText(clip(g, p.label, 400), 70, y + 32);
+      g.fillStyle = p.auto ? INK.info : INK.warn;
+      g.font = `900 14px ${MONO}`;
       g.textAlign = 'right';
-      g.fillStyle = t.cleared ? INK.up : INK.down;
-      g.font = `900 30px ${SANS}`;
-      g.fillText(t.cleared ? 'CLEARED' : 'STAND DOWN', this.W - 40, y + 52);
+      g.fillText(p.auto ? 'AUTO' : p.owner.toUpperCase(), 570, y + 31);
       g.textAlign = 'left';
+    });
+    // The bias, a card per market.
+    const x0 = 600;
+    const cw = (this.W - x0 - 20 - 12) / 2;
+    const ch = 244;
+    s.bias.forEach((b, i) => {
+      const x = x0 + (i % 2) * (cw + 12);
+      const y = 94 + Math.floor(i / 2) * (ch + 10);
+      const q = quoteOf(s, b.symbol);
+      g.fillStyle = INK.panel;
+      rr(g, x, y, cw, ch, 12);
+      g.fill();
+      g.fillStyle = INSTRUMENTS[b.symbol].ink;
+      g.font = `900 30px ${MONO}`;
+      g.fillText(b.symbol, x + 14, y + 38);
+      const c = b.direction === 'long' ? INK.up : b.direction === 'short' ? INK.down : INK.dim;
+      g.fillStyle = c;
+      g.font = `900 22px ${SANS}`;
+      g.textAlign = 'right';
+      g.fillText(b.direction === 'long' ? '▲ LONG BIAS' : b.direction === 'short' ? '▼ SHORT BIAS' : '◆ NEUTRAL', x + cw - 14, y + 36);
+      g.textAlign = 'left';
+      if (q) {
+        g.fillStyle = INK.text;
+        g.font = `800 18px ${MONO}`;
+        g.fillText(`${fmt(q.last, q.decimals)}  ${pct(q.changePct)}`, x + 14, y + 64);
+      }
+      g.fillStyle = INK.dim;
+      g.font = `700 15px ${SANS}`;
+      b.lines.slice(0, 5).forEach((l, k) => g.fillText(clip(g, `• ${l}`, cw - 28), x + 14, y + 92 + k * 24));
+      if (b.fit) {
+        const p = PLAYBOOK_BY_ID[b.fit];
+        pill(g, x + 14, y + ch - 36, `Fits: ${p.name}`, p.color, INK.bg, 14);
+      }
     });
   }
 }
 
-// ---- The big screens: the market map on the TV, the tape along the wall ------------------------------
+// ---- 🎯 Live proposals ------------------------------------------------------------------------------------
+export class ProposalsBoard extends Screen {
+  constructor() {
+    super(1200, 600);
+  }
+  draw(s: TradingSnapshot, _role: FloorRole, now: number) {
+    const g = this.g;
+    const hot = s.proposals.filter((p) => p.stage === 'live' || p.stage === 'ready').length;
+    this.header('🎯 Trade proposals', hot ? `${hot} at a level` : 'waiting on the tape', s, INK.warn);
+    const list = s.proposals.filter((p) => p.stage !== 'off' && p.mark !== 'skipped').slice(0, 8);
+    if (!list.length) return this.empty('Nothing to propose right now', 'The playbooks are watching NQ, ES, gold and BTC');
+    const cols = 4;
+    const cw = (this.W - 40 - (cols - 1) * 12) / cols;
+    const ch = 244;
+    list.forEach((p, i) => {
+      const x = 20 + (i % cols) * (cw + 12);
+      const y = 92 + Math.floor(i / cols) * (ch + 10);
+      proposalCard(g, x, y, cw, ch, p, s, now);
+    });
+  }
+}
+
+function proposalCard(g: CanvasRenderingContext2D, x: number, y: number, cw: number, ch: number, p: Proposal, s: TradingSnapshot, now: number) {
+  const q = quoteOf(s, p.symbol);
+  const book = PLAYBOOK_BY_ID[p.playbook];
+  const color = STAGE_COLOR[p.stage] ?? INK.line;
+  const pulse = p.stage === 'ready' || p.stage === 'live' ? 0.5 + 0.5 * Math.sin(now / 240) : 0;
+  g.fillStyle = INK.panel;
+  rr(g, x, y, cw, ch, 14);
+  g.fill();
+  g.lineWidth = 2 + pulse * 3;
+  g.strokeStyle = color;
+  g.stroke();
+  g.fillStyle = book.color;
+  g.fillRect(x + 14, y + 12, cw - 28, 5);
+  g.fillStyle = INSTRUMENTS[p.symbol].ink;
+  g.font = `900 30px ${MONO}`;
+  g.fillText(p.symbol, x + 14, y + 50);
+  if (p.side) {
+    g.fillStyle = p.side === 'long' ? INK.up : INK.down;
+    rr(g, x + cw - 86, y + 26, 72, 28, 8);
+    g.fill();
+    g.fillStyle = INK.bg;
+    g.font = `900 17px ${SANS}`;
+    g.textAlign = 'center';
+    g.fillText(p.side.toUpperCase(), x + cw - 50, y + 46);
+    g.textAlign = 'left';
+  }
+  g.fillStyle = book.color;
+  g.font = `900 16px ${SANS}`;
+  g.fillText(`${book.name} · ${book.mentor}`, x + 14, y + 74);
+  g.fillStyle = INK.text;
+  g.font = `800 17px ${SANS}`;
+  g.fillText(clip(g, p.title, cw - 28), x + 14, y + 98);
+  const rows: [string, number | null, string][] = [
+    ['ENTRY', p.entry, INK.text],
+    ['STOP', p.stop, INK.down],
+    ['TARGET', p.target, INK.up],
+  ];
+  rows.forEach(([label, v, c], k) => {
+    g.fillStyle = INK.dim;
+    g.font = `800 15px ${SANS}`;
+    g.fillText(label, x + 14, y + 126 + k * 25);
+    g.fillStyle = c;
+    g.font = `900 19px ${MONO}`;
+    g.textAlign = 'right';
+    g.fillText(fmt(v, q?.decimals ?? 2), x + cw - 14, y + 127 + k * 25);
+    g.textAlign = 'left';
+  });
+  const size = p.sizing.find((z) => z.micros > 0);
+  g.fillStyle = INK.dim;
+  g.font = `800 14px ${SANS}`;
+  if (size) g.fillText(clip(g, `${size.micros} ${INSTRUMENTS[p.symbol].micro} on ${shortAccount(size.accountId)} ($${size.risk} risk)`, cw - 28), x + 14, y + ch - 42);
+  else if (p.distance != null) g.fillText(`${fmt(Math.abs(p.distance), q?.decimals ?? 2)} pts from the entry`, x + 14, y + ch - 42);
+  g.fillStyle = color;
+  g.font = `900 17px ${SANS}`;
+  g.fillText(STAGE_LABEL[p.stage] ?? p.stage.toUpperCase(), x + 14, y + ch - 14);
+  if (p.r != null) {
+    g.textAlign = 'right';
+    g.fillStyle = INK.warn;
+    g.font = `900 22px ${MONO}`;
+    g.fillText(`${p.r}R`, x + cw - 14, y + ch - 13);
+    g.textAlign = 'left';
+  }
+}
+
+// ---- 📊 The live market map (the east wall) ----------------------------------------------------------------
 export function bellText(s: TradingSnapshot): string {
   const n = s.session.nextBell.inSeconds;
-  const t = `${String(Math.floor(n / 3600)).padStart(2, '0')}:${String(Math.floor((n % 3600) / 60)).padStart(2, '0')}:${String(n % 60).padStart(2, '0')}`;
-  return `${s.session.nextBell.kind === 'open' ? '🔔 Open bell' : '🔔 Close bell'} in ${t}`;
+  const d = Math.floor(n / 86400);
+  const t = `${d ? `${d}d ` : ''}${String(Math.floor((n % 86400) / 3600)).padStart(2, '0')}:${String(Math.floor((n % 3600) / 60)).padStart(2, '0')}:${String(n % 60).padStart(2, '0')}`;
+  return `🔔 ${s.session.nextBell.kind === 'open' ? 'Opening' : 'Closing'} bell in ${t}`;
 }
 
 export class MarketMap extends Screen {
   constructor() {
-    super(1280, 720);
+    super(1200, 600);
   }
-  draw(s: TradingSnapshot, role: FloorRole) {
+  draw(s: TradingSnapshot) {
     const g = this.g;
-    this.header(role === 'desk' ? '🌃 The Desk · market map' : '📈 The Pit · market map', s.session.phase.toUpperCase(), s);
-    const gap = 16;
-    const cw = (this.W - 40 - gap) / 2;
-    const ch = (this.H - 78 - 72 - gap) / 2;
+    const live = s.feeds.filter((f) => f.ok).length;
+    this.header('📊 Live market', `${live}/${s.feeds.length} feeds live`, s, INK.up);
+    const gap = 12;
+    const cw = (this.W - 40 - gap * 3) / 4;
+    const ch = 390;
     SYMBOLS.forEach((sym, i) => {
-      const q = s.quotes.find((x) => x.symbol === sym)!;
-      const x = 20 + (i % 2) * (cw + gap);
-      const y = 94 + Math.floor(i / 2) * (ch + gap);
+      const q = quoteOf(s, sym);
+      const x = 20 + i * (cw + gap);
+      const y = 92;
       g.fillStyle = INK.panel;
-      rr(g, x, y, cw, ch, 14);
+      rr(g, x, y, cw, ch, 12);
       g.fill();
+      if (!q) return;
       g.fillStyle = q.ink;
-      g.font = `900 40px ${MONO}`;
-      g.fillText(sym, x + 18, y + 48);
-      g.fillStyle = INK.text;
-      g.font = `900 34px ${MONO}`;
+      g.font = `900 30px ${MONO}`;
+      g.fillText(sym, x + 14, y + 38);
+      g.fillStyle = INK.dim;
+      g.font = `800 13px ${SANS}`;
       g.textAlign = 'right';
-      g.fillText(fmt(q.last, q.decimals), x + cw - 18, y + 46);
-      g.fillStyle = tone(q.change);
-      g.font = `800 22px ${MONO}`;
-      g.fillText(`${sign(q.change)}${fmt(Math.abs(q.change), q.decimals)}  ${pct(q.changePct)}`, x + cw - 18, y + 76);
+      g.fillText(q.stale ? 'CLOSED / STALE' : q.source.toUpperCase(), x + cw - 12, y + 34);
       g.textAlign = 'left';
-      drawChart(g, x + 14, y + 90, cw - 28, ch - 104, s.bars[sym].slice(-70), q, s.levels[sym], { levels: true, tag: true });
+      g.fillStyle = q.stale ? INK.dim : INK.text;
+      g.font = `900 30px ${MONO}`;
+      g.fillText(fmt(q.last, q.decimals), x + 14, y + 78);
+      g.fillStyle = tone(q.change);
+      g.font = `800 19px ${MONO}`;
+      g.fillText(`${sign(q.change)}${fmt(Math.abs(q.change), q.decimals)}  ${pct(q.changePct)}`, x + 14, y + 106);
+      g.fillStyle = INK.dim;
+      g.font = `700 14px ${MONO}`;
+      g.fillText(`H ${fmt(q.high, q.decimals)}  L ${fmt(q.low, q.decimals)}`, x + 14, y + 128);
+      drawChart(g, x + 8, y + 140, cw - 16, ch - 150, s.bars[sym].slice(-60), q, s.levels[sym], { vwap: true, grid: true });
     });
-    g.fillStyle = INK.panel;
-    g.fillRect(0, this.H - 62, this.W, 62);
-    g.fillStyle = INK.warn;
-    g.font = `900 28px ${SANS}`;
-    g.fillText(bellText(s), 28, this.H - 20);
-    g.textAlign = 'right';
-    g.fillStyle = s.account.armed ? INK.up : INK.dim;
-    g.fillText(role === 'desk' ? (s.account.armed ? '● ARMED' : '○ STANDING DOWN') : `${s.account.name} · paper`, this.W - 28, this.H - 20);
-    g.textAlign = 'left';
+    // The backdrop: VIX, the dollar, yields, crude, the Russell and the Dow.
+    const y = 494;
+    const n = Math.max(1, s.context.length);
+    const w = (this.W - 40 - (n - 1) * 10) / n;
+    s.context.forEach((c, i) => {
+      const x = 20 + i * (w + 10);
+      g.fillStyle = INK.panel2;
+      rr(g, x, y, w, 88, 10);
+      g.fill();
+      g.fillStyle = INK.dim;
+      g.font = `900 16px ${SANS}`;
+      g.fillText(c.label.toUpperCase(), x + 12, y + 26);
+      g.fillStyle = INK.text;
+      g.font = `900 24px ${MONO}`;
+      g.fillText(fmt(c.last, c.decimals), x + 12, y + 56);
+      // VIX and yields rising is risk-off: red, whatever the sign.
+      const riskOff = c.id === 'VIX' || c.id === 'TNX' || c.id === 'DXY';
+      g.fillStyle = c.changePct === 0 ? INK.dim : (c.changePct > 0) !== riskOff ? INK.up : INK.down;
+      g.font = `800 16px ${MONO}`;
+      g.fillText(pct(c.changePct), x + 12, y + 78);
+    });
   }
+}
+
+// ---- Back Office: 🧪 backtests, 🏦 the eval simulator, 📒 the paper book ------------------------------------
+export class BacktestBoard extends Screen {
+  constructor() {
+    super(1200, 600);
+  }
+  draw(s: TradingSnapshot) {
+    const g = this.g;
+    const bt = s.backtest;
+    this.header('🧪 Backtest lab', bt ? (bt.running ? 'replaying…' : `${bt.days.length} days · NQ ES GC BTC`) : 'queued', s, '#f15bb5');
+    if (!bt || !bt.stats.length) return this.empty(bt?.running ? 'Replaying the month…' : 'No backtest yet', 'Every playbook, every market, a month of real 1-minute bars');
+    const cols = ['PLAYBOOK', 'TRADES', 'WIN %', 'AVG R', 'TOTAL R', 'MAX DD', 'EQUITY (R)'];
+    const xs = [28, 380, 490, 590, 700, 820, 930];
+    g.fillStyle = INK.dim;
+    g.font = `900 16px ${SANS}`;
+    cols.forEach((c, i) => g.fillText(c, xs[i]!, 110));
+    PLAYBOOKS.forEach((p, i) => {
+      const st = bt.stats.find((x) => x.playbook === p.id && x.symbol === 'ALL');
+      const y = 122 + i * 84;
+      g.fillStyle = i % 2 ? INK.bg : INK.panel;
+      rr(g, 20, y, this.W - 40, 78, 10);
+      g.fill();
+      g.fillStyle = p.color;
+      g.fillRect(20, y + 10, 6, 58);
+      g.fillStyle = INK.text;
+      g.font = `900 22px ${SANS}`;
+      g.fillText(p.name, xs[0]!, y + 34);
+      g.fillStyle = INK.dim;
+      g.font = `700 15px ${SANS}`;
+      // Which market it works best on.
+      const per = bt.stats.filter((x) => x.playbook === p.id && x.symbol !== 'ALL' && x.trades >= 3).sort((a, b) => b.avgR - a.avgR);
+      g.fillText(per.length ? `Best: ${per[0]!.symbol} ${per[0]!.avgR >= 0 ? '+' : ''}${per[0]!.avgR}R/trade · ${p.mentor}` : p.mentor, xs[0]!, y + 58);
+      if (!st) return;
+      g.font = `900 22px ${MONO}`;
+      g.fillStyle = INK.text;
+      g.fillText(String(st.trades), xs[1]!, y + 46);
+      g.fillStyle = st.winRate >= 0.5 ? INK.up : INK.text;
+      g.fillText(`${Math.round(st.winRate * 100)}%`, xs[2]!, y + 46);
+      g.fillStyle = tone(st.avgR);
+      g.fillText(`${st.avgR >= 0 ? '+' : ''}${st.avgR}`, xs[3]!, y + 46);
+      g.fillText(`${st.totalR >= 0 ? '+' : ''}${st.totalR}`, xs[4]!, y + 46);
+      g.fillStyle = INK.down;
+      g.fillText(`−${st.maxDrawdownR}`, xs[5]!, y + 46);
+      sparkline(g, xs[6]!, y + 12, this.W - xs[6]! - 36, 54, st.curve, p.color);
+    });
+    g.fillStyle = INK.dim;
+    g.font = `700 15px ${SANS}`;
+    g.fillText(clip(g, bt.note, this.W - 56), 28, this.H - 18);
+  }
+}
+
+export class EvalBoard extends Screen {
+  constructor() {
+    super(1200, 600);
+  }
+  draw(s: TradingSnapshot) {
+    const g = this.g;
+    const bt = s.backtest;
+    this.header('🏦 Prop eval simulator', 'Law of 10 sizing · NQ ES GC', s, INK.violet);
+    if (!bt || !bt.evals.length) return this.empty('Waiting on the backtest', 'Each playbook run through each account’s real rules');
+    const accts = PROP_ACCOUNTS;
+    const x0 = 290;
+    const cw = (this.W - x0 - 20) / accts.length;
+    g.font = `900 16px ${SANS}`;
+    accts.forEach((a, i) => {
+      g.fillStyle = INK.text;
+      g.fillText(clip(g, `${a.firm} ${a.size / 1000}K`, cw - 12), x0 + i * cw + 8, 108);
+      g.fillStyle = INK.dim;
+      g.font = `700 13px ${SANS}`;
+      g.fillText(clip(g, `$${a.profitTarget / 1000}K target · $${a.drawdown / 1000}K DD`, cw - 12), x0 + i * cw + 8, 126);
+      g.font = `900 16px ${SANS}`;
+    });
+    PLAYBOOKS.forEach((p, r) => {
+      const y = 138 + r * 106;
+      g.fillStyle = p.color;
+      g.fillRect(20, y + 8, 6, 84);
+      g.fillStyle = INK.text;
+      g.font = `900 21px ${SANS}`;
+      g.fillText(clip(g, p.name, 240), 36, y + 44);
+      g.fillStyle = INK.dim;
+      g.font = `700 15px ${SANS}`;
+      g.fillText(p.mentor, 36, y + 68);
+      accts.forEach((a, i) => {
+        const e = bt.evals.find((x) => x.playbook === p.id && x.accountId === a.id);
+        const x = x0 + i * cw + 4;
+        const c = !e ? INK.dim : e.result === 'passed' ? INK.up : e.result === 'busted' ? INK.down : INK.warn;
+        g.fillStyle = e?.result === 'passed' ? 'rgba(46,230,166,.14)' : e?.result === 'busted' ? 'rgba(255,93,115,.12)' : INK.panel;
+        rr(g, x, y, cw - 8, 98, 10);
+        g.fill();
+        if (!e) return;
+        g.fillStyle = c;
+        g.font = `900 19px ${SANS}`;
+        g.fillText(e.result === 'passed' ? 'PASSED' : e.result === 'busted' ? 'BUSTED' : 'IN PROGRESS', x + 10, y + 30);
+        g.fillStyle = INK.text;
+        g.font = `900 20px ${MONO}`;
+        g.fillText(money(e.pnl), x + 10, y + 60);
+        g.fillStyle = INK.dim;
+        g.font = `700 14px ${SANS}`;
+        g.fillText(`${e.days} day${e.days === 1 ? '' : 's'}`, x + 10, y + 84);
+      });
+    });
+  }
+}
+
+export class PaperBoard extends Screen {
+  constructor() {
+    super(1200, 600);
+  }
+  draw(s: TradingSnapshot, _role: FloorRole, now: number) {
+    const g = this.g;
+    const book = s.paper;
+    this.header('📒 Paper book', `today ${book.todayR >= 0 ? '+' : ''}${book.todayR}R · ${money(book.todayDollars)}/micro`, s, INK.up);
+    // Every playbook's running record since the office started tracking.
+    const cw = (this.W - 40 - 3 * 10) / 4;
+    book.stats.forEach((st, i) => {
+      const p = PLAYBOOK_BY_ID[st.playbook];
+      const x = 20 + i * (cw + 10);
+      g.fillStyle = INK.panel;
+      rr(g, x, 92, cw, 128, 12);
+      g.fill();
+      g.fillStyle = p.color;
+      g.fillRect(x + 12, 102, cw - 24, 4);
+      g.fillStyle = INK.text;
+      g.font = `900 18px ${SANS}`;
+      g.fillText(clip(g, p.name, cw - 24), x + 12, 130);
+      g.font = `900 24px ${MONO}`;
+      g.fillStyle = tone(st.totalR);
+      g.fillText(`${st.totalR >= 0 ? '+' : ''}${st.totalR}R`, x + 12, 162);
+      g.fillStyle = INK.dim;
+      g.font = `700 15px ${SANS}`;
+      g.fillText(`${st.trades} trades · ${Math.round(st.winRate * 100)}% win`, x + 12, 186);
+      sparkline(g, x + 12, 194, cw - 24, 20, st.curve, p.color);
+    });
+    const list = [...book.today, ...book.recent].slice(0, 7);
+    if (!list.length) {
+      g.fillStyle = INK.dim;
+      g.font = `800 24px ${SANS}`;
+      g.fillText('No paper trades yet: every setup the playbooks take lands here on its own.', 28, 290);
+      return;
+    }
+    list.forEach((t, i) => {
+      const y = 232 + i * 51;
+      const q = quoteOf(s, t.symbol);
+      const p = PLAYBOOK_BY_ID[t.playbook];
+      g.fillStyle = i % 2 ? INK.bg : INK.panel;
+      rr(g, 20, y, this.W - 40, 46, 8);
+      g.fill();
+      g.fillStyle = p.color;
+      g.fillRect(20, y + 8, 5, 30);
+      g.fillStyle = INK.dim;
+      g.font = `800 16px ${MONO}`;
+      g.fillText(t.day.slice(5), 34, y + 29);
+      g.fillStyle = INSTRUMENTS[t.symbol].ink;
+      g.font = `900 20px ${MONO}`;
+      g.fillText(t.symbol, 100, y + 30);
+      g.fillStyle = t.side === 'long' ? INK.up : INK.down;
+      g.font = `900 16px ${SANS}`;
+      g.fillText(t.side.toUpperCase(), 164, y + 29);
+      g.fillStyle = INK.text;
+      g.font = `800 17px ${SANS}`;
+      g.fillText(clip(g, `${p.short} · ${t.why}`, 560), 230, y + 29);
+      g.font = `800 17px ${MONO}`;
+      g.fillStyle = INK.dim;
+      g.fillText(`${fmt(t.entry, q?.decimals ?? 2)} → ${t.exit == null ? 'open' : fmt(t.exit, q?.decimals ?? 2)}`, 800, y + 29);
+      g.textAlign = 'right';
+      g.fillStyle = t.outcome === 'open' ? INK.info : tone(t.r);
+      g.font = `900 20px ${MONO}`;
+      g.fillText(t.outcome === 'open' ? `LIVE ${t.r >= 0 ? '+' : ''}${t.r}R` : `${t.r >= 0 ? '+' : ''}${t.r}R`, this.W - 36, y + 30);
+      g.textAlign = 'left';
+    });
+    void now;
+  }
+}
+
+// ---- The screens hung over each pod ------------------------------------------------------------------------
+/** What the screen over a pod shows: the pod's playbook on its market, or the accounts, or the books. */
+export class PodScreen extends Screen {
+  constructor(private pod: number) {
+    super(1024, 460);
+  }
+  draw(s: TradingSnapshot, role: FloorRole, now: number) {
+    const g = this.g;
+    g.fillStyle = INK.bg;
+    g.fillRect(0, 0, this.W, this.H);
+    if (role === 'office') return this.pod < 2 ? this.backtest(s, this.pod) : this.paper(s, this.pod - 2);
+    if (this.pod === 3) return this.risk(s, now);
+    const id: PlaybookId = this.pod === 0 ? 'vwap-pullback' : this.pod === 1 ? 'supply-demand' : 'failed-auction';
+    const book = PLAYBOOK_BY_ID[id];
+    // The market where this playbook is closest to a trade, NQ by default.
+    const order: Record<string, number> = { live: 0, ready: 1, won: 2, lost: 2, watching: 3 };
+    const mine = s.proposals.filter((p) => p.playbook === id || (id === 'vwap-pullback' && p.playbook === 'double-break'));
+    const best = [...mine].sort((a, b) => (order[a.stage] ?? 9) - (order[b.stage] ?? 9))[0];
+    const sym: Symbol = best && (order[best.stage] ?? 9) <= 2 ? best.symbol : 'NQ';
+    const q = quoteOf(s, sym);
+    const plan = mine.find((p) => p.symbol === sym && (order[p.stage] ?? 9) <= 3) ?? null;
+    g.fillStyle = book.color;
+    g.fillRect(0, 0, this.W, 8);
+    g.fillStyle = INK.text;
+    g.font = `900 34px ${SANS}`;
+    g.fillText(`${sym} · ${book.name}`, 20, 50);
+    if (q) {
+      g.textAlign = 'right';
+      g.fillStyle = tone(q.change);
+      g.font = `900 30px ${MONO}`;
+      g.fillText(fmt(q.last, q.decimals), this.W - 20, 48);
+      g.textAlign = 'left';
+    }
+    if (plan) {
+      g.fillStyle = STAGE_COLOR[plan.stage] ?? INK.dim;
+      g.font = `900 20px ${SANS}`;
+      g.fillText(clip(g, `${STAGE_LABEL[plan.stage]}  ${plan.title}`, this.W - 40), 20, 80);
+    }
+    if (!q) return;
+    const bars = id === 'supply-demand' ? fives(s.bars[sym]).slice(-40) : s.bars[sym].slice(-90);
+    drawChart(g, 12, 96, this.W - 24, this.H - 108, bars, q, s.levels[sym], {
+      vwap: id === 'vwap-pullback',
+      onVwap: id === 'vwap-pullback',
+      or: id === 'vwap-pullback',
+      zones: id === 'supply-demand',
+      value: id === 'failed-auction',
+      profile: id === 'failed-auction',
+      grid: true,
+      tag: true,
+      plan,
+    });
+  }
+  private risk(s: TradingSnapshot, now: number) {
+    const g = this.g;
+    g.fillStyle = '#06d6a0';
+    g.fillRect(0, 0, this.W, 8);
+    g.fillStyle = INK.text;
+    g.font = `900 32px ${SANS}`;
+    g.fillText('🛡️ Prop accounts · Law of 10', 20, 50);
+    const active = s.accounts.filter((a) => a.active).slice(0, 5);
+    active.forEach((a, i) => accountRow(g, 20, 68 + i * 58, this.W - 40, 52, a));
+    // The last TradingView alert or journal trade, along the bottom.
+    const alert = s.alerts[0];
+    const trade = s.journal.today[0];
+    g.fillStyle = INK.panel2;
+    rr(g, 20, this.H - 64, this.W - 40, 50, 10);
+    g.fill();
+    g.font = `800 19px ${SANS}`;
+    g.fillStyle = INK.text;
+    const line = alert && (!trade || alert.at > trade.exitAt)
+      ? `🔔 ${age(alert.at, now)} ago · TradingView: ${alert.setup} ${alert.symbol} ${alert.side ?? ''}${alert.price ? ` @ ${alert.price}` : ''}`
+      : trade
+        ? `📓 ${trade.symbol} ${trade.side} ×${trade.qty} · ${money(trade.pnl)} · ${age(trade.exitAt, now)} ago`
+        : s.journal.connected ? '📓 No trades yet today' : '📓 Connect ProjectX to journal your real fills';
+    g.fillText(clip(g, line, this.W - 70), 36, this.H - 32);
+  }
+  private backtest(s: TradingSnapshot, half: number) {
+    const g = this.g;
+    const ids: PlaybookId[] = half === 0 ? ['vwap-pullback', 'double-break'] : ['supply-demand', 'failed-auction'];
+    g.fillStyle = '#f15bb5';
+    g.fillRect(0, 0, this.W, 8);
+    g.fillStyle = INK.text;
+    g.font = `900 32px ${SANS}`;
+    g.fillText(`🧪 Equity curves · ${s.backtest?.days.length ?? 0} days`, 20, 50);
+    ids.forEach((id, k) => {
+      const p = PLAYBOOK_BY_ID[id];
+      const y = 70 + k * 190;
+      g.fillStyle = INK.panel;
+      rr(g, 20, y, this.W - 40, 178, 12);
+      g.fill();
+      g.fillStyle = p.color;
+      g.font = `900 24px ${SANS}`;
+      g.fillText(p.name, 36, y + 34);
+      const per = SYMBOLS.map((sym) => s.backtest?.stats.find((x) => x.playbook === id && x.symbol === sym)).filter((x) => !!x);
+      per.forEach((st, i) => {
+        const x = 36 + i * ((this.W - 72) / 4);
+        const w = (this.W - 72) / 4 - 16;
+        g.fillStyle = INSTRUMENTS[st.symbol as Symbol].ink;
+        g.font = `900 18px ${MONO}`;
+        g.fillText(`${st.symbol} ${st.totalR >= 0 ? '+' : ''}${st.totalR}R`, x, y + 66);
+        g.fillStyle = INK.dim;
+        g.font = `700 14px ${SANS}`;
+        g.fillText(`${st.trades} tr · ${Math.round(st.winRate * 100)}%`, x, y + 86);
+        sparkline(g, x, y + 98, w, 64, st.curve, INSTRUMENTS[st.symbol as Symbol].ink);
+      });
+    });
+  }
+  private paper(s: TradingSnapshot, half: number) {
+    const g = this.g;
+    const syms: Symbol[] = half === 0 ? ['NQ', 'ES'] : ['GC', 'BTC'];
+    g.fillStyle = '#06d6a0';
+    g.fillRect(0, 0, this.W, 8);
+    g.fillStyle = INK.text;
+    g.font = `900 32px ${SANS}`;
+    g.fillText(`📒 Paper · ${syms.join(' & ')}`, 20, 50);
+    syms.forEach((sym, k) => {
+      const x = 20 + k * ((this.W - 40) / 2 + 0);
+      const w = (this.W - 40) / 2 - 10;
+      const q = quoteOf(s, sym);
+      const open = s.paper.today.find((t) => t.symbol === sym && t.outcome === 'open');
+      if (q) drawChart(g, x, 70, w, 220, s.bars[sym].slice(-60), q, s.levels[sym], { vwap: true, tag: false, plan: open ? ({ entry: open.entry, stop: open.stop, target: open.target } as Proposal) : null });
+      const list = s.paper.today.filter((t) => t.symbol === sym).slice(0, 3);
+      g.font = `800 17px ${SANS}`;
+      if (!list.length) {
+        g.fillStyle = INK.dim;
+        g.fillText('No paper trades yet today', x + 6, 326);
+      }
+      list.forEach((t, i) => {
+        g.fillStyle = t.outcome === 'open' ? INK.info : tone(t.r);
+        g.fillText(clip(g, `${PLAYBOOK_BY_ID[t.playbook].short} ${t.side} ${t.outcome === 'open' ? 'LIVE' : ''} ${t.r >= 0 ? '+' : ''}${t.r}R`, w - 10), x + 6, 326 + i * 32);
+      });
+    });
+  }
+}
+
+function accountRow(g: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, a: AccountState) {
+  g.fillStyle = INK.panel;
+  rr(g, x, y, w, h, 10);
+  g.fill();
+  g.fillStyle = INK.text;
+  g.font = `900 20px ${SANS}`;
+  g.fillText(clip(g, `${a.rules.firm} ${a.rules.program.replace(a.rules.firm, '').trim()}`, 260), x + 14, y + 23);
+  g.fillStyle = INK.dim;
+  g.font = `700 14px ${SANS}`;
+  g.fillText(`${money(a.balance)} · ${a.source === 'projectx' ? 'ProjectX' : 'typed in'}`, x + 14, y + 43);
+  // The cushion left before the threshold, as a bar.
+  const bx = x + 300;
+  const bw = w - 300 - 260;
+  const frac = Math.max(0, Math.min(1, a.cushion / a.rules.drawdown));
+  g.fillStyle = INK.line;
+  rr(g, bx, y + 18, bw, 16, 8);
+  g.fill();
+  g.fillStyle = frac > 0.6 ? INK.up : frac > 0.3 ? INK.warn : INK.down;
+  rr(g, bx, y + 18, Math.max(8, bw * frac), 16, 8);
+  g.fill();
+  g.fillStyle = INK.dim;
+  g.font = `700 13px ${SANS}`;
+  g.fillText(`cushion ${money(a.cushion)} of ${money(a.rules.drawdown)} · ${money(a.toTarget)} to target`, bx, y + 48);
+  g.textAlign = 'right';
+  g.fillStyle = INK.warn;
+  g.font = `900 24px ${MONO}`;
+  g.fillText(`$${a.riskPerTrade}`, x + w - 14, y + 26);
+  g.fillStyle = INK.dim;
+  g.font = `700 13px ${SANS}`;
+  g.fillText('risk / trade', x + w - 14, y + 44);
+  g.textAlign = 'left';
 }
 
 /** The tape that runs the length of the wall. It scrolls with the clock, so every screen agrees where it is. */
@@ -470,25 +983,31 @@ export class TickerStrip extends Screen {
     g.fillRect(0, 0, this.W, 4);
     g.fillRect(0, this.H - 4, this.W, 4);
     g.font = `900 58px ${MONO}`;
-    const cells = s.quotes.map((q) => ({ q, text: `${q.symbol}  ${fmt(q.last, q.decimals)}  ${q.change >= 0 ? '▲' : '▼'} ${pct(q.changePct)}` }));
+    const cells: { label: string; ink: string; price: string; changePct: number }[] = [
+      ...s.quotes.map((q) => ({ label: q.symbol, ink: q.ink, price: fmt(q.last, q.decimals), changePct: q.changePct })),
+      ...s.context.map((c) => ({ label: c.id, ink: '#a7b4d4', price: fmt(c.last, c.decimals), changePct: c.changePct })),
+    ];
+    const bell = bellText(s);
+    const texts = cells.map((c) => `${c.label}  ${c.price}  ${c.changePct >= 0 ? '▲' : '▼'} ${pct(c.changePct)}`);
     const gapPx = 110;
-    const widths = cells.map((c) => g.measureText(c.text).width + gapPx);
+    const widths = [...texts.map((t) => g.measureText(t).width + gapPx), g.measureText(bell).width + gapPx];
     const total = widths.reduce((a, b) => a + b, 0);
-    const offset = ((now / 1000) * 90) % total;
-    // Repeat the tape as often as it takes to cover the strip.
+    const offset = ((now / 1000) * 110) % total;
     for (let rep = -1; rep < Math.ceil(this.W / total) + 1; rep++) {
       let x = rep * total - offset;
       cells.forEach((c, i) => {
-        g.fillStyle = c.q.ink;
-        g.fillText(c.q.symbol, x, 82);
-        const symW = g.measureText(`${c.q.symbol}  `).width;
+        g.fillStyle = c.ink;
+        g.fillText(c.label, x, 82);
+        const lw = g.measureText(`${c.label}  `).width;
         g.fillStyle = INK.text;
-        g.fillText(fmt(c.q.last, c.q.decimals), x + symW, 82);
-        const priceW = g.measureText(`${fmt(c.q.last, c.q.decimals)}  `).width;
-        g.fillStyle = tone(c.q.change);
-        g.fillText(`${c.q.change >= 0 ? '▲' : '▼'} ${pct(c.q.changePct)}`, x + symW + priceW, 82);
+        g.fillText(c.price, x + lw, 82);
+        const pw = g.measureText(`${c.price}  `).width;
+        g.fillStyle = tone(c.changePct);
+        g.fillText(`${c.changePct >= 0 ? '▲' : '▼'} ${pct(c.changePct)}`, x + lw + pw, 82);
         x += widths[i]!;
       });
+      g.fillStyle = INK.warn;
+      g.fillText(bell, x, 82);
     }
   }
 }
@@ -501,28 +1020,27 @@ export function paintLaptopTape(g: CanvasRenderingContext2D, w: number, h: numbe
   g.fillStyle = INK.warn;
   g.fillRect(0, h - bar, w, 2);
   if (!s) return;
-  const cell = w / s.quotes.length;
+  const cell = w / Math.max(1, s.quotes.length);
   const fs = Math.round(bar * 0.42);
-  g.font = `900 ${fs}px ${MONO}`;
   g.textBaseline = 'middle';
   s.quotes.forEach((q, i) => {
     const x = i * cell + 10;
+    g.font = `900 ${fs}px ${MONO}`;
     g.fillStyle = q.ink;
     g.fillText(q.symbol, x, h - bar / 2 + 1);
     g.fillStyle = tone(q.change);
     g.font = `800 ${Math.round(fs * 0.9)}px ${MONO}`;
-    g.fillText(`${fmt(q.last, q.decimals)}`, x + g.measureText(`${q.symbol} `).width + fs * 0.6, h - bar / 2 + 1);
-    g.font = `900 ${fs}px ${MONO}`;
+    g.fillText(fmt(q.last, q.decimals), x + g.measureText(`${q.symbol} `).width + fs * 0.6, h - bar / 2 + 1);
   });
   g.textBaseline = 'alphabetic';
 }
 
-/** The chart a laptop shows while its worker has nothing on the terminal. */
-export function paintLaptopChart(g: CanvasRenderingContext2D, w: number, h: number, s: TradingSnapshot | null, symbol: (typeof SYMBOLS)[number]) {
+/** What a laptop shows while its worker has nothing on the terminal: its pod's market, the way that pod reads it. */
+export function paintLaptopChart(g: CanvasRenderingContext2D, w: number, h: number, s: TradingSnapshot | null, symbol: Symbol, view: 'vwap' | 'zones' | 'profile' = 'vwap') {
   g.fillStyle = INK.bg;
   g.fillRect(0, 0, w, h);
-  if (!s) return;
-  const q = s.quotes.find((x) => x.symbol === symbol)!;
+  const q = s ? quoteOf(s, symbol) : undefined;
+  if (!s || !q) return;
   g.fillStyle = q.ink;
   g.font = `900 ${Math.round(h * 0.09)}px ${MONO}`;
   g.fillText(symbol, 20, h * 0.11);
@@ -533,5 +1051,6 @@ export function paintLaptopChart(g: CanvasRenderingContext2D, w: number, h: numb
   g.font = `800 ${Math.round(h * 0.05)}px ${MONO}`;
   g.fillText(pct(q.changePct), w - 20, h * 0.18);
   g.textAlign = 'left';
-  drawChart(g, 14, h * 0.2, w - 28, h * 0.68 - h * 0.04, s.bars[symbol].slice(-64), q, s.levels[symbol], { levels: true, grid: true, tag: true });
+  const bars = view === 'zones' ? fives(s.bars[symbol]).slice(-36) : s.bars[symbol].slice(-64);
+  drawChart(g, 14, h * 0.2, w - 28, h * 0.64, bars, q, s.levels[symbol], { vwap: view === 'vwap', onVwap: view === 'vwap', or: view === 'vwap', zones: view === 'zones', value: view === 'profile', profile: view === 'profile', grid: true, tag: true });
 }

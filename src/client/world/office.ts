@@ -78,6 +78,8 @@ export interface Office {
    */
   setBeanbags(out: Set<string>): Collider[];
   boardMeshes: Record<keyof typeof BOARDS, THREE.Mesh>;
+  /** Changes the sign over a wall board (a trading floor's boards show different things on each floor). */
+  setBoardLabel(key: keyof typeof BOARDS, text: string): void;
   tvScreen: THREE.Mesh;
   /** The monitor on the boss's desk upstairs, where Minesweeper plays (ui/arcade.ts). */
   bossScreen: THREE.Mesh;
@@ -1074,6 +1076,7 @@ export function buildOffice(): Office {
 
   // Cork boards on the walls
   const boardMeshes = {} as Office['boardMeshes'];
+  const boardLabels = new Map<keyof typeof BOARDS, { mesh: THREE.Mesh; text: string }>();
   for (const key of Object.keys(BOARDS) as (keyof typeof BOARDS)[]) {
     const b = BOARDS[key];
     // Out from the wall, the way the board faces.
@@ -1090,6 +1093,7 @@ export function buildOffice(): Office {
     label.position.set(b.x + nx * 0.04, b.y + b.height / 2 + 0.5, b.z + nz * 0.04);
     label.rotation.y = b.rotY;
     group.add(label);
+    boardLabels.set(key, { mesh: label, text: b.label });
     const it: Interactable = { kind: key, x: b.x + nx * 1.6, z: b.z + nz * 1.6, radius: 2.4 };
     interactables.push(it);
     bg.userData.interact = it;
@@ -1134,23 +1138,23 @@ export function buildOffice(): Office {
   couch.add(mesh(roundedBox(1, 0.7, 0.35, 0.15), couchMat, 0, 0.45, -2.0));
   couch.add(mesh(roundedBox(1, 0.7, 0.35, 0.15), couchMat, 0, 0.45, 2.0));
   ['#ffd166', '#ef476f'].forEach((c, i) => couch.add(mesh(roundedBox(0.2, 0.45, 0.5, 0.1), toon(c), -0.2, 0.75, i ? 0.9 : -0.9)));
-  couch.position.set(10.5, 0, 0);
+  couch.position.set(13, 0, 0);
   group.add(couch);
-  colliders.push({ minX: 10, maxX: 11, minZ: -2.2, maxZ: 2.2, top: 0.55 });
+  colliders.push({ minX: 12.5, maxX: 13.5, minZ: -2.2, maxZ: 2.2, top: 0.55 });
   seatable(couch, 'couch', 2.6, interactables);
 
   const table = new THREE.Group();
   table.add(mesh(new THREE.CylinderGeometry(0.9, 0.9, 0.08, 24), toon(PALETTE.wood), 0, 0.42, 0));
   table.add(mesh(new THREE.CylinderGeometry(0.12, 0.2, 0.4, 12), toon(PALETTE.deskLeg), 0, 0.2, 0));
-  table.position.set(13, 0, 0);
+  table.position.set(15.5, 0, 0);
   group.add(table);
-  colliders.push({ minX: 12.2, maxX: 13.8, minZ: -0.8, maxZ: 0.8, top: 0.46 });
-  const lounge = mesh(roundedBox(7, 0.02, 7, 1.2), toon('#ffc6ff'), 13.4, 0.011, 0, false);
+  colliders.push({ minX: 14.7, maxX: 16.3, minZ: -0.8, maxZ: 0.8, top: 0.46 });
+  const lounge = mesh(roundedBox(7, 0.02, 7, 1.2), toon('#ffc6ff'), 15.9, 0.011, 0, false);
   group.add(lounge);
 
   [
-    ['#06d6a0', 12.5, 3.5],
-    ['#ffd166', 14.5, -3.4],
+    ['#06d6a0', 15, 3.5],
+    ['#ffd166', 17, -3.4],
   ].forEach(([c, x, z], i) => {
     const bean = mesh(new THREE.SphereGeometry(0.6, 16, 12), toon(c as string), x as number, 0.35, z as number);
     bean.scale.y = 0.6;
@@ -1188,17 +1192,17 @@ export function buildOffice(): Office {
   kitchen.add(coffee);
   kitchen.add(mesh(roundedBox(1.1, 2.2, 1, 0.1), toon('#f8f9fa'), 3.2, 1.1, 0));
   kitchen.add(mesh(box(0.06, 0.5, 0.06), toon('#adb5bd'), 2.75, 1.4, 0.52));
-  kitchen.position.set(-14.5, 0, 12.2);
+  kitchen.position.set(-17, 0, 12.2);
   group.add(kitchen);
-  colliders.push({ minX: -17, maxX: -12, minZ: 11.7, maxZ: 12.7, top: 1.03 });
-  colliders.push({ minX: -11.85, maxX: -10.75, minZ: 11.7, maxZ: 12.7, top: 2.2 });
-  const cup: Interactable = { kind: 'coffee', x: -15.7, z: 10.9, radius: 1.4 };
+  colliders.push({ minX: -19.5, maxX: -14.5, minZ: 11.7, maxZ: 12.7, top: 1.03 });
+  colliders.push({ minX: -14.35, maxX: -13.25, minZ: 11.7, maxZ: 12.7, top: 2.2 });
+  const cup: Interactable = { kind: 'coffee', x: -18.2, z: 10.9, radius: 1.4 };
   interactables.push(cup);
   coffee.userData.interact = cup;
   // Counter, coffee machine and fridge, in front of the south wall.
-  fixture('south', -14.5, 0.55, 5.1, 1.1);
-  fixture('south', -15.7, 0.9, 0.6, 1.8);
-  fixture('south', -11.3, 1.1, 1.1, 2.2);
+  fixture('south', -17, 0.55, 5.1, 1.1);
+  fixture('south', -18.2, 0.9, 0.6, 1.8);
+  fixture('south', -13.8, 1.1, 1.1, 2.2);
 
   // Plants around the room
   const plants: THREE.Group[] = [];
@@ -1319,7 +1323,21 @@ export function buildOffice(): Office {
     hoop.update(dt);
   };
 
-  return { group, colliders, interactables, desks, setBeanbags, boardMeshes, tvScreen, bossScreen, slide, machineScreen, meetingBoard: meeting.board, meetingSign: meeting.sign, fixtures: () => fixtures, elevator, gong, jukebox, cabinet, whiteboard, tee, green, hoop, stack, setProjectName, setLook, setLevel, night, plants, update };
+  const setBoardLabel = (key: keyof typeof BOARDS, text: string) => {
+    const old = boardLabels.get(key)!;
+    if (old.text === text) return;
+    const label = textPlane(text, { bg: '#fffaf3', size: 64 });
+    label.scale.copy(old.mesh.scale);
+    label.position.copy(old.mesh.position);
+    label.rotation.copy(old.mesh.rotation);
+    group.remove(old.mesh);
+    old.mesh.geometry.dispose();
+    (old.mesh.material as THREE.MeshBasicMaterial).map?.dispose();
+    (old.mesh.material as THREE.Material).dispose();
+    group.add(label);
+    boardLabels.set(key, { mesh: label, text });
+  };
+  return { group, colliders, interactables, desks, setBeanbags, boardMeshes, setBoardLabel, tvScreen, bossScreen, slide, machineScreen, meetingBoard: meeting.board, meetingSign: meeting.sign, fixtures: () => fixtures, elevator, gong, jukebox, cabinet, whiteboard, tee, green, hoop, stack, setProjectName, setLook, setLevel, night, plants, update };
 }
 
 /** A chair at the meeting table, with its laptop on the table in front of it. */
