@@ -7,19 +7,23 @@ import { DESK_BY_ID } from '../shared/layout.js';
 import type { FloorDef } from './building.js';
 import { excludeFromGit } from './config.js';
 import { agentProviders, configuredProvider } from './agents.js';
-import { WorkerManager, type HookEnv } from './workers.js';
+import { WorkerManager, workedMs, type HookEnv, type RunAs } from './workers.js';
 import { GitHub, MergeWatch } from './github.js';
+import type { GhAs } from './signins.js';
 import { TaskQueue } from './queue.js';
 import { Changes } from './changes.js';
 import { Decor } from './decor.js';
+import { FloorPlanStore } from './floorplan.js';
 import { Docs } from './docs.js';
 import { Dog } from './dog.js';
 import { Court } from './court.js';
+import { Jail } from './jail.js';
+import { Garage } from './garage.js';
 import { Jukebox } from './jukebox.js';
 import { Whiteboard } from './whiteboard.js';
 import { MeetingRoom } from './meetings.js';
-import { Worktrees } from './worktrees.js';
-import { landedWorkers } from './leave-on-merge.js';
+import { Worktrees, type WorktreeCleanup } from './worktrees.js';
+import { landedWork, landedWorkers, type Landed } from './leave-on-merge.js';
 import type { Ledger } from './usage.js';
 import type { Capacity } from './machine.js';
 import { officePrompt, type PromptSource } from './prompts.js';
@@ -30,6 +34,8 @@ type ToastLevel = 'info' | 'warn' | 'error';
 export interface FloorContext {
   agentCmd: string;
   agentArgs: string[];
+  /** The DSH profile DeepSeek Harness workers boot (see server/dsh.ts). */
+  dshProfile: string;
   hook: HookEnv;
   /** Spend, across every floor. */
   ledger: Ledger;
@@ -37,6 +43,10 @@ export interface FloorContext {
   capacity: Capacity;
   /** The office's prompts and the worker everyone starts on, as set in ⚙️ Settings. */
   prompts: PromptSource;
+  /** Workers hired by an account run on its own sign-ins (see signins.ts). */
+  runAs?: RunAs;
+  /** How to run gh as an account: its own sign-in, the office's (undefined), or why it can't. */
+  ghAs(owner: string | undefined): GhAs | undefined | string;
   /** To everyone on this floor. */
   emit(floor: Floor, msg: ServerMsg, droppable?: boolean): void;
   toast(floor: Floor, text: string, level?: ToastLevel): void;
@@ -52,6 +62,20 @@ export interface FloorContext {
   peers(floor: Floor): PeerInfo[];
   /** ⚙️ Settings: a worker whose pull request merged goes home by itself. */
   leaveOnMerge(): boolean;
+  /** Another floor of the building: a worker across repositories works in its project too (see WorkerInfo.repos). */
+  floor(id: string): Floor | undefined;
+  /** This floor's pull requests came back: a worker on another floor with a repository here may have landed. */
+  pullsChanged(floor: Floor): void;
+  /** Whether a worker on another floor works in this floor's project too. */
+  lent(floor: Floor): boolean;
+  /** Whether the building's map locks up workers sent home (see MapPlan.sendHome), instead of letting them go. */
+  locksUp(): boolean;
+}
+
+/** The open pull request on a floor's board whose head is `branch`. */
+function openPull(floor: Floor, branch: string): { number: number; url: string } | undefined {
+  const pr = floor.github.pulls.items.find((p) => p.state === 'OPEN' && p.headRefName === branch);
+  return pr ? { number: pr.number, url: pr.url } : undefined;
 }
 
 /** How long after a PR list or a worker's change the office looks for workers whose PR merged. */
@@ -93,6 +117,8 @@ export class Floor {
   readonly queue: TaskQueue;
   readonly changes: Changes;
   readonly decor: Decor;
+  /** The signs over its desks, and how far its back office is built out. */
+  readonly plan: FloorPlanStore;
   readonly jukebox: Jukebox;
   /** The whiteboard everyone on the floor draws on together. */
   readonly whiteboard: Whiteboard;
@@ -105,11 +131,17 @@ export class Floor {
   readonly dog: Dog;
   /** The basketball by the hoop: who has it, or how it was last thrown. */
   readonly court = new Court();
+  /** The cars in the garage: who's in which, and where their drivers have left them. */
+  readonly garage = new Garage();
+  /** Workers sent home on a map that locks them up (see MapPlan.sendHome). */
+  readonly jail: Jail;
   private timer: NodeJS.Timeout;
   /** Pull requests merging, to ring the gong for. */
   private merges = new MergeWatch();
   /** A look for workers whose pull request merged, due shortly (see sendLandedHome). */
   private landedTimer?: NodeJS.Timeout;
+  /** Workers across repositories whose worktrees are being checked before they go home. */
+  private landing = new Set<string>();
 
   constructor(
     readonly def: FloorDef,
@@ -122,12 +154,16 @@ export class Floor {
     excludeFromGit(def.dir);
     this.project = projectInfo(def.dir, def.name, ctx.agentCmd, ctx.agentArgs);
     this.docs = new Docs(def.dir);
+    // Before the workers and the dog: the back office's desks are only there once it's built.
+    this.plan = new FloorPlanStore(dataDir);
+    this.jail = new Jail(dataDir);
 
     // Before the workers, so it hears about the ones who wake up needing input.
     this.dog = new Dog(def.id, dataDir, {
       workers: () => this.workers?.list() ?? [],
       people: () => ctx.peers(this),
       send: (dog) => ctx.emit(this, { t: 'dog', dog }),
+      wing: () => this.plan.wing,
     });
 
     this.workers = new WorkerManager(
@@ -147,9 +183,12 @@ export class Floor {
           // Its turn ended, or whoever had its terminal open closed it: it may be free to go now.
           this.sendLandedHome();
         },
-        remove: (workerId) => {
+        remove: (workerId, info) => {
           this.changes?.forget(workerId);
-          ctx.emit(this, { t: 'worker.remove', workerId });
+          // Sent home on a map that locks workers up: into the dungeon with it, for good (a meeting's
+          // workers aren't sent home when it's over, just let go).
+          const jail = info && !info.meeting && ctx.locksUp() ? this.jail.add({ ...info, workedMs: workedMs(info) }) : undefined;
+          ctx.emit(this, { t: 'worker.remove', workerId, ...(jail ? { jail } : {}) });
           this.queue?.onWorkerGone(workerId);
           this.meetings?.onWorkerGone(workerId);
           this.dog.onWorkerGone(workerId);
@@ -162,7 +201,10 @@ export class Floor {
       ctx.ledger,
       ctx.capacity,
       ctx.prompts,
+      ctx.runAs,
+      ctx.dshProfile,
     );
+    this.workers.wing = () => this.plan.wing;
 
     this.github = new GitHub(
       def.dir,
@@ -171,11 +213,14 @@ export class Floor {
         ctx.emit(this, { t: 'gh.pulls', state });
         this.queue?.onPulls(state.items);
         if (state.loading || state.error) return;
+        // A worker may have opened one from a branch it made itself, mid-turn or from a shell.
+        void this.workers.syncBranches();
         for (const p of this.merges.look(state.items)) {
           ctx.toast(this, `🎉 PR #${p.number} merged: ${p.title}`);
           this.merged(p.number);
         }
         this.sendLandedHome();
+        ctx.pullsChanged(this);
       },
     );
     // The 📋 task queue seats workers by itself: it watches the workers and links PRs from GitHub.
@@ -186,7 +231,10 @@ export class Floor {
         this.sendLandedHome();
       },
       toast: (text, level) => ctx.toast(this, text, level),
-      claimIssue: (issue) => this.github.claim(issue),
+      claimIssue: (issue, owner) => {
+        const as = ctx.ghAs(owner);
+        return typeof as === 'string' ? Promise.resolve(as) : this.github.claim(issue, as);
+      },
       refreshGitHub: () => void this.github.refresh(),
       hiringPaused: () => ctx.ledger.hiringPaused,
       room: () => ctx.capacity.room(),
@@ -208,7 +256,7 @@ export class Floor {
           return workers.officeDefault;
         },
         list: () => this.workers.list(),
-        seat: (deskId, by, prompt, provider, model, effort, meeting) => this.workers.spawn(deskId, by, prompt, false, 'agent', provider, model, effort, meeting),
+        seat: (deskId, by, prompt, provider, model, effort, meeting, owner) => this.workers.spawn(deskId, by, prompt, false, 'agent', provider, model, effort, meeting, owner),
         prompt: (id, text, by) => this.workers.prompt(id, text, by),
         write: (id, data, by) => this.workers.write(id, data, by),
         kill: (id) => this.workers.kill(id),
@@ -218,7 +266,10 @@ export class Floor {
         update: (state) => ctx.emit(this, { t: 'meeting', state }),
         toast: (text, level) => ctx.toast(this, text, level),
         hiringPaused: () => ctx.ledger.hiringPaused,
-        postReview: (pr, file) => this.github.review(pr, file),
+        postReview: (pr, file, owner) => {
+          const as = ctx.ghAs(owner);
+          return typeof as === 'string' ? Promise.reject(new Error(as)) : this.github.review(pr, file, as);
+        },
         prompt: (id) => ctx.prompts.text(id),
       },
     );
@@ -227,15 +278,25 @@ export class Floor {
     this.changes = new Changes(
       def.dir,
       this.project.branch,
-      (workerId) => {
+      (workerId, repo) => {
         const w = this.workers.get(workerId);
         if (!w) return undefined;
-        return { name: w.name, cwd: w.worktree ? path.join(def.dir, w.worktree.path) : def.dir, rel: w.worktree?.path ?? '', worktreeBase: w.worktree?.base };
+        if (!repo) return { name: w.name, cwd: w.worktree ? path.join(def.dir, w.worktree.path) : def.dir, rel: w.worktree?.path ?? '', worktreeBase: w.worktree?.base };
+        // One of the other floors' repositories it works in: diffed against, and PRs opened against, that floor's branch.
+        const r = w.repos?.find((x) => x.floor === repo);
+        if (!r) return undefined;
+        const other = ctx.floor(r.floor);
+        return {
+          name: w.name,
+          cwd: path.join(def.dir, r.path),
+          rel: r.path,
+          worktreeBase: r.base,
+          baseBranch: r.from ?? null,
+          openPull: (branch) => (other ? openPull(other, branch) : undefined),
+          refreshGitHub: () => void other?.github.refresh(),
+        };
       },
-      (branch) => {
-        const pr = this.github.pulls.items.find((p) => p.state === 'OPEN' && p.headRefName === branch);
-        return pr ? { number: pr.number, url: pr.url } : undefined;
-      },
+      (branch) => openPull(this, branch),
       {
         state: (state, ids) => ctx.changes(state, ids),
         toast: (text, level) => ctx.toast(this, text, level),
@@ -271,15 +332,51 @@ export class Floor {
     this.landedTimer = setTimeout(() => {
       this.landedTimer = undefined;
       if (!this.ctx.leaveOnMerge()) return;
-      for (const { worker, pr, head } of landedWorkers(this.workers.list(), this.github.pulls.items, this.queue.state().tasks)) {
-        const done = this.workers.kill(worker.id, undefined, head);
-        this.ctx.toast(this, `🏠 ${worker.name} went home: PR #${pr} merged`);
-        void done.then(({ note, error }) => {
-          if (note) this.ctx.toast(this, note);
-          if (error) this.ctx.toast(this, error, 'warn');
+      const pullsOf = (id: string) => this.ctx.floor(id)?.github.pulls.items;
+      for (const landed of landedWorkers(this.workers.list(), this.github.pulls.items, this.queue.state().tasks, pullsOf)) {
+        const { worker, head, heads } = landed;
+        if (!worker.repos?.length) {
+          this.goHome(worker, `PR #${landed.pr} merged`, head);
+          continue;
+        }
+        // Across repositories, one PR can merge before another repository's work even has one:
+        // it goes once nothing is left that its merged PRs didn't deliver.
+        if (this.landing.has(worker.id)) continue;
+        this.landing.add(worker.id);
+        void this.workers.holdsWork(worker.id, head, heads).catch(() => true).then((held) => {
+          this.landing.delete(worker.id);
+          if (!held && this.workers.get(worker.id) === worker) this.goHome(worker, `its pull requests merged (${landed.prs?.join(', ')})`, head, heads);
         });
       }
     }, LANDED_DELAY_MS);
+  }
+
+  /**
+   * Whether a worker's work landed: a pull request of its merged and none is open, on this floor
+   * and, for a worker across repositories, on the others too (see landedWork).
+   */
+  landed(worker: WorkerInfo): Landed | undefined {
+    return landedWork(worker, this.github.pulls.items, this.queue.state().tasks, (id) => this.ctx.floor(id)?.github.pulls.items);
+  }
+
+  /**
+   * Sends a worker home as someone asked (not by itself, see sendLandedHome): with no `cleanup`, its
+   * worktree and branch go unless they hold work, where what its merged pull requests delivered
+   * doesn't count. Resolves with the line about its worktree.
+   */
+  sendHome(workerId: string, cleanup?: WorktreeCleanup): Promise<{ note?: string; error?: string }> {
+    const info = this.workers.get(workerId);
+    const landed = info && this.landed(info);
+    return this.workers.kill(workerId, cleanup, landed?.head, landed?.heads);
+  }
+
+  private goHome(worker: WorkerInfo, why: string, head?: string, heads?: Record<string, string | undefined>) {
+    const done = this.workers.kill(worker.id, undefined, head, heads);
+    this.ctx.toast(this, `🏠 ${worker.name} went home: ${why}`);
+    void done.then(({ note, error }) => {
+      if (note) this.ctx.toast(this, note);
+      if (error) this.ctx.toast(this, error, 'warn');
+    });
   }
 
   /** Someone just walked in: boards that haven't been looked at in a while get fetched again. */
@@ -288,7 +385,7 @@ export class Floor {
   }
 
   private active(): boolean {
-    return this.ctx.people(this) > 0 || this.workers.list().some((w) => isBusy(w.status)) || this.queue.state().tasks.some((t) => t.status !== 'done') || this.meetings.state().current?.status === 'running';
+    return this.ctx.people(this) > 0 || this.ctx.lent(this) || this.workers.list().some((w) => isBusy(w.status)) || this.queue.state().tasks.some((t) => t.status !== 'done') || this.meetings.state().current?.status === 'running';
   }
 
   info(): FloorInfo {
@@ -298,6 +395,7 @@ export class Floor {
       name: this.def.name,
       repo: this.def.repo,
       dir: this.dir,
+      branch: this.project.branch,
       palette: this.def.palette,
       addedBy: this.def.addedBy,
       addedAt: this.def.addedAt,
@@ -305,6 +403,7 @@ export class Floor {
       busy: ws.filter((w) => w.status === 'working').length,
       waiting: ws.filter((w) => w.kind === 'agent' && (w.status === 'needs_input' || (w.status === 'done' && !w.acked))).length,
       people: this.ctx.people(this),
+      wing: this.plan.wing,
     };
   }
 

@@ -1,14 +1,17 @@
-import type { AccountsState, ChatLine, FloorInfo, FloorView, GhIssue, GhPull, GhState, LeaveOnMergeState, MachineState, MeetingState, NotifyState, PeerInfo, PlanLimits, Me, ProjectInfo, ProjectsDirState, PromptsState, QueueState, QueueTask, RepoChoice, ServerMsg, ServicesState, SkyState, TeamState, ThemeState, UpgradeState, Usage, UsageState, WorkerInfo } from '../shared/protocol';
+import type { AccountsState, ChatLine, FloorInfo, FloorView, GhIssue, GhPull, GhState, JailState, LeaveOnMergeState, MachineState, MapState, MeetingState, NotifyState, PeerInfo, PlanLimits, Me, ProjectInfo, ProjectsDirState, PromptsState, QueueState, QueueTask, RepoChoice, ServerMsg, ServicesState, SignInsState, SkyState, TeamState, ThemeState, UpgradeState, Usage, UsageState, WorkerInfo } from '../shared/protocol';
 import type { ScreenState } from './world/laptop';
 import { randomLook, sanitizeLook, type Look } from '../shared/avatar';
 import type { Decoration } from '../shared/decor';
+import { EMPTY_PLAN, type FloorPlan } from '../shared/floorplan';
 import { newer, type WbElement } from '../shared/whiteboard';
 import type { DogState } from '../shared/dog';
 import { JUKEBOX_TUNES, type JukeboxState } from '../shared/jukebox';
 import type { CabinetFrame, CabinetState } from '../shared/cabinet';
 import type { BallState } from '../shared/hoop';
+import { parked, type CarSeat, type CarState } from '../shared/garage';
+import { OFFICE_MAP, planOf, type MapPlan } from '../shared/maps';
 
-export type Topic = 'peers' | 'workers' | 'issues' | 'pulls' | 'chat' | 'project' | 'screens' | 'team' | 'upgrade' | 'services' | 'decor' | 'usage' | 'limits' | 'queue' | 'me' | 'accounts' | 'notify' | 'machine' | 'floors' | 'floor' | 'projectsDir' | 'repos' | 'dog' | 'jukebox' | 'sky' | 'theme' | 'leaveOnMerge' | 'whiteboard' | 'drawing' | 'cabinet' | 'cabinetFrame' | 'meeting' | 'prompts' | 'ball';
+export type Topic = 'peers' | 'workers' | 'issues' | 'pulls' | 'chat' | 'project' | 'screens' | 'team' | 'upgrade' | 'services' | 'decor' | 'floorPlan' | 'usage' | 'limits' | 'queue' | 'me' | 'accounts' | 'signins' | 'notify' | 'machine' | 'floors' | 'floor' | 'projectsDir' | 'repos' | 'dog' | 'jukebox' | 'sky' | 'theme' | 'map' | 'leaveOnMerge' | 'whiteboard' | 'drawing' | 'cabinet' | 'cabinetFrame' | 'meeting' | 'prompts' | 'ball' | 'cars' | 'jail';
 
 const zeroUsage = (): Usage => ({ input: 0, output: 0, cacheWrite: 0, cacheRead: 0, cost: 0, calls: 0 });
 
@@ -34,7 +37,8 @@ export function loadProfile(): (Omit<Profile, 'look'> & { look?: Look }) | null 
   return null;
 }
 
-export function saveProfile(p: Profile) {
+/** Without a look, the 3D office still has you pick a character (the 2D view saves only a name). */
+export function saveProfile(p: Omit<Profile, 'look'> & { look?: Look }) {
   try {
     localStorage.setItem(PROFILE_KEY, JSON.stringify(p));
   } catch {
@@ -62,6 +66,8 @@ export interface Settings {
   /** The lounge jukebox, 0–1, apart from the office sounds. */
   music: number;
   musicMuted: boolean;
+  /** The swish of a page turning as you read at the bookshelf. */
+  pageTurns: boolean;
   /** Voice chat starts muted and V is held down to talk, instead of an open mic. */
   pushToTalk: boolean;
   /** Desktop notifications when a worker needs input or finishes while you're in another tab (once the browser allows them). */
@@ -92,8 +98,47 @@ function rememberFloor(id: string | null) {
   }
 }
 
+const SPOT_KEY = 'agent-office.spot';
+
+/** Where you were standing, on which floor (or the roof), to be back there when you come back in. */
+export interface Spot {
+  floor: string;
+  /** What that floor was called, to say so if it's gone by then. */
+  name: string;
+  /** The building's map then (see shared/maps): a spot on another map is nowhere on this one. */
+  map?: string;
+  /** Sitting on its throne. */
+  throne?: boolean;
+  x: number;
+  y: number;
+  z: number;
+  facing: number;
+}
+
+/** The spot you were last in, if this browser has one. */
+export function lastSpot(): Spot | null {
+  try {
+    const s = JSON.parse(localStorage.getItem(SPOT_KEY) ?? 'null');
+    const finite = (v: unknown) => typeof v === 'number' && Number.isFinite(v);
+    if (s && typeof s.floor === 'string' && s.floor && finite(s.x) && finite(s.y) && finite(s.z) && finite(s.facing)) {
+      return { floor: s.floor, name: typeof s.name === 'string' ? s.name : '', ...(typeof s.map === 'string' ? { map: s.map } : {}), ...(s.throne === true ? { throne: true } : {}), x: s.x, y: s.y, z: s.z, facing: s.facing };
+    }
+  } catch {
+    // storage blocked
+  }
+  return null;
+}
+
+export function rememberSpot(s: Spot) {
+  try {
+    localStorage.setItem(SPOT_KEY, JSON.stringify(s));
+  } catch {
+    // storage blocked
+  }
+}
+
 export function loadSettings(): Settings {
-  const s: Settings = { view: 'first', lowPower: true, volume: 0.7, muted: false, bellSound: 'recording', music: 0.5, musicMuted: false, pushToTalk: false, notify: true, hud: { ...HUD_DEFAULTS }, pins: [] };
+  const s: Settings = { view: 'first', lowPower: true, volume: 0.7, muted: false, bellSound: 'recording', music: 0.5, musicMuted: false, pageTurns: true, pushToTalk: false, notify: true, hud: { ...HUD_DEFAULTS }, pins: [] };
   try {
     const saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) ?? 'null');
     if (saved?.view === 'first' || saved?.view === 'third') s.view = saved.view;
@@ -103,6 +148,7 @@ export function loadSettings(): Settings {
     if (saved?.bellSound === 'recording' || saved?.bellSound === 'synth') s.bellSound = saved.bellSound;
     if (typeof saved?.music === 'number' && Number.isFinite(saved.music)) s.music = Math.max(0, Math.min(1, saved.music));
     if (typeof saved?.musicMuted === 'boolean') s.musicMuted = saved.musicMuted;
+    if (typeof saved?.pageTurns === 'boolean') s.pageTurns = saved.pageTurns;
     if (typeof saved?.pushToTalk === 'boolean') s.pushToTalk = saved.pushToTalk;
     if (typeof saved?.notify === 'boolean') s.notify = saved.notify;
     for (const k of Object.keys(s.hud) as HudPanel[]) if (typeof saved?.hud?.[k] === 'boolean') s.hud[k] = saved.hud[k];
@@ -152,6 +198,8 @@ class Store {
   services: ServicesState = { items: [], port: 4600 };
   /** Pictures on the walls. */
   decor: Decoration[] = [];
+  /** The signs over the desks, and how far the back office is built out (not the map's plan: see plan()). */
+  floorPlan: FloorPlan = EMPTY_PLAN;
   /** What the lounge jukebox is playing; `since` is when the track started, on performance.now()'s clock. */
   jukebox: JukeboxState & { since: number } = { on: false, track: JUKEBOX_TUNES[0].id, startedAt: 0, elapsed: 0, since: 0 };
   /** The office's clock minus performance.now(), from the quickest ping (see 'pong'); for the jukebox. */
@@ -174,6 +222,8 @@ class Store {
   me: Me = { admin: false };
   /** Everyone's accounts; only admins get these. */
   accounts: AccountsState | null = null;
+  /** Your own Claude and GitHub sign-ins; only accounts have them. */
+  signins: SignInsState | null = null;
   /** The office's Slack / Discord webhook. */
   notify: NotifyState = {};
   /** How busy the office's machine is, and its worker limit. */
@@ -183,10 +233,20 @@ class Store {
   dogStart = 0;
   /** The basketball on this floor, as the office last said (see world/hoop.ts). */
   ball: BallState = {};
+  /** Workers sent home and locked up in this floor's dungeon, on a map that has one. */
+  jail: JailState = { prisoners: [], bones: 0 };
+  /**
+   * The cars in the garage, as the office last said (see shared/garage.ts), and when (performance.now())
+   * each one's driver last said where it is. Their moves change them without a word, like people's.
+   */
+  cars: CarState[] = parked();
+  carsAt: number[] = [];
   /** Outside the windows; null until the server says. */
   sky: SkyState | null = null;
   /** The building's holiday decorations: the same on every floor. */
   theme: ThemeState = { pick: 'auto', active: null };
+  /** What the building looks like inside (see shared/maps): the same on every floor. */
+  map: MapState = { pick: OFFICE_MAP, custom: [] };
   /** The office's prompts as rewritten in ⚙️ Settings, and the worker everyone starts on: the same on every floor. */
   prompts: PromptsState = { custom: {} };
   /** Whether workers whose pull request merged go home by themselves (⚙️ Settings). */
@@ -202,6 +262,11 @@ class Store {
 
   emit(topic: Topic) {
     this.subs.get(topic)?.forEach((fn) => fn());
+  }
+
+  /** Where everything is on the building's map. */
+  plan(): MapPlan {
+    return planOf(this.map.pick, this.map.custom);
   }
 
   /** The floor you're on. */
@@ -253,6 +318,7 @@ class Store {
     this.queue = v.queue;
     this.meeting = v.meeting;
     this.decor = v.decor;
+    this.floorPlan = v.plan ?? EMPTY_PLAN;
     this.services = v.services;
     this.whiteboard = new Map(v.whiteboard.elements.map((e) => [e.id, e]));
     this.drawing = v.whiteboard.people;
@@ -261,7 +327,24 @@ class Store {
     this.setDog(v.dog);
     this.setJukebox(v.jukebox);
     this.ball = v.ball ?? {};
-    for (const t of ['floor', 'project', 'workers', 'issues', 'pulls', 'queue', 'meeting', 'decor', 'services', 'dog', 'jukebox', 'whiteboard', 'drawing', 'cabinet', 'cabinetFrame', 'ball'] as Topic[]) this.emit(t);
+    this.setCars(v.cars ?? parked());
+    this.jail = v.jail ?? { prisoners: [], bones: 0 };
+    for (const t of ['floor', 'project', 'workers', 'issues', 'pulls', 'queue', 'meeting', 'decor', 'floorPlan', 'services', 'dog', 'jukebox', 'whiteboard', 'drawing', 'cabinet', 'cabinetFrame', 'ball', 'cars', 'jail'] as Topic[]) this.emit(t);
+  }
+
+  private setCars(cars: CarState[]) {
+    this.cars = cars;
+    const now = performance.now();
+    this.carsAt = cars.map(() => now);
+  }
+
+  /** The car `id` (a PeerInfo id) is in on this floor, and which seat. */
+  carOf(id: string): { car: number; seat: CarSeat } | undefined {
+    for (let i = 0; i < this.cars.length; i++) {
+      if (this.cars[i].driver === id) return { car: i, seat: 'driver' };
+      if (this.cars[i].passenger === id) return { car: i, seat: 'passenger' };
+    }
+    return undefined;
   }
 
   private setDog(dog: DogState | null) {
@@ -295,6 +378,9 @@ class Store {
         this.theme = msg.theme;
         this.prompts = msg.prompts ?? { custom: {} };
         this.leaveOnMerge = msg.leaveOnMerge ?? { on: false };
+        // The map first, so the floor's workers sit down in its seats and not the last one's.
+        this.map = msg.map ?? { pick: OFFICE_MAP, custom: [] };
+        this.emit('map');
         this.enter(msg);
         for (const t of ['peers', 'chat', 'upgrade', 'usage', 'limits', 'me', 'notify', 'machine', 'floors', 'projectsDir', 'sky', 'theme', 'prompts', 'leaveOnMerge'] as Topic[]) this.emit(t);
         break;
@@ -336,7 +422,9 @@ class Store {
       case 'worker.remove':
         this.workers.delete(msg.workerId);
         this.screens.delete(msg.workerId);
+        if (msg.jail) this.jail = msg.jail;
         this.emit('workers');
+        if (msg.jail) this.emit('jail');
         break;
       case 'screen': {
         let s = this.screens.get(msg.workerId);
@@ -370,6 +458,10 @@ class Store {
         this.accounts = msg.state;
         this.emit('accounts');
         break;
+      case 'signins':
+        this.signins = msg.state;
+        this.emit('signins');
+        break;
       case 'upgrade':
         this.upgrade = msg.state;
         this.emit('upgrade');
@@ -381,6 +473,10 @@ class Store {
       case 'decor':
         this.decor = msg.items;
         this.emit('decor');
+        break;
+      case 'plan':
+        this.floorPlan = msg.plan;
+        this.emit('floorPlan');
         break;
       case 'jukebox':
         this.setJukebox(msg.state);
@@ -445,6 +541,17 @@ class Store {
         this.ball = msg.ball;
         this.emit('ball');
         break;
+      case 'cars':
+        this.setCars(msg.cars);
+        this.emit('cars');
+        break;
+      case 'car.move': {
+        const c = this.cars[msg.car];
+        if (!c) break;
+        Object.assign(c, { x: msg.x, z: msg.z, rotY: msg.rotY, speed: msg.speed, steer: msg.steer });
+        this.carsAt[msg.car] = performance.now();
+        break;
+      }
       case 'sky':
         this.sky = msg.state;
         this.emit('sky');
@@ -453,6 +560,15 @@ class Store {
         this.theme = msg.state;
         this.emit('theme');
         break;
+      case 'map': {
+        // Onto another map: nobody's on a seat of the last one any more (the office forgot them too).
+        const moved = msg.state.pick !== this.map.pick;
+        this.map = msg.state;
+        if (moved) for (const p of this.peers.values()) delete p.seat;
+        this.emit('map');
+        if (moved) this.emit('peers');
+        break;
+      }
       case 'prompts':
         this.prompts = msg.state;
         this.emit('prompts');

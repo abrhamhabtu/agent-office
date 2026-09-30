@@ -2,12 +2,14 @@ import * as THREE from 'three';
 import { HAIR_COLORS, HAIR_STYLES, SKIN_TONES, type Look } from '../../shared/avatar';
 import { EMOTE_BY_ID, type Emote, type EmoteId } from '../../shared/emotes';
 import type { CarriedIssue, Theme, WorkerAction, WorkerStatus, WorkerTask } from '../../shared/protocol';
+import type { BarGame } from '../../shared/bargames';
 import type { Drink } from '../../shared/rooftop';
 import { isAsleep, type WorkerPr } from '../../shared/status';
 import { HIPS } from '../player';
+import { axeModel, dartModel } from './bargames';
 import { OpenBook } from './book';
 import { HeldCard } from './card';
-import { UNDEAD_SKIN, elfBoot, elfHat, elfWorker, santaHat, warlockHat, zombieWorker } from './costumes';
+import { GRIME, UNDEAD_SKIN, beard, beardColor, elfBoot, elfHat, elfWorker, grime, peasantGarb, santaHat, warlockHat, zombieWorker, type Beard, type PeasantGarb } from './costumes';
 import { cardSprite, disposeSprite, mesh, textSprite, toon, toonUnique } from './toon';
 
 export type Pose = 'stand' | 'walk' | 'sit' | 'type';
@@ -58,6 +60,22 @@ export const IMPACT = 0.08;
 const DOWN = new THREE.Vector3(0, -1, 0);
 const hands = new THREE.Vector3();
 const armDir = new THREE.Vector3();
+
+/**
+ * Throwing darts (with the right hand, the arm on -x) and axes (both hands, over the head). A dart is
+ * held up by the eye, drawn back as far as the wind-up takes it, and pushed out at the board. An axe
+ * goes round on an arc about AXE_TURN, from in front of the chest (`aim`) back over the head, and
+ * over and down in front to throw, let go of on the way (`release`). Its handle points out along the
+ * arc, tipped back AXE_WRIST from it. Seconds for each: the throw, and a whole one on its own
+ * (someone else's) taking it back first. The next dart or axe is in hand `reload` after letting go.
+ */
+const DART_AIM = new THREE.Vector3(-0.2, 1.45, 0.36);
+const DART_BACK = new THREE.Vector3(-0.21, 1.5, 0.12);
+const DART_OUT = new THREE.Vector3(-0.24, 1.25, 0.6);
+const AXE_TURN = new THREE.Vector3(0, 1.05, 0.02);
+const AXE_ARC = { r: 0.36, aim: 0.25, back: 2.2, release: 0.55, end: -0.5 } as const;
+const AXE_WRIST = 1.15;
+const THROW = { darts: { time: 0.16, release: 0.5, auto: 0.25, reload: 0.55 }, axe: { time: 0.28, release: 0.62, auto: 0.35, reload: 1.2 } } as const;
 
 /** A golf club, hanging down from the hands (its grip at 0): a wrapped grip, a steel shaft and the head at the bottom, its face toward +x. */
 function golfClub(): THREE.Group {
@@ -362,9 +380,29 @@ export class Person {
    * `autoT` is a whole swing playing by itself (golfSwing), taken back to `power`.
    */
   private golf: { swing: THREE.Group; back: number; want: number; top: number; swingT: number; autoT: number; power: number } | null = null;
+  /**
+   * At the dart board's oche or the axe lane's line (see setThrowing): the dart or axe in hand, how
+   * far it's been drawn back (`back`, easing to `want`), a throw under way (`throwT` seconds in, from
+   * `top`) or taking it back all by itself first (`autoT`), and how long until the next is in hand.
+   */
+  private oche: {
+    game: BarGame;
+    prop: THREE.Group;
+    back: number;
+    want: number;
+    top: number;
+    throwT: number;
+    autoT: number;
+    reload: number;
+    release: ((from: THREE.Vector3, turn: number) => void) | null;
+  } | null = null;
   /** Dressed up for a holiday (see setCostume): a warlock's hat and undead skin, or a Santa hat. */
   private costume: Theme | null = null;
   private hat: THREE.Object3D[] = [];
+  /** A hand on someone's shoulder, marching them along (see holdOn). */
+  private gripping = false;
+  /** Something they're saying (see say), and for how many more seconds. */
+  private speech: { sprite: THREE.Sprite; left: number } | null = null;
 
   constructor(
     private name: string,
@@ -630,11 +668,38 @@ export class Person {
     this.reachT = 0;
   }
 
+  /** Puts something on them to stay: on their head (a helm), their body, or in their right hand or their left (a halberd). */
+  wear(o: THREE.Object3D, on: 'head' | 'body' | 'hand' | 'offhand') {
+    o.traverse((m) => ((m as THREE.Mesh).castShadow = true));
+    // Forward is +z, so the character's right arm is the one on -x (see reach).
+    (on === 'head' ? this.head : on === 'hand' ? this.armL : on === 'offhand' ? this.armR : this.body).add(o);
+  }
+
+  /** Keeps a hand out in front, on the shoulder of someone they're marching along (or lets go). */
+  holdOn(on: boolean) {
+    this.gripping = on;
+  }
+
+  /** Says something in a bubble over their head for `seconds` (the one before goes). */
+  say(text: string, seconds = 3.5) {
+    this.hush();
+    this.speech = { sprite: textSprite(text, { bg: '#fffaf3', size: 34 }), left: seconds };
+    this.speech.sprite.position.y = this.bubbleY;
+    this.root.add(this.speech.sprite);
+  }
+
+  private hush() {
+    if (!this.speech) return;
+    this.root.remove(this.speech.sprite);
+    disposeSprite(this.speech.sprite);
+    this.speech = null;
+  }
+
   /** A mug of coffee in the left hand, or not. */
   holdMug(on: boolean) {
     this.wantsMug = on;
     this.cup.visible = !this.glass;
-    this.mug.visible = (on || !!this.glass) && !this.card.held && !this.book && !this.ball;
+    this.mug.visible = (on || !!this.glass) && !this.card.held && !this.book && !this.ball && this.oche?.game !== 'axe';
   }
 
   /** A drink from the rooftop bar in the left hand (in place of a mug), or none (null). */
@@ -941,6 +1006,124 @@ export class Person {
     this.legR.rotation.set(0, 0, 0.1);
   }
 
+  /** At the oche with a dart in the right hand, or the axe lane's line with an axe in both, or neither (null). */
+  setThrowing(game: BarGame | null) {
+    if (game === (this.oche?.game ?? null)) return;
+    if (this.oche) {
+      this.oche.prop.removeFromParent();
+      this.oche.prop.traverse((o) => (o as THREE.Mesh).geometry?.dispose());
+      this.oche = null;
+      for (const limb of [this.armL, this.armR]) limb.rotation.set(0, 0, 0);
+    }
+    if (game) {
+      const prop = game === 'darts' ? dartModel(this.shirt.color.getStyle()) : axeModel();
+      this.body.add(prop);
+      this.oche = { game, prop, back: 0, want: 0, top: 0, throwT: -1, autoT: -1, reload: 0, release: null };
+    }
+    this.holdMug(this.wantsMug);
+  }
+
+  /** Drawing the dart or axe back, `k` of the way (0 aiming, 1 as far as it goes). */
+  tossBack(k: number) {
+    const o = this.oche;
+    if (o && o.throwT < 0 && o.autoT < 0) o.want = THREE.MathUtils.clamp(k, 0, 1);
+  }
+
+  /** Throws from wherever it's drawn back to. `release` is told where it left the hand (and how an axe was turned, see AXE), as it does. */
+  toss(release: (from: THREE.Vector3, turn: number) => void) {
+    const o = this.oche;
+    if (!o) return;
+    o.release = release;
+    o.top = o.back;
+    o.throwT = 0;
+    o.autoT = -1;
+  }
+
+  /** A whole throw on its own, drawing back first (someone else's). */
+  tossAuto(release: (from: THREE.Vector3, turn: number) => void) {
+    const o = this.oche;
+    if (!o) return release(this.root.localToWorld(new THREE.Vector3(0, 1.4, 0.3)), 0);
+    // One still on its way out of the hand goes first.
+    o.release?.(this.propWorld(new THREE.Vector3()), o.prop.rotation.x);
+    o.release = release;
+    o.throwT = -1;
+    o.autoT = 0;
+  }
+
+  private propWorld(out: THREE.Vector3): THREE.Vector3 {
+    this.root.updateMatrixWorld(true);
+    return this.oche!.prop.getWorldPosition(out);
+  }
+
+  /** Where the hands are round the axe's arc (see AXE_ARC) at elevation `phi`. */
+  private axeHands(phi: number): THREE.Vector3 {
+    return hands.set(AXE_TURN.x, AXE_TURN.y + Math.sin(phi) * AXE_ARC.r, AXE_TURN.z + Math.cos(phi) * AXE_ARC.r);
+  }
+
+  /** The throwing arm (or arms), and the dart or axe in hand, over whatever they were doing. */
+  private ocheStep(dt: number) {
+    const o = this.oche!;
+    const t = THROW[o.game];
+    if (o.autoT >= 0) {
+      o.autoT += dt;
+      o.want = Math.min(1, o.autoT / t.auto);
+      o.back += (o.want - o.back) * Math.min(1, dt * 14);
+      if (o.autoT >= t.auto) {
+        o.autoT = -1;
+        o.top = o.back;
+        o.throwT = 0;
+      }
+    } else if (o.throwT < 0) o.back += (o.want - o.back) * Math.min(1, dt * 14);
+    // How far through the throw: 0 drawn back, 1 all the way out, easing back to aiming after.
+    let out = -1;
+    if (o.throwT >= 0) {
+      o.throwT += dt;
+      const u = o.throwT / t.time;
+      if (u < 1) out = u * u;
+      else if (u < 2.5) out = 1;
+      else {
+        out = -1;
+        o.throwT = -1;
+        o.back = o.want = 0;
+      }
+    }
+    if (o.reload > 0) {
+      o.reload -= dt;
+      if (o.reload <= 0) o.prop.visible = true;
+    }
+    const prop = o.prop;
+    const rest = (arm: THREE.Object3D, sx: number, at: THREE.Vector3) => {
+      armDir.set(at.x - sx, at.y - 0.9, at.z).normalize();
+      arm.quaternion.setFromUnitVectors(DOWN, armDir);
+    };
+    if (o.game === 'darts') {
+      const at = out >= 0 ? v1.copy(DART_AIM).lerp(DART_BACK, o.top).lerp(DART_OUT, out) : v1.copy(DART_AIM).lerp(DART_BACK, o.back);
+      rest(this.armL, -0.33, at);
+      // The dart's held by the barrel in the fist, at the end of the arm, pointing out and a little up.
+      armDir.set(at.x + 0.33, at.y - 0.9, at.z).normalize();
+      prop.position.set(-0.33, 0.9, 0).addScaledVector(armDir, 0.38);
+      prop.position.z += 0.09;
+      prop.rotation.set(-0.12, 0, 0);
+    } else {
+      const phi = out >= 0 ? THREE.MathUtils.lerp(THREE.MathUtils.lerp(AXE_ARC.aim, AXE_ARC.back, o.top), AXE_ARC.end, out) : THREE.MathUtils.lerp(AXE_ARC.aim, AXE_ARC.back, o.back);
+      const at = v1.copy(this.axeHands(phi));
+      rest(this.armL, -0.33, v2.set(at.x - 0.03, at.y + 0.03, at.z));
+      rest(this.armR, 0.33, v2.set(at.x + 0.03, at.y - 0.05, at.z));
+      prop.position.copy(at);
+      prop.rotation.set(Math.PI / 2 - phi - AXE_WRIST, 0, 0);
+      // Leaning into it, down the lane.
+      this.body.rotation.x = out >= 0 ? Math.sin(Math.min(1, out) * Math.PI) * 0.18 : -o.back * 0.1;
+    }
+    const released = out >= 0 && out >= t.release * t.release;
+    if (released && o.release) {
+      const release = o.release;
+      o.release = null;
+      release(this.propWorld(new THREE.Vector3()), prop.rotation.x);
+      prop.visible = false;
+      o.reload = t.reload;
+    }
+  }
+
   /** `pace` speeds up the walk cycle for someone walking faster than usual. */
   update(dt: number, t: number, moving: boolean, airborne: boolean, pace = 1) {
     const target = moving ? 1 : 0;
@@ -999,6 +1182,15 @@ export class Person {
       this.armL.rotation.z = THREE.MathUtils.lerp(this.armL.rotation.z, 0.22, reach);
       if (this.reachT >= REACH_TIME) this.reachT = -1;
     }
+    if (this.gripping && !this.book && !this.card.held && !this.ball) {
+      // The right arm out and a little down, onto the shoulder of whoever's in front.
+      this.armL.rotation.x = THREE.MathUtils.lerp(this.armL.rotation.x, -1.15, Math.min(1, dt * 10));
+      this.armL.rotation.z = THREE.MathUtils.lerp(this.armL.rotation.z, 0.3, Math.min(1, dt * 10));
+    }
+    if (this.speech) {
+      this.speech.left -= dt;
+      if (this.speech.left <= 0) this.hush();
+    }
     // Lean into the reach a little.
     this.body.rotation.x = reach * 0.12;
     this.body.rotation.z = 0;
@@ -1036,6 +1228,7 @@ export class Person {
     this.body.rotation.y = this.body.rotation.z = 0;
     if (this.emoting) this.emoteStep(dt, moving || airborne ? 0 : 1 - sit);
     if (this.golf && !sit && !airborne) this.golfStep(dt);
+    if (this.oche && !sit) this.ocheStep(dt);
   }
 }
 
@@ -1061,6 +1254,9 @@ const TASK_CHIP: Record<string, [string, string, string]> = {
   exited: ['💤 ASLEEP', STATUS_BULB.exited, '#ffffff'],
   offline: ['💤 ASLEEP', STATUS_BULB.offline, '#ffffff'],
 };
+
+/** The chip (or bubble) of a worker whose worktree was deleted outside the office. */
+const LOST_CHIP: [string, string, string] = ['🌿 WORKTREE DELETED', '#ffb703', '#2b2d42'];
 
 /** The outline of a worker's bubble, and its pill, once it has a pull request: GitHub's open green, or the PR board's merged purple. */
 const PR_INK: Record<WorkerPr['state'], string> = { open: '#2da44e', merged: '#9d4edd' };
@@ -1262,6 +1458,56 @@ const DANCE = { up: 0.5, moves: 8 * BEAT, down: 0.5 } as const;
 /** How high a hop between the seat and the desk goes, over the straight line. */
 const HOP = 0.5;
 
+/** What a worker's skin goes toward as it starves in a cell, and once it's dead. */
+const STARVED = new THREE.Color('#cfc7b2');
+const DEAD = new THREE.Color('#7d8a6a');
+const BONE = toon('#e9e1c9');
+const SOCKET = toon('#241c16');
+
+/**
+ * What's left of a worker that has rotted away in a cell: a skull, a spine and ribs, a pelvis, and
+ * the bones of its arms and feet, the size of the bean it was, in its body's space (forward is +z).
+ */
+function bones(): THREE.Group {
+  const g = new THREE.Group();
+  const bone = (a: [number, number, number], b: [number, number, number], r = 0.022) => {
+    const va = new THREE.Vector3(...a);
+    const vb = new THREE.Vector3(...b);
+    const along = vb.clone().sub(va);
+    const m = mesh(new THREE.CapsuleGeometry(r, along.length(), 3, 6), BONE, (a[0] + b[0]) / 2, (a[1] + b[1]) / 2, (a[2] + b[2]) / 2);
+    m.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), along.normalize());
+    g.add(m);
+    for (const end of [va, vb]) g.add(mesh(new THREE.SphereGeometry(r * 1.7, 6, 5), BONE, end.x, end.y, end.z, false));
+  };
+  // The skull, its sockets and its grin.
+  const skull = mesh(new THREE.SphereGeometry(0.15, 14, 12), BONE, 0, 0.74, 0.02);
+  skull.scale.set(1, 1.05, 0.95);
+  g.add(skull);
+  for (const sx of [-1, 1]) g.add(mesh(new THREE.SphereGeometry(0.042, 8, 6), SOCKET, sx * 0.06, 0.76, 0.14, false));
+  g.add(mesh(new THREE.ConeGeometry(0.018, 0.04, 3), SOCKET, 0, 0.7, 0.155, false));
+  const jaw = mesh(new THREE.BoxGeometry(0.16, 0.05, 0.12), BONE, 0, 0.6, 0.05);
+  g.add(jaw);
+  for (let i = 0; i < 5; i++) g.add(mesh(new THREE.BoxGeometry(0.018, 0.03, 0.01), SOCKET, -0.05 + i * 0.025, 0.635, 0.113, false));
+  // The spine, the ribs round it, and the pelvis at the bottom.
+  bone([0, 0.2, -0.06], [0, 0.6, -0.04], 0.022);
+  for (let i = 0; i < 4; i++) {
+    const rib = mesh(new THREE.TorusGeometry(0.12 - i * 0.012, 0.014, 5, 14, Math.PI * 1.35), BONE, 0, 0.52 - i * 0.065, 0.0);
+    rib.rotation.set(Math.PI / 2, 0, -Math.PI * 0.175 + Math.PI / 2);
+    g.add(rib);
+  }
+  const pelvis = mesh(new THREE.TorusGeometry(0.09, 0.025, 6, 12), BONE, 0, 0.2, 0);
+  pelvis.rotation.x = Math.PI / 2.4;
+  g.add(pelvis);
+  // Arms hanging, and the feet stuck out in front.
+  for (const sx of [-1, 1]) {
+    bone([sx * 0.16, 0.55, 0], [sx * 0.26, 0.4, 0.06]);
+    bone([sx * 0.26, 0.4, 0.06], [sx * 0.24, 0.26, 0.16]);
+    bone([sx * 0.07, 0.18, 0.02], [sx * 0.12, 0.12, 0.24], 0.026);
+  }
+  g.visible = false;
+  return g;
+}
+
 /** The little Claude worker that sits at a desk. Forward is +z. */
 export class Worker {
   readonly root = new THREE.Group();
@@ -1277,6 +1523,8 @@ export class Worker {
   private task: WorkerTask | undefined;
   /** Its pull request, open or merged: its bubble is outlined (and labelled, while it rests) to match. */
   private pr: WorkerPr | undefined;
+  /** Its worktree was deleted outside the office (WorkerInfo.lost): its bubble says so until it's fixed. */
+  private lost = false;
   private nameTag: THREE.Sprite | null = null;
   private eyes: THREE.Mesh[] = [];
   private blinkAt = Math.random() * 4;
@@ -1322,6 +1570,25 @@ export class Worker {
   private phase = Math.random() * Math.PI * 2;
   /** How far through its stride it is, walking in. */
   private stride = 0;
+  /** How quick its steps are, next to a walk: more running, less shuffling (see Court). */
+  gait = 1;
+  /** Its headset, which a peasant doesn't wear. */
+  private headset: THREE.Object3D[] = [];
+  /** What it wears on the map it's on (see setOutfit): a peasant's smock and coif, or its own skin. */
+  private garb: PeasantGarb | null = null;
+  /** How worn out it looks, 0–1 (see setAge), and the beard, brows and dirt that show it. */
+  private age = 0;
+  private whiskers: Beard | null = null;
+  private dirt: { part: THREE.Object3D; at: number }[] = [];
+  /** Locked up in a dungeon (see setJailed): how thin it's got, whether it's starved to death yet, and how far it has rotted since. */
+  private jailed: { thin: number; dead: boolean; rot: number } | null = null;
+  /** Which way it keeled over when it died, and what's left of it after: X for eyes, and its bones. */
+  private fell = 1;
+  private crosses: THREE.Object3D[] = [];
+  private skeleton: THREE.Group | null = null;
+  /** Something it's muttering in its cell, and for how many more seconds. */
+  private mutterT = 0;
+  private label = '';
 
   constructor(
     name: string,
@@ -1349,7 +1616,12 @@ export class Worker {
     const band = mesh(new THREE.TorusGeometry(0.29, 0.025, 6, 20, Math.PI), toon('#2b2d42'), 0, 0.72, 0, false);
     band.rotation.y = Math.PI / 2;
     this.body.add(band);
-    for (const sx of [-1, 1]) this.body.add(mesh(new THREE.SphereGeometry(0.07, 10, 8), toon('#2b2d42'), sx * 0.29, 0.72, 0, false));
+    this.headset.push(band);
+    for (const sx of [-1, 1]) {
+      const cup = mesh(new THREE.SphereGeometry(0.07, 10, 8), toon('#2b2d42'), sx * 0.29, 0.72, 0, false);
+      this.body.add(cup);
+      this.headset.push(cup);
+    }
     // Antenna with status bulb
     this.body.add(mesh(new THREE.CylinderGeometry(0.015, 0.015, 0.22, 6), toon('#2b2d42'), 0, 1.07, 0, false));
     this.bulb = toonUnique(STATUS_BULB.starting);
@@ -1419,9 +1691,74 @@ export class Worker {
       wear(this.body, elfWorker(this.skin));
       for (const f of this.feet) wear(f, elfBoot());
     }
+    // An elf's hat goes on over the coif.
+    if (this.garb) this.garb.cap.visible = theme !== 'christmas';
+  }
+
+  /**
+   * Dresses it for the map it's on: a peasant's smock, rope belt and coif, in place of its headset,
+   * or back in just its own skin (null).
+   */
+  setOutfit(outfit: 'peasant' | null) {
+    if (!!this.garb === (outfit === 'peasant')) return;
+    if (this.garb) {
+      undress([this.garb.body, this.garb.cap]);
+      this.garb.cloth.dispose();
+      this.garb = null;
+    }
+    if (outfit === 'peasant') {
+      let seed = 0;
+      for (const ch of this.color) seed = (seed * 31 + ch.charCodeAt(0)) | 0;
+      this.garb = peasantGarb(seed);
+      this.body.add(this.garb.body, this.garb.cap);
+      this.garb.cap.visible = this.costume !== 'christmas';
+    }
+    for (const h of this.headset) h.visible = !this.garb;
+    this.setAge(this.age, true);
+  }
+
+  /**
+   * How worn out it looks, 0 (fresh) to 1 (it's worked for as long as the map says a worker can
+   * before it's spent): its beard grows out and goes grey, it gets grubby and patched, it droops,
+   * and it slows down.
+   */
+  setAge(k: number, force = false) {
+    const age = Math.max(0, Math.min(1, k));
+    if (!force && Math.abs(age - this.age) < 0.004) return;
+    this.age = age;
+    if (age > 0.02 && !this.whiskers) {
+      this.whiskers = beard();
+      this.body.add(this.whiskers.group);
+      this.dirt = grime();
+      for (const d of this.dirt) this.body.add(d.part);
+    }
+    const w = this.whiskers;
+    if (w) {
+      w.group.visible = age > 0.02;
+      beardColor(age, w.hair.color);
+      w.chin.scale.set(1.2 * (0.45 + 0.55 * Math.min(1, age * 3)), 0.75 * (0.45 + 0.55 * Math.min(1, age * 3)), 0.45);
+      w.hang.visible = age > 0.08;
+      // It grows from a short beard under the chin down to the floor; the smock bulges, so it leans out a little as it grows.
+      w.hang.scale.set(0.7 + 0.3 * Math.min(1, age * 2), 0.08 + 0.5 * age, 1);
+      w.hang.rotation.x = 0.06 - 0.12 * age;
+      w.mustache.visible = age > 0.05;
+      w.brows.visible = age > 0.45;
+      w.bags.visible = age > 0.6;
+    }
+    for (const d of this.dirt) d.part.visible = age >= d.at;
+    if (this.garb) {
+      this.garb.cloth.color.copy(this.garb.clean).lerp(GRIME, 0.5 * age);
+      for (const p of this.garb.patches) p.part.visible = age >= p.at;
+    }
+  }
+
+  /** How fast it walks, next to a fresh worker: a worn-out one shuffles. */
+  get pace(): number {
+    return 1 - 0.3 * this.age;
   }
 
   setName(name: string) {
+    this.label = name;
     if (this.nameTag) {
       this.root.remove(this.nameTag);
       disposeSprite(this.nameTag);
@@ -1484,6 +1821,11 @@ export class Worker {
     this.drawBubble();
   }
 
+  setLost(lost: boolean) {
+    this.lost = lost;
+    this.drawBubble();
+  }
+
   /** Sent home: its light goes out, its face falls, and its things pop into a box in its arms. `farewell` goes over its head. */
   leave(farewell: string) {
     if (this.leaving) return;
@@ -1521,28 +1863,31 @@ export class Worker {
     this.leaving = { box, boxT: 0, stride: 0 };
   }
 
-  /** On its way out: says something else over its head in place of its farewell. */
+  /** On its way out: says something else over its head in place of its farewell (or whatever was over it, before it packed up). */
   say(text: string) {
-    if (!this.leaving) return;
     if (this.bubble) {
       this.root.remove(this.bubble);
       disposeSprite(this.bubble);
     }
+    this.bubbleKey = 'said';
+    this.bubbleIsCard = false;
     this.bubble = textSprite(text, { bg: '#e9ecef', size: 34 });
+    if (!this.leaving) this.bubble.position.y = 1.95;
     this.root.add(this.bubble);
   }
 
   private drawBubble() {
     if (this.leaving) return;
-    const { status, bouncing: bounce, task, pr } = this;
+    const { status, bouncing: bounce, task, pr, lost } = this;
     const hot = status === 'needs_input' || (status === 'done' && bounce);
     const bg = hot ? (status === 'done' ? '#caffbf' : '#ffd6e0') : status === 'working' ? '#ffec99' : '#fffaf3';
     const border = pr && PR_INK[pr.state];
     // Not working on or waiting for something more: its pull request in place of ready / done / asleep.
     const prLabel = pr && status !== 'working' && status !== 'needs_input' && status !== 'starting' ? `${PR_ICON[pr.state]} PR #${pr.number} ${pr.state}` : undefined;
-    const bubble =
-      prLabel ?? (status === 'needs_input' ? '❗ needs you' : status === 'done' && bounce ? '✅ done!' : status === 'working' ? '⌨️ working' : isAsleep(status) ? '💤' : '');
-    const key = `${border}|${prLabel}|${task ? `${status}|${bounce}|${task.name}|${task.summary}` : bubble}`;
+    const bubble = lost
+      ? '🌿 worktree deleted'
+      : prLabel ?? (status === 'needs_input' ? '❗ needs you' : status === 'done' && bounce ? '✅ done!' : status === 'working' ? '⌨️ working' : isAsleep(status) ? '💤' : '');
+    const key = `${lost}|${border}|${prLabel}|${task ? `${status}|${bounce}|${task.name}|${task.summary}` : bubble}`;
     if (key === this.bubbleKey) return;
     this.bubbleKey = key;
     if (this.bubble) {
@@ -1552,13 +1897,120 @@ export class Worker {
     }
     this.bubbleIsCard = !!task;
     if (task) {
-      const [text, chipBg, color] = prLabel ? [prLabel.toUpperCase(), border!, '#ffffff'] : (TASK_CHIP[status] ?? TASK_CHIP.idle);
+      const [text, chipBg, color] = lost ? LOST_CHIP : prLabel ? [prLabel.toUpperCase(), border!, '#ffffff'] : (TASK_CHIP[status] ?? TASK_CHIP.idle);
       this.bubble = cardSprite({ chip: { text, bg: chipBg, color }, title: task.name, body: task.summary, bg: isAsleep(status) ? '#e9ecef' : bg, border });
-    } else if (bubble) this.bubble = textSprite(bubble, { bg, size: 38, border });
+    } else if (bubble) this.bubble = textSprite(bubble, { bg: lost ? LOST_CHIP[1] : bg, size: 38, border });
     if (this.bubble) this.root.add(this.bubble);
   }
 
+  /**
+   * Locked up in a dungeon for good (see shared/maps/dungeon.ts): sitting slumped on the floor of its
+   * cell, thinner the longer it's been there (`thin`, 0–1), then dead, keeled over, then rotting down
+   * to its bones (`rot`, 0–1). Its light's out, and nothing it was doing shows any more.
+   */
+  setJailed(k: { thin: number; dead: boolean; rot: number }) {
+    const first = !this.jailed;
+    const was = this.jailed;
+    this.jailed = { ...k };
+    if (first) {
+      this.bouncing = false;
+      this.cheerT = 0;
+      this.twirlT = -1;
+      this.dancing = null;
+      for (const prop of [this.papers.group, this.globe.group]) prop.visible = false;
+      this.bulb.color.set(STATUS_BULB.exited);
+      this.bulb.emissive.set('#000000');
+      if (this.bubble) {
+        this.root.remove(this.bubble);
+        disposeSprite(this.bubble);
+        this.bubble = null;
+      }
+      this.bubbleKey = 'jailed';
+      this.fell = Math.random() < 0.5 ? -1 : 1;
+    }
+    // Pale and sallow as it starves, grey-green once it's dead, and darker as it rots.
+    this.skin.color.set(this.color).lerp(STARVED, 0.55 * k.thin);
+    if (k.dead) this.skin.color.lerp(DEAD, 0.55 + 0.35 * k.rot);
+    if (k.dead && !this.crosses.length) {
+      const ink = toon('#1d1d1d');
+      for (const sx of [-1, 1]) {
+        for (const r of [-1, 1]) {
+          const bar = mesh(new THREE.CapsuleGeometry(0.014, 0.1, 4, 6), ink, sx * 0.11, 0.7, 0.25, false);
+          bar.rotation.z = r * 0.8;
+          this.body.add(bar);
+          this.crosses.push(bar);
+        }
+      }
+    }
+    for (const e of this.eyes) e.visible = !k.dead;
+    for (const c of this.crosses) c.visible = k.dead;
+    if (k.dead && k.rot > 0.2 && !this.skeleton) {
+      this.skeleton = bones();
+      this.root.add(this.skeleton);
+    }
+    const stage = !k.dead ? 0 : k.rot < 1 ? 1 : 2;
+    const wasStage = !was ? -1 : !was.dead ? 0 : was.rot < 1 ? 1 : 2;
+    if (stage !== wasStage) this.setName(this.label.replace(/^[☠💀]\uFE0F? /u, '').replace(/^/, stage === 1 ? '☠️ ' : stage === 2 ? '💀 ' : ''));
+  }
+
+  /** Mutters something in its cell (only while it's alive). */
+  mutter(text: string, seconds = 4) {
+    if (!this.jailed || this.jailed.dead) return;
+    if (this.bubble) {
+      this.root.remove(this.bubble);
+      disposeSprite(this.bubble);
+    }
+    this.bubble = textSprite(text, { bg: '#e9ecef', size: 30 });
+    this.bubble.position.y = 1.5;
+    this.root.add(this.bubble);
+    this.mutterT = seconds;
+  }
+
+  /** In its cell: slumped against the wall, breathing slow, or keeled over and rotting. */
+  private languish(dt: number, t: number) {
+    const { thin, dead, rot } = this.jailed!;
+    const girth = 1 - 0.48 * thin;
+    // What's left of its flesh as it rots, shrinking away off its bones.
+    const flesh = dead ? Math.max(0.02, 1 - 0.95 * rot) : 1;
+    this.body.visible = flesh > 0.08;
+    const breath = dead ? 0 : Math.sin(t * 1.1 + this.phase) * 0.025 * (1 - 0.5 * thin);
+    this.body.scale.set(girth * flesh, (1 + breath) * (dead ? 0.35 + 0.65 * flesh : 1), girth * flesh);
+    this.feet.forEach((f, i) => f.position.set(i ? 0.13 : -0.13, 0.12, 0.2));
+    if (dead) {
+      // On its side on the straw, where it fell.
+      const lie = this.fell * 1.4;
+      this.body.rotation.set(0.1, 0, lie);
+      this.body.position.set(this.fell * -0.04, 0.3 * girth * flesh - 0.06, 0);
+      this.armL.rotation.set(-0.4, 0, -0.3);
+      this.armR.rotation.set(-0.2, 0, 0.5);
+    } else {
+      // Sat against the wall, head hung, arms limp in its lap, swaying a little now and then.
+      this.body.rotation.set(0.18 + 0.32 * thin + Math.sin(t * 0.37 + this.phase) * 0.03, 0, Math.sin(t * 0.23 + this.phase) * 0.05);
+      this.body.position.set(0, -0.08, 0);
+      this.armL.rotation.set(-0.35, 0, -0.12);
+      this.armR.rotation.set(-0.35, 0, 0.12);
+      for (const p of this.pupils) p.position.y = 0.66 - 0.02 * thin;
+    }
+    if (this.skeleton) {
+      this.skeleton.visible = dead && rot > 0.2;
+      this.skeleton.position.copy(this.body.position);
+      this.skeleton.rotation.copy(this.body.rotation);
+    }
+    this.bulbMesh.scale.setScalar(1);
+    this.blink(dt, dead ? 1 : 1 - 0.55 * thin);
+    if (this.mutterT > 0) {
+      this.mutterT -= dt;
+      if (this.mutterT <= 0 && this.bubble) {
+        this.root.remove(this.bubble);
+        disposeSprite(this.bubble);
+        this.bubble = null;
+      }
+    }
+    if (this.nameTag) this.nameTag.position.y = dead ? 0.95 : 1.4;
+  }
+
   update(dt: number, t: number) {
+    if (this.jailed) return this.languish(dt, t);
     if (this.leaving) return this.carry(this.leaving, dt, t);
     if (this.dancing) return this.boogie(this.dancing, dt, t);
     this.cheerT = Math.max(0, this.cheerT - dt);
@@ -1600,8 +2052,10 @@ export class Worker {
     this.armL.position.set(-0.3 + s.reach * 0.07, 0.55 - s.drop, 0.05 + s.reach * 0.12);
     this.armR.position.set(0.3 - s.reach * 0.07, 0.55 - s.drop + s.reach * 0.04, 0.05 + s.reach * 0.14);
     this.feet.forEach((f, i) => f.position.set(i ? 0.12 : -0.12, 0.2 + (i ? s.tap * 0.07 : 0), 0.05 + s.kick + (i ? s.tap * 0.03 : 0)));
-    for (const p of this.pupils) p.position.y = 0.7 + s.look;
-    this.body.rotation.x = s.lean;
+    for (const p of this.pupils) p.position.y = 0.7 + s.look - 0.02 * this.age;
+    // Worn out, it hunches over and its eyes droop.
+    this.body.rotation.x = s.lean + 0.2 * this.age;
+    s.lid = Math.min(s.lid, 1 - 0.38 * this.age);
     let twirl = 0;
     if (this.twirlT >= 0) {
       this.twirlT += dt;
@@ -1628,7 +2082,7 @@ export class Worker {
     if (this.nameTag) this.nameTag.position.y = 1.55 + (hopping ? this.body.position.y : 0);
     // Walking in to a meeting: the same waddle as on the way out, without the box.
     if (this.walking || this.stride) {
-      this.stride = this.walking ? this.stride + dt * 9 : 0;
+      this.stride = this.walking ? this.stride + dt * 9 * this.pace * this.gait : 0;
       const s = Math.sin(this.stride);
       this.feet.forEach((f, i) => {
         const step = i ? -s : s;
@@ -1817,6 +2271,16 @@ export class Worker {
   dispose() {
     if (this.bubble) disposeSprite(this.bubble);
     if (this.nameTag) disposeSprite(this.nameTag);
+    undress(this.crosses);
+    if (this.skeleton) undress([this.skeleton]);
     undress(this.outfit);
+    if (this.garb) {
+      undress([this.garb.body, this.garb.cap]);
+      this.garb.cloth.dispose();
+    }
+    if (this.whiskers) {
+      undress([this.whiskers.group, ...this.dirt.map((d) => d.part)]);
+      this.whiskers.hair.dispose();
+    }
   }
 }

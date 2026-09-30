@@ -1,5 +1,5 @@
-import { randomBytes } from 'node:crypto';
-import { existsSync, readFileSync, writeFileSync, accessSync, chmodSync, mkdirSync, constants } from 'node:fs';
+import { randomBytes, randomUUID } from 'node:crypto';
+import { existsSync, readFileSync, writeFileSync, accessSync, chmodSync, mkdirSync, readdirSync, rmdirSync, unlinkSync, constants } from 'node:fs';
 import { execFile, execFileSync } from 'node:child_process';
 import path from 'node:path';
 import { homedir } from 'node:os';
@@ -7,28 +7,36 @@ import { fileURLToPath } from 'node:url';
 import { CodexUsageReader } from './codex-usage.js';
 import headless from '@xterm/headless';
 import serialize from '@xterm/addon-serialize';
-import type { AgentChoice, AgentEffort, AgentProvider, Run, TerminalHit, WorkerInfo, WorkerKind, WorkerStatus, WorkerTask } from '../shared/protocol.js';
+import type { AgentChoice, AgentEffort, AgentProvider, Run, TerminalHit, WorkerInfo, WorkerKind, WorkerRepo, WorkerStatus, WorkerTask } from '../shared/protocol.js';
 import { FAILS_TO_DESPAIR, outputFailed, toolAction } from '../shared/actions.js';
 import { FLAG_BOLD, FLAG_DIM, FLAG_INVERSE, RGB_FLAG, isAgentEffort, isClaudeModel } from '../shared/protocol.js';
-import { Worktrees, describeWork, type WorktreeCleanup, type WorktreeState } from './worktrees.js';
-import { DESK_BY_ID, STATION_AGENT } from '../shared/layout.js';
+import { WORKSPACE_FILES, WORKTREES_DIR, Worktrees, describeWork, workspaceOf, type WorktreeCleanup, type WorktreeRef, type WorktreeState } from './worktrees.js';
+import { normalizeRepo } from '../shared/floors.js';
+import { DESK_BY_ID, STATION_AGENT, deskBuilt } from '../shared/layout.js';
 import { QUEUE_AGENT_DISALLOWED_TOOLS, stationBrief } from './stations.js';
 import { officePrompt, type PromptSource } from './prompts.js';
 import { isBusy } from '../shared/status.js';
 import { gh } from './github.js';
+import type { GhAs } from './signins.js';
 import type { ServiceOwner } from './services.js';
 import { TaskNamer, fallbackTask } from './tasks.js';
 import { addUsage, newTracker, restoreTracker, scanTracker, trackerUsage, zeroUsage, type Ledger, type UsageTracker } from './usage.js';
 import { PtyHost, SCROLLBACK, type Adopted, type Pty } from './ptys.js';
 import { codexHookArgs, normalizeCodexHook, writeCodexHook } from './codex.js';
+import { normalizeGrokHook, withoutGrokLaunchArgs, writeGrokHome } from './grok.js';
+import { normalizeMuseHook, withoutMuseLaunchArgs, writeMuseHome } from './muse.js';
 import { reportedUsage } from './reported-usage.js';
-import { configuredProvider, isValidOpenCodeModel, validateWorkerEffort, validateWorkerModel } from './agents.js';
+import { configuredProvider, isValidDshModel, isValidGrokModel, isValidMuseModel, isValidOpenCodeModel, validateWorkerEffort, validateWorkerModel } from './agents.js';
 import { mergeOpenCodeConfigContent, openCodePluginSpecifier, writeOpenCodePlugin, type OpenCodeStatusEvent } from './opencode.js';
+import { MCP_READ_ONLY, codexMcpArgs, openCodeMcp, writeClaudeMcpConfig } from './office-workers.js';
 import { ScrollbackStore, searchTerminal, terminalTail } from './history.js';
+import { DSH_PROFILE_DEFAULT, DshSession, dshArgs, terminalSafe, writeDshPatch } from './dsh.js';
+import { DropStore } from './drops.js';
 import { screenSnapshot } from './screen.js';
 import type { Capacity } from './machine.js';
 
 type HeadlessTerminal = InstanceType<typeof headless.Terminal>;
+type Worktree = NonNullable<WorkerInfo['worktree']>;
 
 // The trading floors' desks first, in the order they're hired, then the tape's own vocabulary.
 const NAMES = [
@@ -44,6 +52,9 @@ const COLORS = ['#ff8a5b', '#5bc0eb', '#9bc53d', '#fde74c', '#c3423f', '#b388eb'
 const SCRUB_ENV = new Set([
   'CLAUDECODE', 'CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_CODE_SSE_PORT', 'CLAUDE_CODE_EXECPATH', 'CLAUDE_PID', 'CLAUDE_EFFORT',
   'CODEX_THREAD_ID', 'CODEX_INTERNAL_ORIGINATOR_OVERRIDE',
+  'GROK_SESSION_ID', 'GROK_AGENT_ID', 'GROK_HOOK_EVENT', 'GROK_HOOK_NAME', 'GROK_WORKSPACE_ROOT',
+  'GROK_PLUGIN_ROOT', 'GROK_PLUGIN_DATA', 'GROK_AUTH', 'GROK_AUTH_PATH',
+  'MUSE_BIN', 'MUSE_AGENTS_THREAD', 'MUSE_AGENTS_ROLE', 'MUSE_PROJECTS_HOME',
   'NO_COLOR', 'FORCE_COLOR', 'VSCODE_INJECTION', 'TERM_PROGRAM', 'TERM_PROGRAM_VERSION',
 ]);
 const SCRUB_PREFIXES = ['CLAUDE_CODE_SESSION', 'CLAUDE_CODE_CHILD', 'CLAUDE_CODE_MESSAGING', 'NEBULA_', 'AGENT_OFFICE_'];
@@ -64,6 +75,11 @@ const TASK_REFRESH_TOOLS = 8;
 const TASK_REFRESH_MS = 90_000;
 const PR_TITLE_MAX = 72;
 const PR_TASK_MAX = 2500;
+/** The most other repositories one worker can take on (see WorkerInfo.repos). */
+export const MAX_REPOS = 8;
+/** Around the list of a change's pull requests in each of their descriptions, so it can be brought up to date. */
+const RELATED_START = '<!-- agent-office:related -->';
+const RELATED_END = '<!-- /agent-office:related -->';
 /**
  * A hook finding the office restarting (its workers keep running through that) retries, once a
  * second, this many times in all: long enough for a dev-server reload.
@@ -87,9 +103,52 @@ export interface HookEnv {
   token: string;
 }
 
+/** Another floor's repository for a worker to work in too (see WorkerInfo.repos). */
+export interface RepoSource {
+  floor: string;
+  /** The floor's name, for messages. */
+  name: string;
+  /** owner/name on GitHub, when known. */
+  repo?: string;
+  /** Its checkout. */
+  dir: string;
+}
+
+/** A pull request 'worker.pr' opened, or found already open, for a worker's branch. */
+export interface OpenedPr {
+  /** For a worker across repositories: which of its repositories (the folder in its workspace). */
+  repo?: string;
+  number: number;
+  url: string;
+  /** The branch already had it. */
+  existed: boolean;
+  /** The worktree still has uncommitted changes, which aren't in it. */
+  dirty: boolean;
+}
+
+/**
+ * Runs a worker as the account that hired it, on that account's own Claude and GitHub sign-ins
+ * (see signins.ts). Workers hired without an account run as the office, as they always have.
+ */
+export interface RunAs {
+  /** Whether the account has a Claude sign-in its workers can start on. */
+  claudeReady(owner: string): boolean;
+  /** What to tell the account when it hasn't. */
+  why(which: 'claude'): string;
+  /** Puts the account's sign-ins in place of the office's in `env`; `dirs` are where the worker starts. */
+  apply(owner: string, env: Record<string, string>, dirs: string[]): Record<string, string>;
+}
+
 interface Worker {
   info: WorkerInfo;
+  /** The account that hired it, whose sign-ins it runs on. None: the office's own. */
+  owner?: string;
   pty?: Pty;
+  /**
+   * A DeepSeek Harness worker's ACP connection. It has no PTY: ACP updates are rendered into the
+   * same headless terminal the other providers mirror a process into (see dsh.ts).
+   */
+  dsh?: DshSession;
   term?: HeadlessTerminal;
   ser?: InstanceType<typeof serialize.SerializeAddon>;
   /** The screen so far, for a browser opening the terminal (see screen.ts). */
@@ -126,15 +185,20 @@ interface Worker {
   saved?: { ptyId: string; status: WorkerStatus; acked: boolean; waitingSince?: number };
   /** Its process went away mid-turn with the office or the terminal host: its next start carries on (CARRY_ON_PROMPT). */
   interrupted?: boolean;
+  /** Muse resume cannot take a prompt on argv; paste this into the TUI after SessionStart. */
+  pendingPrompt?: string;
   /** Output since its scrollback was last saved to disk. */
   unsaved?: boolean;
   /** Where this run's own output starts, below the scrollback carried over from before. */
   fresh?: { readonly line: number };
+  /** Its lost worktree is being put back (see rebuild): the folder coming back mustn't wake it before that's done. */
+  rebuilding?: boolean;
 }
 
 export interface WorkerEvents {
   update(info: WorkerInfo): void;
-  remove(workerId: string): void;
+  /** It's gone (sent home), and what it was as it went. */
+  remove(workerId: string, info?: WorkerInfo): void;
   data(workerId: string, data: string, viewers: string[]): void;
   screen(workerId: string, frame: { cols: number; rows: number; lines: Record<number, Run[]>; full: boolean; cursor: [number, number] }): void;
   toast(text: string, level: 'info' | 'warn' | 'error'): void;
@@ -149,8 +213,18 @@ export class WorkerManager {
   readonly defaultProvider: AgentProvider;
   private openCodePlugin: string;
   private codexHook: string;
-  /** Where the office-queue command is, for the board agents' PATH (see writeQueueCommand). */
-  private queueBin: string | undefined;
+  private grokHome: string;
+  private grokSocket: string;
+  private grokAuthPath?: string;
+  private museConfigHome: string;
+  private museDataHome: string;
+  private museStateHome: string;
+  /** Where the office-queue and office-workers commands are, for the workers' PATH (see writeOfficeCommands). */
+  private officeBin: string | undefined;
+  /** bin/office-workers.js, which is also the office's MCP server for the agents that take one. */
+  private mcpScript: string | undefined;
+  /** Claude Code's --mcp-config file for it. */
+  private claudeMcp: string | undefined;
   private screenTimer: NodeJS.Timeout;
   /** The office is shutting down: workers exiting now are being stopped, not failing to resume. */
   private closing = false;
@@ -162,7 +236,10 @@ export class WorkerManager {
   private host: PtyHost;
   /** Each worker's terminal on disk, so a restart doesn't wipe it (see history.ts). */
   private scrollback: ScrollbackStore;
+  private drops: DropStore;
   private saveTimer: NodeJS.Timeout;
+  /** How many rows the floor's back office is built out: its desks past that aren't there to hire at (see WING). */
+  wing: () => number = () => 0;
 
   constructor(
     private dir: string,
@@ -176,6 +253,10 @@ export class WorkerManager {
     private capacity?: Capacity,
     /** The office's prompts and the worker everyone starts on, as set in ⚙️ Settings (see prompts.ts). */
     private prompts?: PromptSource,
+    /** Everyone's own sign-ins, for workers hired by an account. */
+    private runAs?: RunAs,
+    /** The DSH profile a DeepSeek Harness worker boots (default "acp"). */
+    private dshProfile: string = DSH_PROFILE_DEFAULT,
   ) {
     this.defaultProvider = configuredProvider(agentCmd);
     this.trees = new Worktrees(dir);
@@ -184,7 +265,20 @@ export class WorkerManager {
     this.writeHookSettings();
     this.openCodePlugin = writeOpenCodePlugin(dataDir);
     this.codexHook = writeCodexHook(dataDir);
-    this.queueBin = this.writeQueueCommand();
+    const grok = writeGrokHome(dataDir);
+    this.grokHome = grok.home;
+    this.grokSocket = grok.socket;
+    const userGrok = process.env.GROK_HOME || path.join(homedir(), '.grok');
+    const auth = path.join(userGrok, 'auth.json');
+    this.grokAuthPath = existsSync(auth) ? auth : undefined;
+    const userMuse = path.join(process.env.XDG_CONFIG_HOME || path.join(homedir(), '.config'), 'muse');
+    const muse = writeMuseHome(dataDir, existsSync(userMuse) ? userMuse : undefined);
+    this.museConfigHome = muse.configHome;
+    this.museDataHome = muse.dataHome;
+    this.museStateHome = muse.stateHome;
+    this.mcpScript = binScript('office-workers.js');
+    this.officeBin = this.writeOfficeCommands();
+    this.claudeMcp = this.mcpScript ? writeClaudeMcpConfig(dataDir, this.mcpScript) : undefined;
     this.agentPath = resolveCommand(agentCmd);
     const claude = this.defaultProvider === 'claude' ? this.agentPath : resolveCommand('claude');
     this.namer = new TaskNamer(claude, childEnv(), () => officePrompt(this.prompts, 'office.namer'), (id, task, ctx) => {
@@ -196,13 +290,18 @@ export class WorkerManager {
     });
     this.host = new PtyHost(dataDir, () => this.events.toast("The workers' terminal host stopped — resuming them", 'warn'));
     this.scrollback = new ScrollbackStore(dataDir);
+    this.drops = new DropStore(dataDir);
     this.restore();
     this.scrollback.prune(new Set(this.workers.keys()));
+    this.drops.prune(new Set(this.workers.keys()));
     // A session may have ended (and written its final tally) while the office was down.
     for (const w of this.workers.values()) this.scanUsage(w);
     this.screenTimer = setInterval(() => this.flushScreens(), SCREEN_INTERVAL_MS);
     this.usageTimer = setInterval(() => {
-      for (const w of this.workers.values()) this.scanUsage(w);
+      for (const w of this.workers.values()) {
+        this.scanUsage(w);
+        this.watchFolder(w);
+      }
     }, USAGE_SCAN_MS);
     this.saveTimer = setInterval(() => {
       for (const w of this.workers.values()) if (w.unsaved) this.saveScrollback(w);
@@ -227,7 +326,11 @@ export class WorkerManager {
     );
     // Terminals nobody saved a claim on (their worker was sent home as the office went down).
     this.host.killUnclaimed();
+    // Whoever's worktree was deleted while the office was down stays asleep, marked lost, rather than failing to start.
+    for (const w of this.workers.values()) this.checkLost(w);
     this.wakeAll();
+    // It may have switched branches while the office was down, its terminal still going.
+    void this.syncBranches();
   }
 
   get resolvedAgent(): string | null {
@@ -249,15 +352,28 @@ export class WorkerManager {
     return this.workers.get(id)?.info;
   }
 
+  /** The account a worker runs as (see RunAs), if not the office. */
+  ownerOf(id: string): string | undefined {
+    return this.workers.get(id)?.owner;
+  }
+
   /** Each worker's terminal process and directory, to tell whose servers are whose. */
   owners(): ServiceOwner[] {
     return [...this.workers.values()].map((w) => ({
       workerId: w.info.id,
       pid: w.pty?.pid,
       agent: w.info.kind === 'agent',
-      cwd: w.info.worktree ? path.join(this.dir, w.info.worktree.path) : this.dir,
+      cwd: this.cwd(w.info),
       root: this.dir,
     }));
+  }
+
+  /**
+   * Fetches the branch the project is on, so a worktree made next starts from what's on GitHub now
+   * (see Worktrees.fetch). Undefined when there's nothing to wait for.
+   */
+  fetchBase(): Promise<void> | undefined {
+    return this.trees.fetch();
   }
 
   deskOccupied(deskId: string): boolean {
@@ -267,9 +383,10 @@ export class WorkerManager {
 
   /**
    * Hires a worker at a desk. `meeting` seats one at the meeting room's table instead, for that meeting
-   * (see meetings.ts), in the meeting's own worktree, which everyone at the table shares.
+   * (see meetings.ts), in the meeting's own worktree, which everyone at the table shares. `repos` are
+   * other floors' repositories a worker in its own worktree works in too (see makeWorkspace).
    */
-  spawn(deskId: string, by: string, prompt?: string, worktree = false, kind: WorkerKind = 'agent', provider?: AgentProvider, model?: string, effort?: AgentEffort, meeting?: { id: string; worktree?: WorkerInfo['worktree'] }): WorkerInfo | string {
+  spawn(deskId: string, by: string, prompt?: string, worktree = false, kind: WorkerKind = 'agent', provider?: AgentProvider, model?: string, effort?: AgentEffort, meeting?: { id: string; worktree?: WorkerInfo['worktree'] }, owner?: string, repos: RepoSource[] = [], via?: 'herald'): WorkerInfo | string {
     // Nobody picked (a board agent, say): the office's default worker, model and effort included.
     if (kind === 'agent' && provider === undefined) ({ provider, model, effort } = this.officeDefault);
     const selectedProvider = kind === 'agent' ? provider : undefined;
@@ -279,17 +396,21 @@ export class WorkerManager {
     if (effortError) return effortError;
     const seat = DESK_BY_ID.get(deskId);
     if (!seat) return 'Unknown desk';
+    if (!deskBuilt(seat, this.wing())) return `${seat.label} isn't built yet: expand the back office first`;
     if (this.deskOccupied(deskId)) return seat.station ? `The ${STATION_AGENT[seat.station].name} is already there` : `That ${seat.beanbag ? 'bean bag' : 'desk'} is taken`;
     if (kind === 'shell' && seat.station) return 'Resident stations use an agent session, not a shell';
     if (seat.station && !prompt?.trim()) return `Tell ${STATION_AGENT[seat.station].name} what to do`;
     if (!seat.room !== !meeting) return seat.room ? 'Only a meeting seats workers at the meeting table: call one in the meeting room' : 'A meeting seats its workers at the meeting table';
     if (meeting && (kind !== 'agent' || worktree)) return 'A meeting seats agents, in its own worktree';
+    if (repos.length && (kind !== 'agent' || !worktree || seat.station || meeting)) return 'Only a worker in its own worktree can work in other repositories too';
+    if (repos.length > MAX_REPOS) return `A worker can take on at most ${MAX_REPOS} other repositories`;
     if (kind === 'shell' && provider !== undefined) return 'Shell workers do not have an agent provider';
     if (kind === 'agent' && selectedProvider === 'custom' && this.defaultProvider !== 'custom') return 'Custom is not the configured agent provider';
     if (kind === 'agent') {
       const paused = this.ledger.hiringPaused;
       if (paused) return paused;
     }
+    if (owner && selectedProvider === 'claude' && this.runAs && !this.runAs.claudeReady(owner)) return this.runAs.why('claude');
     const full = this.capacity?.full();
     if (full) return full;
     const used = new Set([...this.workers.values()].map((w) => w.info.name.replace(/ 🐚$/, '')));
@@ -297,17 +418,26 @@ export class WorkerManager {
     const name = agent ? agent.name : (NAMES.find((n) => !used.has(n)) ?? `Worker ${this.workers.size + 1}`);
     const id = randomBytes(6).toString('hex');
     let wt: WorkerInfo['worktree'] = meeting?.worktree;
+    let others: WorkerRepo[] | undefined;
     if (worktree) {
-      const made = this.trees.create(`${name.toLowerCase()}-${id.slice(0, 4)}`);
+      const slug = `${name.toLowerCase()}-${id.slice(0, 4)}`;
+      const made = repos.length ? this.makeWorkspace(slug, repos) : this.trees.create(slug);
       if (typeof made === 'string') return made;
-      wt = made;
+      if ('repos' in made) {
+        ({ worktree: wt, repos: others } = made);
+        for (const note of made.notes) this.events.toast(`🌿 ${name}'s worktree of ${note}`, 'info');
+      } else {
+        const { note, ...ref } = made;
+        wt = ref;
+        if (note) this.events.toast(`🌿 ${name}'s worktree ${note}`, 'info');
+      }
     }
     const info: WorkerInfo = {
       id,
       kind,
       provider: selectedProvider,
-      model: selectedProvider === 'opencode' || selectedProvider === 'claude' ? model : undefined,
-      effort: selectedProvider === 'claude' ? effort : undefined,
+      model: selectedProvider === 'opencode' || selectedProvider === 'claude' || selectedProvider === 'grok' || selectedProvider === 'muse' || selectedProvider === 'dsh' ? model : undefined,
+      effort: selectedProvider === 'claude' || selectedProvider === 'grok' || selectedProvider === 'muse' || selectedProvider === 'dsh' ? effort : undefined,
       deskId,
       name: kind === 'shell' ? `${name} 🐚` : name,
       color: kind === 'shell' ? '#8d99ae' : agent ? agent.color : COLORS[Math.floor(Math.random() * COLORS.length)],
@@ -315,8 +445,10 @@ export class WorkerManager {
       acked: true,
       createdBy: by,
       createdAt: Date.now(),
+      ...(via ? { via } : {}),
       prompt: kind === 'shell' ? undefined : prompt?.trim() || undefined,
       worktree: wt,
+      repos: others,
       cols: 100,
       rows: 30,
       viewers: [],
@@ -325,6 +457,7 @@ export class WorkerManager {
       meeting: meeting?.id,
     };
     const w = newWorker(info, newTracker());
+    w.owner = owner;
     this.workers.set(id, w);
     if (info.prompt) this.notePrompt(w, info.prompt);
     // A board agent is told what it's there for ahead of its first request (which is what shows).
@@ -333,11 +466,80 @@ export class WorkerManager {
     return info;
   }
 
+  /**
+   * The workspace of a worker across repositories: `.agent-office/worktrees/<slug>`, with a worktree of
+   * this floor's project and of each of `repos` in it, all on office/<slug>, and a brief for the agent
+   * (the 'worker.repos' prompt, as CLAUDE.md and AGENTS.md). All or nothing: when one repository
+   * can't have its worktree, the ones already made are taken out again.
+   */
+  private makeWorkspace(slug: string, repos: RepoSource[]): { worktree: NonNullable<WorkerInfo['worktree']>; repos: WorkerRepo[]; notes: string[] } | string {
+    // A branch can only be checked out once per repository, and two floors can be checkouts of the same one.
+    const seen = new Map<string, string>();
+    const own = this.trees.commonDir();
+    if (!own) return "This floor's project isn't a git checkout";
+    seen.set(own, "this floor's project");
+    for (const r of repos) {
+      const common = new Worktrees(r.dir).commonDir();
+      if (!common) return `${r.name} isn't a git checkout`;
+      const twin = seen.get(common);
+      if (twin) return `${r.name} is the same repository as ${twin}`;
+      seen.set(common, r.name);
+    }
+    const names = workspaceNames([this.dir, ...repos.map((r) => r.dir)]);
+    const made: { trees: Worktrees; ref: WorktreeRef }[] = [];
+    const fail = (why: string) => {
+      // Fresh branches with nothing on them: nothing is lost taking them out again.
+      void (async () => {
+        for (const m of made.reverse()) await m.trees.remove(m.ref, 'all');
+        clearWorkspace(path.join(this.dir, WORKTREES_DIR, slug));
+      })();
+      return why;
+    };
+    const first = this.trees.create(slug, names[0]);
+    if (typeof first === 'string') return fail(first);
+    const { note, ...primary } = first;
+    const notes = note ? [`${names[0]} ${note}`] : [];
+    made.push({ trees: this.trees, ref: primary });
+    const others: WorkerRepo[] = [];
+    for (const [i, r] of repos.entries()) {
+      const trees = new Worktrees(r.dir);
+      const wt = trees.create(slug, names[i + 1], this.dir);
+      if (typeof wt === 'string') return fail(`${r.name}: ${wt}`);
+      if (wt.note) notes.push(`${names[i + 1]} ${wt.note}`);
+      made.push({ trees, ref: { ...wt, path: path.relative(r.dir, path.join(this.dir, wt.path)) } });
+      others.push({ floor: r.floor, name: names[i + 1], repo: r.repo, dir: r.dir, path: wt.path, branch: wt.branch, base: wt.base, from: wt.from });
+    }
+    try {
+      this.writeBrief(primary, repos.map((r, i) => ({ name: names[i + 1], project: r.repo ?? r.name, from: others[i].from })));
+    } catch (err) {
+      return fail(`Could not write the workspace's brief: ${(err as Error).message}`);
+    }
+    return { worktree: primary, repos: others, notes };
+  }
+
+  /**
+   * The brief in the workspace of a worker across repositories, which folder is which project (the
+   * 'worker.repos' prompt), as CLAUDE.md and AGENTS.md. `primary` is its own floor's worktree, in the
+   * workspace like `others`. Throws when it can't be written.
+   */
+  private writeBrief(primary: { path: string; branch: string; from?: string }, others: { name: string; project: string; from?: string }[]) {
+    const home = originRepo(this.dir) ?? path.basename(this.dir);
+    const line = (name: string, project: string, from?: string, note = '') => `- \`${name}/\`: ${project}${from ? `, cut from ${from}` : ''}${note}`;
+    const brief = officePrompt(this.prompts, 'worker.repos', {
+      branch: primary.branch,
+      home,
+      repos: [line(path.basename(primary.path), home, primary.from, " (this floor's project)"), ...others.map((o) => line(o.name, o.project, o.from))].join('\n'),
+    });
+    for (const file of WORKSPACE_FILES) writeFileSync(path.join(this.dir, path.dirname(primary.path), file), `${brief.trim()}\n`);
+  }
+
   /** Starts a worker that isn't running again, carrying on its session, with `prompt` as its next message. */
   resume(id: string, prompt?: string): string | undefined {
     const w = this.workers.get(id);
     if (!w) return 'No such worker';
-    if (w.pty) return 'Worker is already running';
+    if (w.pty || w.dsh) return 'Worker is already running';
+    if (this.checkLost(w, true)) return lostMessage(w.info);
+    clockWork(w.info, 'starting');
     w.info.status = 'starting';
     w.info.exitCode = undefined;
     const station = DESK_BY_ID.get(w.info.deskId)?.station;
@@ -359,31 +561,33 @@ export class WorkerManager {
    * up with it if it's asleep, or it's hired there with it when nobody is. Returns what went wrong, or
    * the agent and whether it was just hired.
    */
-  station(deskId: string, by: string, text: string): { info: WorkerInfo; hired: boolean } | string {
+  station(deskId: string, by: string, text: string, owner?: string): { info: WorkerInfo; hired: boolean } | string {
     if (!DESK_BY_ID.get(deskId)?.station) return 'There is no agent to ask there';
     const clean = text.replace(/\r\n?/g, '\n').trim();
     if (!clean) return 'Empty prompt';
     const w = [...this.workers.values()].find((x) => x.info.deskId === deskId);
     if (!w) {
-      const info = this.spawn(deskId, by, clean);
+      const info = this.spawn(deskId, by, clean, false, 'agent', undefined, undefined, undefined, undefined, owner);
       return typeof info === 'string' ? info : { info, hired: true };
     }
     // Typed into the question it's asking, the prompt would answer it.
     if (w.info.status === 'needs_input') return `The ${w.info.name} is waiting on an answer in its terminal`;
-    if (!w.pty) w.info.lastInput = { by, at: Date.now() };
-    const err = w.pty ? this.prompt(w.info.id, clean, by) : this.resume(w.info.id, clean);
+    const running = !!(w.pty || w.dsh);
+    if (!running) w.info.lastInput = { by, at: Date.now() };
+    const err = running ? this.prompt(w.info.id, clean, by) : this.resume(w.info.id, clean);
     return err ?? { info: w.info, hired: false };
   }
 
   /** The worker whose terminal holds this hook token: how a worker proves it's asking for itself. */
   authenticate(id: string, token: string): WorkerInfo | undefined {
     const w = this.workers.get(id);
-    return w?.pty && token && safeEq(token, w.hookToken) ? w.info : undefined;
+    return (w?.pty || w?.dsh) && token && safeEq(token, w.hookToken) ? w.info : undefined;
   }
 
   /** Starts every worker that isn't running: nobody should be found asleep at their desk. */
   wakeAll() {
-    for (const w of this.workers.values()) if (!w.pty) this.resume(w.info.id);
+    // A DeepSeek Harness worker has no PTY but is still running: only the ones that are gone wake up.
+    for (const w of this.workers.values()) if (!w.pty && !w.dsh) this.resume(w.info.id);
   }
 
   /**
@@ -392,7 +596,7 @@ export class WorkerManager {
    * pull request's head commit) is work delivered. Resolves once that's done, with a line for the team
    * about the worktree.
    */
-  async kill(id: string, cleanup?: WorktreeCleanup, landed?: string): Promise<{ note?: string; error?: string }> {
+  async kill(id: string, cleanup?: WorktreeCleanup, landed?: string, landedRepos?: Record<string, string | undefined>): Promise<{ note?: string; error?: string }> {
     const w = this.workers.get(id);
     if (!w) return {};
     this.workers.delete(id);
@@ -400,34 +604,257 @@ export class WorkerManager {
     clearTimeout(w.scanTimer);
     const proc = w.pty;
     w.pty = undefined; // so the exit handler knows this worker is gone and stays quiet
+    const session = w.dsh;
+    w.dsh = undefined;
     try {
+      session?.close();
       proc?.kill();
     } catch {
       // already gone
     }
     w.term?.dispose();
     this.scrollback.remove(id);
-    this.events.remove(id);
+    this.drops.remove(id);
+    this.events.remove(id, w.info);
     this.persist();
-    const wt = w.info.worktree;
     // A meeting's worktree is everyone at the table's: the meeting tidies it away once they've all gone.
-    if (!wt || w.info.meeting) return {};
+    if (!w.info.worktree || w.info.meeting) return {};
+    // On the branch its work is on, should it have switched since it last came to rest.
+    const wt = await this.current(w.info.worktree);
     const name = w.info.name;
+    if (w.info.repos?.length) return this.clearRepos(w.info, cleanup, landed, landedRepos);
     if (!cleanup) {
       const work = describeWork(await this.trees.inspect(wt, landed));
       if (work) return { note: `Kept ${name}'s worktree and branch ${wt.branch} — it has ${work}` };
       cleanup = 'all';
     }
     if (cleanup === 'keep') return { note: `Kept ${name}'s worktree and branch ${wt.branch}` };
-    const error = await this.trees.remove(wt, cleanup);
+    let gone = wt;
+    let kept = '';
+    if (cleanup === 'all' && wt.made) {
+      if (!(await this.trees.hasBranch(wt.made))) {
+        // The agent deleted the office's branch (a rename is followed, see current), so git can't say
+        // whether the one it's on is its own or was there before it: that one stays.
+        cleanup = 'worktree';
+      } else {
+        // The office's own branch stays while it has commits that no remote, the project's checkout
+        // or the branch it's on has.
+        const work = await this.trees.wouldLose(wt.made, [wt.branch]);
+        if (work) kept = ` and kept branch ${wt.made} — it has ${work}`;
+        // A branch it made itself goes with it; one that was there before it (main, say) isn't the office's to delete.
+        if (await this.trees.madeSince(wt.branch, wt.made)) gone = work ? { ...wt, made: undefined } : wt;
+        else if (work) cleanup = 'worktree';
+        else gone = { ...wt, branch: wt.made, made: undefined };
+      }
+    }
+    const error = await this.trees.remove(gone, cleanup);
     if (error) return { error: `Couldn't delete ${name}'s worktree: ${error}` };
-    return { note: cleanup === 'all' ? `Deleted ${name}'s worktree and branch ${wt.branch}` : `Deleted ${name}'s worktree and kept branch ${wt.branch}` };
+    if (cleanup === 'worktree') return { note: `Deleted ${name}'s worktree${kept || ` and kept branch ${wt.branch}`}` };
+    return { note: `Deleted ${name}'s worktree and branch ${gone.branch}${kept && `,${kept}`}` };
+  }
+
+  /** Sending home a worker across repositories: what `kill` does with a worktree, for each of its worktrees, and then its workspace. */
+  private async clearRepos(info: WorkerInfo, cleanup: WorktreeCleanup | undefined, landed?: string, landedRepos?: Record<string, string | undefined>): Promise<{ note?: string; error?: string }> {
+    const trees = this.treesOf(info, landed, landedRepos);
+    const { name } = info;
+    const branch = info.worktree!.branch;
+    const where = trees.map((t) => t.name).join(', ');
+    if (!cleanup) {
+      const held = (await Promise.all(trees.map(async (t) => ({ name: t.name, work: describeWork(await t.trees.inspect(t.ref, t.landed)) })))).filter((t) => t.work);
+      if (held.length) return { note: `Kept ${name}'s worktrees and branch ${branch} in ${where} — ${held.map((t) => `${t.name} has ${t.work}`).join('; ')}` };
+      cleanup = 'all';
+    }
+    if (cleanup === 'keep') return { note: `Kept ${name}'s worktrees and branch ${branch} in ${where}` };
+    const how = cleanup;
+    const errors = (await Promise.all(trees.map(async (t) => {
+      const error = await t.trees.remove(t.ref, how);
+      return error && `${t.name}: ${error}`;
+    }))).filter(Boolean);
+    if (errors.length) return { error: `Couldn't delete all of ${name}'s worktrees: ${errors.join('; ')}` };
+    clearWorkspace(path.join(this.dir, workspaceOf(info)!));
+    return { note: how === 'all' ? `Deleted ${name}'s worktrees and branch ${branch} in ${where}` : `Deleted ${name}'s worktrees in ${where} and kept branch ${branch}` };
+  }
+
+  /**
+   * Each worktree a worker across repositories has, its own floor's first: its folder in the
+   * workspace, git plumbing for its repository, its worktree in that repository's terms, and the
+   * commit its merged pull request delivered, when known.
+   */
+  private treesOf(info: WorkerInfo, landed?: string, landedRepos?: Record<string, string | undefined>): { name: string; dir: string; trees: Worktrees; ref: WorktreeRef; landed?: string }[] {
+    const wt = info.worktree!;
+    return [
+      { name: path.basename(wt.path), dir: this.dir, trees: this.trees, ref: wt, landed },
+      ...(info.repos ?? []).map((r) => ({
+        name: r.name,
+        dir: r.dir,
+        trees: new Worktrees(r.dir),
+        ref: { path: path.relative(r.dir, path.join(this.dir, r.path)), branch: r.branch, base: r.base },
+        landed: landedRepos?.[r.floor],
+      })),
+    ];
+  }
+
+  /**
+   * Whether any worktree of a worker across repositories holds work its merged pull requests didn't
+   * deliver (`landed` and `landedRepos`, as for kill): then it doesn't go home by itself yet.
+   */
+  async holdsWork(id: string, landed?: string, landedRepos?: Record<string, string | undefined>): Promise<boolean> {
+    const info = this.workers.get(id)?.info;
+    if (!info?.worktree) return false;
+    const states = await Promise.all(this.treesOf(info, landed, landedRepos).map(async (t) => describeWork(await t.trees.inspect(t.ref, t.landed))));
+    return states.some(Boolean);
   }
 
   /** What a worker's worktree holds, so whoever sends it home knows what deleting it would lose. */
-  inspectWorktree(id: string): Promise<WorktreeState | undefined> {
-    const wt = this.workers.get(id)?.info.worktree;
-    return wt ? this.trees.inspect(wt) : Promise.resolve(undefined);
+  async inspectWorktree(id: string): Promise<WorktreeState | undefined> {
+    const w = this.workers.get(id);
+    const info = w?.info;
+    if (!w || !info?.worktree) return undefined;
+    if (!info.repos?.length) {
+      await this.syncBranch(w);
+      return this.trees.inspect(w.info.worktree!);
+    }
+    const repos = await Promise.all(this.treesOf(info).map(async (t) => ({ name: t.name, state: await t.trees.inspect(t.ref) })));
+    const sum = (k: 'dirty' | 'ahead' | 'unpushed') => repos.reduce((n, r) => n + r.state[k], 0);
+    const errors = repos.filter((r) => r.state.error).map((r) => `${r.name}: ${r.state.error}`);
+    return { exists: repos.every((r) => r.state.exists), dirty: sum('dirty'), ahead: sum('ahead'), unpushed: sum('unpushed'), error: errors.length ? errors.join('; ') : undefined, repos };
+  }
+
+  /** Every worker's worktree branch, looked at again (see syncBranch): for when new pull requests may have come in. */
+  async syncBranches(): Promise<void> {
+    await Promise.all([...this.workers.values()].map((w) => this.syncBranch(w)));
+  }
+
+  /**
+   * Keeps `worktree.branch` on the branch the worktree is actually on. Agents often make their own
+   * (`git checkout -b fix-x`, because the task or the repo's CLAUDE.md says to) and open the pull
+   * request from there with gh, and the PR badge, O at the desk and sending it home go by it. A
+   * meeting's worktree stays the meeting's, and a worker across repositories keeps the branch it was
+   * given in each (see openPrs).
+   */
+  private async syncBranch(w: Worker): Promise<void> {
+    const wt = w.info.worktree;
+    if (!wt || w.info.meeting || w.info.repos?.length) return;
+    const now = await this.current(wt);
+    // Sent home meanwhile, or another look got there first.
+    if (now === wt || this.workers.get(w.info.id) !== w || w.info.worktree !== wt) return;
+    w.info.worktree = now;
+    this.emitUpdate(w);
+    this.persist();
+  }
+
+  /** A worktree on the branch it's on now, with the office's own branch kept in `made`; the same one when nothing moved. */
+  private async current(wt: Worktree): Promise<Worktree> {
+    const live = await this.trees.branchOf(wt);
+    if (!live) return wt;
+    let made = wt.made ?? (live === wt.branch ? undefined : wt.branch);
+    // Back on it, or renamed it (`git branch -m fix-x`): the branch it's on is the office's own.
+    if (made === live || (made && (await this.trees.renamedTo(made, live)))) made = undefined;
+    return live === wt.branch && made === wt.made ? wt : { ...wt, branch: live, made };
+  }
+
+  /**
+   * Whether the folder a worker works in (its worktree, or its workspace across repositories) is gone:
+   * deleted outside the office. It's then marked lost (WorkerInfo.lost) for whoever comes to its desk,
+   * instead of failing to start over and over; once the folder is back, it isn't any more.
+   */
+  private checkLost(w: Worker, recheck = false): boolean {
+    const { info } = w;
+    if (!info.worktree || existsSync(this.cwd(info))) {
+      if (info.lost) {
+        info.lost = undefined;
+        this.emitUpdate(w);
+      }
+      return false;
+    }
+    // Where its branch is only changes by hand: looked at again when someone tries to start it.
+    if (info.lost && !recheck) return true;
+    const branch = this.trees.branchState(info.worktree.branch);
+    if (branch !== info.lost?.branch) {
+      info.lost = { branch };
+      this.emitUpdate(w);
+    }
+    return true;
+  }
+
+  /**
+   * Every so often: a worktree deleted under a worker marks it lost, and one put back by hand
+   * (`git worktree add` at the same place) sets an asleep worker back to work.
+   */
+  private watchFolder(w: Worker) {
+    if (!w.info.worktree || w.rebuilding) return;
+    const was = !!w.info.lost;
+    if (!this.checkLost(w) && was && !w.pty && !w.dsh) this.resume(w.info.id);
+  }
+
+  /**
+   * Puts a lost worker's worktree back where it was (see Worktrees.restore) and starts it again,
+   * carrying on its conversation; across repositories, each worktree that's gone and the workspace's
+   * brief. Everyone else who worked there (the rest of a meeting's table) gets back to work with it.
+   * Resolves to whether it `rebuilt` anything, with a note on where a branch came back from (or why
+   * there was nothing to do), or to what went wrong.
+   */
+  async rebuild(id: string): Promise<{ rebuilt?: boolean; note?: string; error?: string }> {
+    const w = this.workers.get(id);
+    if (!w) return { error: 'No such worker' };
+    const { info } = w;
+    if (!info.worktree) return { error: `${info.name} works in the main checkout` };
+    if (w.rebuilding) return {};
+    const folder = this.cwd(info);
+    // Whoever the folder was deleted from under: this worker, and the rest of its meeting's table.
+    const stranded = [...this.workers.values()].filter((o) => o.info.worktree && this.cwd(o.info) === folder && (o.info.lost || this.checkLost(o)));
+    const froms: string[] = [];
+    if (!existsSync(folder)) {
+      const across = !!info.repos?.length;
+      w.rebuilding = true;
+      try {
+        for (const t of this.treesOf(info)) {
+          if (t.ref.path && existsSync(path.resolve(t.dir, t.ref.path))) continue;
+          const r = await t.trees.restore(t.ref);
+          const which = across ? `${t.name}'s ` : '';
+          if ('error' in r) return { error: `Couldn't rebuild ${info.name}'s worktree${across ? ` of ${t.name}` : ''}: ${r.error}` };
+          if (r.from === 'origin') froms.push(`${which}${t.ref.branch} came back from origin`);
+          if (r.from === 'gone') froms.push(`${which}${t.ref.branch} was deleted too, so it starts again from where it began`);
+        }
+        if (across) {
+          try {
+            this.writeBrief(info.worktree, info.repos!.map((r) => ({ name: r.name, project: r.repo ?? r.name, from: r.from })));
+          } catch {
+            // The worktrees are what it needs; the brief only says which folder is which.
+          }
+        }
+      } finally {
+        w.rebuilding = false;
+      }
+    }
+    for (const o of stranded) if (!this.checkLost(o)) this.restartIn(o);
+    if (!stranded.length) {
+      if (!w.pty && !w.dsh) this.resume(id);
+      return { note: `${info.name}'s worktree is already there` };
+    }
+    return { rebuilt: true, note: froms.join('; ') || undefined };
+  }
+
+  /**
+   * Starts a worker in its folder again: an asleep one wakes up, and one whose process was left running
+   * in the folder deleted from under it starts over in the new one, carrying on its conversation.
+   */
+  private restartIn(w: Worker) {
+    const proc = w.pty;
+    const session = w.dsh;
+    if (proc || session) {
+      if (midTurn(w)) w.interrupted = true;
+      // Gone before it exits, so the exit handler knows it was the office and stays quiet.
+      w.pty = undefined;
+      w.dsh = undefined;
+      try {
+        session?.close();
+        proc?.kill();
+      } catch {
+        // already gone
+      }
+    }
+    this.resume(w.info.id);
   }
 
   attach(id: string, clientId: string, name: string): { data: string; cols: number; rows: number } | undefined {
@@ -472,7 +899,19 @@ export class WorkerManager {
   /** Keystrokes from `by`'s browser. */
   write(id: string, data: string, by: string) {
     const w = this.workers.get(id);
-    if (!w?.pty) return;
+    if (!w) return;
+    if (w.dsh) {
+      // ACP has no terminal: the session buffers these into a line and submits it on Enter.
+      w.dsh.writeInput(data);
+      let changed = this.typed(w, by);
+      if (w.info.status === 'needs_input' && w.info.acked === false) {
+        w.info.acked = true;
+        changed = true;
+      }
+      if (changed) this.emitUpdate(w);
+      return;
+    }
+    if (!w.pty) return;
     w.pty.write(data);
     let changed = this.typed(w, by);
     if (w.info.status === 'needs_input' && w.info.acked === false) {
@@ -480,6 +919,11 @@ export class WorkerManager {
       changed = true;
     }
     if (changed) this.emitUpdate(w);
+  }
+
+  /** Keeps a file dropped or pasted into a worker's terminal on this machine; where it is, for the terminal to type. */
+  drop(id: string, name: string, type: string, body: Buffer): string | undefined {
+    return this.workers.has(id) ? this.drops.save(id, name, type, body) : undefined;
   }
 
   /**
@@ -498,6 +942,16 @@ export class WorkerManager {
   prompt(id: string, text: string, by?: string): string | undefined {
     const w = this.workers.get(id);
     if (!w) return 'No such worker';
+    if (w.dsh) {
+      const clean = text.replace(/\r\n?/g, '\n').trim();
+      if (!clean) return 'Empty prompt';
+      w.dsh.prompt(clean);
+      w.info.activity = truncate(clean, 80);
+      this.notePrompt(w, clean);
+      if (by) w.info.lastInput = { by, at: Date.now() };
+      this.emitUpdate(w);
+      return undefined;
+    }
     if (!w.pty) return 'Worker is not running';
     const clean = text.replace(/\r\n?/g, '\n').trim();
     if (!clean) return 'Empty prompt';
@@ -513,10 +967,12 @@ export class WorkerManager {
 
   /**
    * Pushes a worktree worker's branch and opens a pull request for it, with a title and body
-   * drafted from its task. Resolves to the PR, or to a message saying why there is none. The
-   * branch may already have an open PR (a second press, or one opened by hand): that one is used.
+   * drafted from its task, as `as` (whoever pressed the button) or else the office. Resolves to the
+   * PR, or to a message saying why there is none. The branch may already have an open PR (a second
+   * press, or one opened by hand): that one is used. A worker across repositories gets one in each
+   * repository it committed to (see openPrs).
    */
-  async openPr(id: string, by: string): Promise<{ number: number; url: string; existed: boolean; dirty: boolean } | string> {
+  async openPr(id: string, by: string, as?: GhAs): Promise<{ prs: OpenedPr[]; failed: string[] } | string> {
     const w = this.workers.get(id);
     if (!w) return 'No such worker';
     const { info } = w;
@@ -526,30 +982,31 @@ export class WorkerManager {
     if (isBusy(info.status)) {
       return `${info.name} is still ${info.status === 'needs_input' ? 'waiting on input' : info.status} — wait until it's done`;
     }
+    if (info.repos?.length) return this.openPrs(w, by, as);
     const cwd = path.join(this.dir, wt.path);
     if (!existsSync(cwd)) return `${info.name}'s worktree is gone (${wt.path})`;
     info.prOpening = true;
     this.emitUpdate(w);
     try {
-      const commits = (await run('git', ['log', '--reverse', '--format=%h %s', `${wt.base}..${wt.branch}`], cwd)).split('\n').filter(Boolean);
+      // The PR comes from the branch its work is on, which may be one it made itself.
+      await this.syncBranch(w);
+      const branch = info.worktree?.branch ?? wt.branch;
+      const commits = (await run('git', ['log', '--reverse', '--format=%h %s', `${wt.base}..${branch}`], cwd)).split('\n').filter(Boolean);
       const dirty = (await run('git', ['status', '--porcelain'], cwd)) !== '';
-      if (!commits.length) return dirty ? `${info.name} hasn't committed anything yet — ask it to commit first` : `${info.name} has no commits on ${wt.branch} yet`;
-      const open = await findOpenPr(wt.branch, cwd);
+      if (!commits.length) return dirty ? `${info.name} hasn't committed anything yet — ask it to commit first` : `${info.name} has no commits on ${branch} yet`;
+      const open = await findOpenPr(branch, cwd);
       if (open) {
         info.pr = open;
         this.persist();
-        return { ...open, existed: true, dirty };
+        return { prs: [{ ...open, existed: true, dirty }], failed: [] };
       }
-      await run('git', ['push', '-u', 'origin', wt.branch], cwd, 90_000);
-      const base = await this.pushedBranch([wt.from, this.trees.currentBranch()], wt.branch);
+      await run('git', ['push', '-u', 'origin', branch], cwd, 90_000, as?.env);
+      const base = await this.pushedBranch([wt.from, this.trees.currentBranch()], branch);
       const { title, body } = draftPr(info, commits, by);
-      const out = await gh(['pr', 'create', '--head', wt.branch, ...(base ? ['--base', base] : []), '--title', title, '--body', body], cwd, 60_000);
-      const url = out.trim().split('\n').pop() ?? '';
-      const number = Number(/\/pull\/(\d+)/.exec(url)?.[1]);
-      if (!number) throw new Error(`gh did not return a pull request URL (${truncate(out, 120)})`);
+      const { number, url } = await createPr(branch, base, title, body, cwd, as);
       info.pr = { number, url };
       this.persist();
-      return { number, url, existed: false, dirty };
+      return { prs: [{ number, url, existed: false, dirty }], failed: [] };
     } catch (err) {
       return `Couldn't open a PR for ${info.name}: ${(err as Error).message}`;
     } finally {
@@ -559,12 +1016,83 @@ export class WorkerManager {
     }
   }
 
-  /** The first of these branches that exists on origin, for a PR base. None: gh picks the default branch. */
-  private async pushedBranch(candidates: (string | undefined)[], not: string): Promise<string | undefined> {
+  /**
+   * 'worker.pr' for a worker across repositories: a pull request in each repository it committed to
+   * (or the one its branch already has there), with every one of them listed in each one's
+   * description, so they're reviewed and merged together. The issue its task came from is closed by
+   * its own floor's pull request; the others only mention it.
+   */
+  private async openPrs(w: Worker, by: string, as?: GhAs): Promise<{ prs: OpenedPr[]; failed: string[] } | string> {
+    const { info } = w;
+    const wt = info.worktree!;
+    const home = originRepo(this.dir);
+    const parts = [
+      { name: path.basename(wt.path), dir: this.dir, ...wt, pr: info.pr, own: true, set: (pr: { number: number; url: string }) => (info.pr = pr) },
+      ...info.repos!.map((r) => ({ ...r, own: false, set: (pr: { number: number; url: string }) => (r.pr = pr) })),
+    ];
+    const gone = parts.filter((p) => !existsSync(path.join(this.dir, p.path)));
+    if (gone.length) return `${info.name}'s worktree${gone.length > 1 ? 's' : ''} of ${gone.map((p) => p.name).join(', ')} ${gone.length > 1 ? 'are' : 'is'} gone`;
+    info.prOpening = true;
+    this.emitUpdate(w);
+    const prs: (OpenedPr & { cwd: string })[] = [];
+    const failed: string[] = [];
+    const uncommitted: string[] = [];
+    try {
+      for (const p of parts) {
+        const cwd = path.join(this.dir, p.path);
+        try {
+          const dirty = (await run('git', ['status', '--porcelain'], cwd)) !== '';
+          const known = p.pr ?? (await findOpenPr(p.branch, cwd));
+          if (known) {
+            p.set(known);
+            prs.push({ repo: p.name, ...known, existed: true, dirty, cwd });
+            continue;
+          }
+          const commits = (await run('git', ['log', '--reverse', '--format=%h %s', `${p.base}..${p.branch}`], cwd)).split('\n').filter(Boolean);
+          if (!commits.length) {
+            if (dirty) uncommitted.push(p.name);
+            continue;
+          }
+          await run('git', ['push', '-u', 'origin', p.branch], cwd, 90_000, as?.env);
+          const base = await this.pushedBranch([p.from, new Worktrees(p.dir).currentBranch()], p.branch, p.dir);
+          const { title, body } = draftPr(info, commits, by, p.own ? undefined : { home });
+          const pr = await createPr(p.branch, base, title, body, cwd, as);
+          p.set(pr);
+          this.persist();
+          prs.push({ repo: p.name, ...pr, existed: false, dirty, cwd });
+        } catch (err) {
+          failed.push(`Couldn't open a PR in ${p.name}: ${(err as Error).message}`);
+        }
+      }
+      if (!prs.length) {
+        if (failed.length) return failed.join('; ');
+        return uncommitted.length ? `${info.name} hasn't committed anything yet in ${uncommitted.join(', ')} — ask it to commit first` : `${info.name} has no commits on ${wt.branch} yet in any of its repositories`;
+      }
+      if (prs.length > 1 && prs.some((p) => !p.existed)) {
+        for (const p of prs) {
+          try {
+            const body = await gh(['pr', 'view', p.url, '--json', 'body', '--jq', '.body'], p.cwd, 30_000, as?.env);
+            const next = withRelated(body, relatedBlock(prs, p.url, wt.branch));
+            if (next !== body) await gh(['pr', 'edit', p.url, '--body', next], p.cwd, 60_000, as?.env);
+          } catch (err) {
+            failed.push(`Couldn't list the other pull requests on ${p.repo} #${p.number}: ${(err as Error).message}`);
+          }
+        }
+      }
+      this.persist();
+      return { prs: prs.map(({ cwd: _, ...p }) => p), failed };
+    } finally {
+      info.prOpening = false;
+      if (this.workers.get(info.id) === w) this.emitUpdate(w);
+    }
+  }
+
+  /** The first of these branches that exists on origin (of `dir`'s repository), for a PR base. None: gh picks the default branch. */
+  private async pushedBranch(candidates: (string | undefined)[], not: string, dir = this.dir): Promise<string | undefined> {
     for (const c of candidates) {
       if (!c || c === not) continue;
       try {
-        await run('git', ['rev-parse', '--verify', '--quiet', `refs/remotes/origin/${c}`], this.dir);
+        await run('git', ['rev-parse', '--verify', '--quiet', `refs/remotes/origin/${c}`], dir);
         return c;
       } catch {
         // not on the remote (or never fetched)
@@ -575,14 +1103,15 @@ export class WorkerManager {
 
   resize(id: string, cols: number, rows: number) {
     const w = this.workers.get(id);
-    if (!w?.pty || !w.term) return;
+    // A DSH worker has no PTY to resize, but its terminal still fits the window it's shown in.
+    if (!(w?.pty || w?.dsh) || !w.term) return;
     cols = clamp(Math.floor(cols), 20, 400);
     rows = clamp(Math.floor(rows), 5, 200);
     if (cols === w.info.cols && rows === w.info.rows) return;
     w.info.cols = cols;
     w.info.rows = rows;
     try {
-      w.pty.resize(cols, rows);
+      w.pty?.resize(cols, rows);
       w.term.resize(cols, rows);
     } catch {
       // pty may have exited between checks
@@ -742,6 +1271,133 @@ export class WorkerManager {
     return true;
   }
 
+  /** Grok lifecycle hooks, isolated under the office's GROK_HOME so they never edit ~/.grok. */
+  handleGrokHook(workerId: string, token: string, event: string, payload: unknown): boolean {
+    const w = this.workers.get(workerId);
+    if (!w || !w.pty || w.info.kind !== 'agent' || w.info.provider !== 'grok' || !safeEq(token, w.hookToken)) return false;
+    const report = normalizeGrokHook(event, payload);
+    if (!report) return false;
+    if (w.info.sessionId && w.info.sessionId !== report.sessionId && event !== 'SessionStart') return false;
+    if (!w.info.sessionId || w.info.sessionId !== report.sessionId) {
+      if (w.info.sessionId && w.info.sessionId !== report.sessionId) this.clearTask(w);
+      w.info.sessionId = report.sessionId;
+      this.persist();
+    }
+    w.bootBlocked = false;
+    switch (report.event) {
+      case 'SessionStart':
+        if (report.source === 'clear') this.clearTask(w);
+        w.info.activity = undefined;
+        if (w.info.status === 'starting' || w.info.status === 'needs_input') this.setStatus(w, 'idle');
+        break;
+      case 'UserPromptSubmit':
+        w.info.action = undefined;
+        if (report.prompt) {
+          w.info.activity = truncate(report.prompt, 80);
+          this.notePrompt(w, report.prompt);
+        }
+        this.setStatus(w, 'working');
+        break;
+      case 'PreToolUse':
+        w.info.activity = report.tool ? truncate(report.tool, 80) : 'Using a tool';
+        w.info.action = toolAction(report.tool);
+        this.noteTool(w, w.info.activity);
+        if (/(?:^|[._])(?:AskUserQuestion|ask_user_question|request_user_input)$/.test(report.tool ?? '')) this.setStatus(w, 'needs_input');
+        else if (w.info.status !== 'working') this.setStatus(w, 'working');
+        else this.emitUpdate(w);
+        break;
+      case 'PostToolUse':
+        if (w.info.status === 'needs_input') {
+          w.leftNeedsInputAt = Date.now();
+          this.setStatus(w, 'working');
+        }
+        break;
+      case 'Notification':
+        if (report.notificationType === 'permission_prompt') {
+          if (Date.now() - w.leftNeedsInputAt > LATE_PROMPT_GRACE_MS) this.setStatus(w, 'needs_input');
+        } else if (report.notificationType === 'idle_prompt') {
+          if (w.info.status === 'working') this.setStatus(w, 'done');
+        }
+        break;
+      case 'Stop':
+      case 'StopFailure':
+      case 'StopCancelled':
+        this.setStatus(w, 'done');
+        break;
+    }
+    this.emitUpdate(w);
+    this.persist();
+    return true;
+  }
+
+  /** Muse lifecycle hooks, isolated under the office's XDG dirs so they never edit ~/.config/muse. */
+  handleMuseHook(workerId: string, token: string, event: string, payload: unknown): boolean {
+    const w = this.workers.get(workerId);
+    if (!w || !w.pty || w.info.kind !== 'agent' || w.info.provider !== 'muse' || !safeEq(token, w.hookToken)) return false;
+    const report = normalizeMuseHook(event, payload);
+    if (!report) return false;
+    if (w.info.sessionId && w.info.sessionId !== report.sessionId && report.event !== 'SessionStart') return false;
+    if (!w.info.sessionId || w.info.sessionId !== report.sessionId) {
+      if (w.info.sessionId && w.info.sessionId !== report.sessionId) this.clearTask(w);
+      w.info.sessionId = report.sessionId;
+      this.persist();
+    }
+    w.bootBlocked = false;
+    switch (report.event) {
+      case 'SessionStart':
+        if (report.source === 'clear') this.clearTask(w);
+        w.info.activity = undefined;
+        if (w.info.status === 'starting' || w.info.status === 'needs_input') this.setStatus(w, 'idle');
+        if (w.pendingPrompt) {
+          const text = w.pendingPrompt;
+          w.pendingPrompt = undefined;
+          this.prompt(w.info.id, text);
+        }
+        break;
+      case 'UserPromptSubmit':
+        w.info.action = undefined;
+        if (report.prompt) {
+          w.info.activity = truncate(report.prompt, 80);
+          this.notePrompt(w, report.prompt);
+        }
+        this.setStatus(w, 'working');
+        break;
+      case 'PreToolUse':
+        w.info.activity = report.tool ? truncate(report.tool, 80) : 'Using a tool';
+        w.info.action = toolAction(report.tool);
+        this.noteTool(w, w.info.activity);
+        if (/(?:^|[._])(?:AskUserQuestion|ask_user_question|request_user_input)$/.test(report.tool ?? '')) this.setStatus(w, 'needs_input');
+        else if (w.info.status !== 'working') this.setStatus(w, 'working');
+        else this.emitUpdate(w);
+        break;
+      case 'PermissionRequest':
+        w.info.activity = `Wants permission: ${truncate(report.tool ?? 'tool', 80)}`;
+        this.setStatus(w, 'needs_input');
+        break;
+      case 'PostToolUse':
+      case 'PostToolUseFailure':
+        if (w.info.status === 'needs_input') {
+          w.leftNeedsInputAt = Date.now();
+          this.setStatus(w, 'working');
+        }
+        break;
+      case 'Notification':
+        if (report.notificationType === 'permission_prompt') {
+          if (Date.now() - w.leftNeedsInputAt > LATE_PROMPT_GRACE_MS) this.setStatus(w, 'needs_input');
+        } else if (report.notificationType === 'idle_prompt') {
+          if (w.info.status === 'working') this.setStatus(w, 'done');
+        }
+        break;
+      case 'Stop':
+      case 'StopFailure':
+        this.setStatus(w, 'done');
+        break;
+    }
+    this.emitUpdate(w);
+    this.persist();
+    return true;
+  }
+
   /** OpenCode plugin callback. The plugin has already filtered child sessions before this bridge. */
   handleOpenCodeHook(workerId: string, token: string, payload: unknown): boolean {
     const w = this.workers.get(workerId);
@@ -865,6 +1521,17 @@ export class WorkerManager {
       this.scanUsage(w);
       // Before the process goes, so the next office shows what it was doing, not how it was stopped.
       if (w.unsaved) this.saveScrollback(w);
+      // A DSH child cannot outlive the office the way a hosted PTY can: close its session quiescently,
+      // and let the next office mark it offline and resume it (see docs/dsh-acp-integration.md).
+      if (w.dsh) {
+        const session = w.dsh;
+        w.dsh = undefined;
+        try {
+          session.close();
+        } catch {
+          // already gone
+        }
+      }
       if (keep && w.pty?.id) continue;
       // A restart only takes this one down because it runs in-process: the next office carries on its turn.
       if (keep && midTurn(w)) w.interrupted = true;
@@ -883,6 +1550,13 @@ export class WorkerManager {
 
   private launch(w: Worker, prompt: string | undefined, resumeSessionId: string | undefined) {
     const { info } = w;
+    // Its folder was deleted meanwhile: it waits, marked lost, for someone to rebuild it or send it home.
+    if (this.checkLost(w)) {
+      clockWork(info, 'exited');
+      info.status = 'exited';
+      this.emitUpdate(w);
+      return;
+    }
     // The new terminal starts with what the last one showed (on a resume), or with what was saved
     // when the office last stopped, so earlier output is still there to scroll back to and search.
     const restarted = !w.term;
@@ -902,6 +1576,9 @@ export class WorkerManager {
     const isClaude = !isShell && provider === 'claude';
     const isOpenCode = !isShell && provider === 'opencode';
     const isCodex = !isShell && provider === 'codex';
+    const isGrok = !isShell && provider === 'grok';
+    const isMuse = !isShell && provider === 'muse';
+    const isDsh = !isShell && provider === 'dsh';
     const configured = !isShell && provider === this.defaultProvider;
     const station = DESK_BY_ID.get(info.deskId)?.station;
     const command = this.command(info);
@@ -909,6 +1586,9 @@ export class WorkerManager {
     let args = isShell ? (WIN && !process.env.SHELL ? [] : ['-l']) : configured ? [...this.agentArgs] : [];
     if (isClaude) {
       args.unshift('--settings', this.settingsPath);
+      // The office's MCP server: its workers, to list, hire, send home and tell (see office-workers.ts).
+      // Ahead of --settings, which ends the list --mcp-config takes.
+      if (this.claudeMcp) args.unshift('--mcp-config', this.claudeMcp);
       // A model/effort chosen for this worker overrides whatever --agent-args set office-wide.
       if (info.model) args.push('--model', info.model);
       if (info.effort) args.push('--effort', info.effort);
@@ -923,16 +1603,39 @@ export class WorkerManager {
       if (resumeSessionId) args.push('--session', resumeSessionId);
       if (prompt) args.push('--prompt', prompt);
     } else if (isCodex) {
-      args.push(...codexHookArgs(this.codexHook), '--no-alt-screen');
+      args.push(...codexHookArgs(this.codexHook), ...(this.mcpScript ? codexMcpArgs(this.mcpScript) : []), '--no-alt-screen');
       if (resumeSessionId) args.push('resume', resumeSessionId);
       if (prompt) args.push('--', prompt);
+    } else if (isGrok) {
+      args = withoutGrokLaunchArgs(args);
+      args.push('--no-alt-screen', '--trust', '--leader-socket', this.grokSocket);
+      if (resumeSessionId) {
+        args.push('--resume', resumeSessionId);
+      } else {
+        if (!info.sessionId) info.sessionId = randomUUID();
+        args.push('--session-id', info.sessionId);
+        if (info.model) args.push('--model', info.model);
+        if (info.effort) args.push('--effort', info.effort);
+      }
+      if (prompt) args.push('--', prompt);
+    } else if (isMuse) {
+      args = withoutMuseLaunchArgs(args);
+      args.push('--trust-workspace');
+      if (resumeSessionId) {
+        args.push('resume', resumeSessionId);
+        w.pendingPrompt = prompt;
+      } else {
+        if (info.model) args.push('--model', info.model);
+        if (info.effort) args.push('--reasoning-effort', info.effort);
+        if (prompt) args.push('--', prompt);
+      }
     }
     if (isCodex) {
       w.codexTools.clear();
       w.codexPending.clear();
       w.codexPermissionUnknown = false;
     }
-    if (isOpenCode || isCodex) {
+    if (isOpenCode || isCodex || isGrok || isMuse) {
       w.hookToken = randomBytes(16).toString('hex');
       w.openCodeError = false;
     }
@@ -944,23 +1647,57 @@ export class WorkerManager {
       AGENT_OFFICE_HOOK_URL: this.hook.url,
       AGENT_OFFICE_HOOK_TOKEN: w.hookToken,
     });
-    // A board agent reaches the queue with the office-queue command, whichever agent it runs.
-    if (station && this.queueBin) {
+    if (isGrok) {
+      env.GROK_HOME = this.grokHome;
+      if (this.grokAuthPath) env.GROK_AUTH_PATH = this.grokAuthPath;
+    }
+    if (isMuse) {
+      env.XDG_CONFIG_HOME = this.museConfigHome;
+      env.XDG_DATA_HOME = this.museDataHome;
+      env.XDG_STATE_HOME = this.museStateHome;
+    }
+    // Whichever agent it runs, a worker reaches the office's workers with office-workers, and a board
+    // agent the queue with office-queue.
+    if (this.officeBin) {
       // Windows spells it Path.
       const key = Object.keys(env).find((k) => k.toUpperCase() === 'PATH') ?? 'PATH';
-      env[key] = [this.queueBin, env[key]].filter(Boolean).join(path.delimiter);
+      env[key] = [this.officeBin, env[key]].filter(Boolean).join(path.delimiter);
     }
 
     const cwd = this.cwd(info);
+    // A workspace isn't a repository, but it's inside this floor's checkout: git run in it must not
+    // find that checkout (and switch its branch, say) instead of saying it's no repository.
+    if (info.repos?.length) env.GIT_CEILING_DIRECTORIES = [path.dirname(cwd), env.GIT_CEILING_DIRECTORIES].filter(Boolean).join(path.delimiter);
+    if (w.owner && this.runAs) {
+      if (isClaude && !this.runAs.claudeReady(w.owner)) {
+        this.startFailed(w, `whoever hired ${info.name} (${info.createdBy}) isn't signed in to Claude — they can sign in under ☰ → 🔐 Your sign-ins, then press R here`);
+        return;
+      }
+      this.runAs.apply(w.owner, env, [this.dir, cwd]);
+    }
     if (isCodex) w.codexHome = codexHome(cwd, env);
+
+    if (isDsh) {
+      // No PTY and no argv for prompts or resume: the office owns an ACP connection instead, and
+      // renders its updates into this same terminal (see dsh.ts).
+      env.AGENT_OFFICE_DSH_PROFILE = this.dshProfile;
+      const patch = writeDshPatch(this.dataDir);
+      const dshArgv = dshArgs({ profile: this.dshProfile, patches: [patch], extra: args });
+      const file = commandPath ?? shell;
+      const dshArgsFinal = commandPath ? dshArgv : shellRun(['exec', command, ...dshArgv].map((a, i) => (i < 2 ? a : shq(a))).join(' '));
+      this.launchDsh(w, term, { file, args: dshArgsFinal, cwd, env, resumeSessionId, prompt });
+      this.emitUpdate(w);
+      this.persist();
+      return;
+    }
+
     // The host keeps its own copy of the screen for the next office: it starts with the same history.
     const where = { cwd, env, cols: info.cols, rows: info.rows, prelude };
     let proc: Pty;
     try {
-      if (!existsSync(cwd)) throw new Error(`working directory is gone: ${cwd}`);
       if (isOpenCode) {
         env.AGENT_OFFICE_SESSION_ID = resumeSessionId ?? '';
-        env.OPENCODE_CONFIG_CONTENT = mergeOpenCodeConfigContent(env.OPENCODE_CONFIG_CONTENT, openCodePluginSpecifier(this.openCodePlugin));
+        env.OPENCODE_CONFIG_CONTENT = mergeOpenCodeConfigContent(env.OPENCODE_CONFIG_CONTENT, openCodePluginSpecifier(this.openCodePlugin), this.mcpScript ? openCodeMcp(this.mcpScript) : undefined);
       }
       if (isShell) {
         proc = this.host.spawn({ file: shell, args, ...where });
@@ -975,8 +1712,97 @@ export class WorkerManager {
       this.startFailed(w, (err as Error).message);
       return;
     }
-    if (!isClaude && !isCodex) info.status = 'idle';
+    if (!isClaude && !isCodex && !isGrok && !isMuse) {
+      clockWork(info, 'idle');
+      info.status = 'idle';
+    }
     this.follow(w, proc, term, resumeSessionId);
+    this.emitUpdate(w);
+    this.persist();
+  }
+
+  /**
+   * Starts (or resumes) a DeepSeek Harness worker over ACP. The session renders its transcript into
+   * the worker's terminal and reports status, acted-out actions, usage and its session id; the
+   * office answers permission requests from whoever is typing (see dsh.ts).
+   */
+  private launchDsh(w: Worker, term: HeadlessTerminal, options: { file: string; args: string[]; cwd: string; env: NodeJS.ProcessEnv; resumeSessionId?: string; prompt?: string }) {
+    const { info } = w;
+    const session = new DshSession(
+      {
+        file: options.file,
+        args: options.args,
+        cwd: options.cwd,
+        env: options.env,
+        model: info.model,
+        effort: info.effort,
+        resumeSessionId: options.resumeSessionId,
+        firstPrompt: options.prompt,
+      },
+      {
+        output: (data) => {
+          if (w.dsh !== session) return;
+          term.write(data);
+          w.screenDirty = true;
+          w.unsaved = true;
+          if (w.viewers.size) this.events.data(info.id, data, [...w.viewers.keys()]);
+        },
+        status: (status) => {
+          if (w.dsh === session) this.setStatus(w, status);
+        },
+        action: (action) => {
+          if (w.dsh !== session || info.action === action) return;
+          info.action = action;
+          this.emitUpdate(w);
+        },
+        usage: (usage) => {
+          if (w.dsh !== session) return;
+          info.usage = usage;
+          this.emitUpdate(w);
+          this.persist();
+        },
+        session: (sessionId) => {
+          if (w.dsh !== session || info.sessionId === sessionId) return;
+          info.sessionId = sessionId;
+          this.emitUpdate(w);
+          this.persist();
+        },
+        prompted: (text) => {
+          // A line typed into the terminal: there are no hooks for DSH, so the card learns from here.
+          if (w.dsh !== session) return;
+          this.notePrompt(w, text);
+          this.emitUpdate(w);
+        },
+        exit: (code, error, quiet) => this.dshExited(w, session, term, code, error, quiet),
+      },
+    );
+    w.dsh = session;
+    session.start();
+  }
+
+  /** A DeepSeek Harness child ended: while the office is up, its desk says so and R resumes it. */
+  private dshExited(w: Worker, session: DshSession, term: HeadlessTerminal, code: number | null, error: string | undefined, quiet: boolean) {
+    const { info } = w;
+    if (w.dsh !== session || this.workers.get(info.id) !== w) return; // sent home: stay quiet
+    w.dsh = undefined;
+    // The office is going down: the next office marks this worker offline and resumes it, so its
+    // status must stay as it was (see the restart difference in docs/dsh-acp-integration.md).
+    if (quiet || this.closing) return;
+    const note = error ? `\r\n\x1b[31m[DeepSeek Harness: ${terminalSafe(truncate(error, 300)).replace(/\n/g, ' ')}]\x1b[0m\r\n` : '';
+    if (note) {
+      term.write(note);
+      if (w.viewers.size) this.events.data(info.id, note, [...w.viewers.keys()]);
+    }
+    // It never got as far as a session: most often `dsh` is missing, or the profile will not boot.
+    if (error && !info.sessionId) this.events.toast(`Could not start ${this.command(info)}: ${truncate(error, 200)}`, 'error');
+    info.exitCode = code ?? -1;
+    info.status = 'exited';
+    const hint = info.sessionId ? ' — press R to resume' : '';
+    const msg = `\r\n\x1b[2m[${info.name} exited with code ${code ?? -1}${hint}]\x1b[0m\r\n`;
+    term.write(msg);
+    if (w.viewers.size) this.events.data(info.id, msg, [...w.viewers.keys()]);
+    w.screenDirty = true;
+    w.unsaved = true;
     this.emitUpdate(w);
     this.persist();
   }
@@ -997,6 +1823,7 @@ export class WorkerManager {
     this.setTitle(w, adopted.title);
     // A hook that came in since the office started already says how it's doing.
     if (info.status === 'offline') {
+      clockWork(info, saved.status);
       info.status = saved.status;
       info.acked = saved.acked;
       info.waitingSince = saved.waitingSince;
@@ -1036,7 +1863,7 @@ export class WorkerManager {
 
   private setTitle(w: Worker, title: string) {
     const clean = title.replace(/^[^\p{L}\p{N}]+/u, '').trim();
-    if (clean && clean !== w.info.title && !/^claude( code)?$/i.test(clean)) {
+    if (clean && clean !== w.info.title && !/^(claude( code)?|grok( build)?|muse( code)?)$/i.test(clean)) {
       w.info.title = clean;
       this.emitUpdate(w);
     }
@@ -1047,6 +1874,8 @@ export class WorkerManager {
     const { info } = w;
     const isClaude = info.kind === 'agent' && info.provider === 'claude';
     const isCodex = info.kind === 'agent' && info.provider === 'codex';
+    const isGrok = info.kind === 'agent' && info.provider === 'grok';
+    const isMuse = info.kind === 'agent' && info.provider === 'muse';
     w.pty = proc;
     proc.onData((data) => {
       term.write(data);
@@ -1076,6 +1905,7 @@ export class WorkerManager {
         return;
       }
       info.exitCode = exitCode;
+      clockWork(info, 'exited');
       info.status = 'exited';
       const hint = info.kind === 'shell' ? ' — press R to restart' : info.sessionId ? ' — press R to resume' : '';
       const msg = `\r\n\x1b[2m[${info.name} exited with code ${exitCode}${hint}]\x1b[0m\r\n`;
@@ -1085,16 +1915,21 @@ export class WorkerManager {
       w.unsaved = true;
       this.emitUpdate(w);
       this.persist();
+      void this.syncBranch(w);
     });
     // SessionStart fires as soon as Claude can take input. Still silent after a while means it is
     // blocked on a human: folder trust dialog, login, first-run onboarding. Flag it so it jumps.
     setTimeout(() => {
       if (info.status !== 'starting' || w.pty !== proc) return;
-      if (isClaude || isCodex) {
+      if (isClaude || isCodex || isGrok || isMuse) {
         w.bootBlocked = true;
         info.activity = isCodex
           ? 'Open the terminal: complete login and review Office hooks in /hooks'
-          : 'Waiting on a setup prompt (trust / login) — open the terminal';
+          : isGrok
+            ? 'Open the terminal: complete login if Grok asks'
+            : isMuse
+              ? 'Open the terminal: complete login if Muse asks'
+              : 'Waiting on a setup prompt (trust / login) — open the terminal';
         this.setStatus(w, 'needs_input');
       } else this.setStatus(w, 'idle');
     }, 12000);
@@ -1103,6 +1938,7 @@ export class WorkerManager {
   private startFailed(w: Worker, message: string) {
     const what = this.command(w.info);
     const msg = `\r\n\x1b[31mFailed to start ${what}: ${message}\x1b[0m\r\n`;
+    clockWork(w.info, 'exited');
     w.info.status = 'exited';
     w.info.exitCode = -1;
     w.term?.write(msg);
@@ -1119,8 +1955,10 @@ export class WorkerManager {
     return info.provider === this.defaultProvider ? this.agentCmd : info.provider ?? this.agentCmd;
   }
 
+  /** Where a worker works: its worktree, a workspace for a worker across repositories, or the project itself. */
   private cwd(info: WorkerInfo): string {
-    return info.worktree ? path.join(this.dir, info.worktree.path) : this.dir;
+    const rel = workspaceOf(info);
+    return rel ? path.join(this.dir, rel) : this.dir;
   }
 
   /** Hooks fire in bursts (every tool call); one read a moment later covers the whole burst. */
@@ -1169,6 +2007,7 @@ export class WorkerManager {
   private setStatus(w: Worker, status: WorkerStatus) {
     if (w.info.status === status) return;
     if (w.info.status === 'needs_input') w.leftNeedsInputAt = Date.now();
+    clockWork(w.info, status);
     w.info.status = status;
     // Done, idle or asleep: it's not acting anything out any more.
     if (status !== 'working' && status !== 'needs_input') w.info.action = undefined;
@@ -1180,7 +2019,9 @@ export class WorkerManager {
     } else w.info.acked = true;
     this.emitUpdate(w);
     // What a restarted office picks the worker back up as, should its terminal outlive this one.
-    if (w.pty?.id) this.persist();
+    if (w.pty?.id || w.dsh) this.persist();
+    // At rest: it may have made a branch of its own this turn, and opened its PR from there.
+    if (status === 'done' || status === 'idle') void this.syncBranch(w);
   }
 
   private syncViewers(w: Worker): boolean {
@@ -1298,25 +2139,31 @@ process.stdin.on('end', () => {
         `else ${shq(process.execPath)} ${shq(nodeHook)} ${event} >/dev/null 2>&1; fi; true`;
       hooks[event] = [{ ...(matcher ? { matcher } : {}), hooks: [{ type: 'command', command }] }];
     }
-    writeFileSync(this.settingsPath, JSON.stringify({ hooks }, null, 2), { mode: 0o600 });
+    // Looking at the office's workers doesn't need anyone's say-so; hiring and sending home still asks.
+    const permissions = { allow: MCP_READ_ONLY };
+    writeFileSync(this.settingsPath, JSON.stringify({ hooks, permissions }, null, 2), { mode: 0o600 });
   }
 
   /**
-   * Writes the office-queue command into the data dir's bin/, running bin/office-queue.js with the
-   * office's own node, and returns that directory. Rewritten on every start, so after an upgrade it
-   * runs the new install's script.
+   * Writes the office-queue and office-workers commands into the data dir's bin/, each running its
+   * script in bin/ with the office's own node, and returns that directory. Rewritten on every start,
+   * so after an upgrade they run the new install's scripts.
    */
-  private writeQueueCommand(): string | undefined {
-    const script = queueScript();
-    if (!script) return undefined;
+  private writeOfficeCommands(): string | undefined {
     const dir = path.join(this.dataDir, 'bin');
-    mkdirSync(dir, { recursive: true, mode: 0o700 });
-    const file = path.join(dir, 'office-queue');
-    writeFileSync(file, `#!/bin/sh\n# Agent Office's task queue, for the board agents (see bin/office-queue.js).\nexec ${shq(process.execPath)} ${shq(script)} "$@"\n`, { mode: 0o700 });
-    chmodSync(file, 0o700);
-    // cmd.exe and PowerShell find it by PATHEXT; Git Bash (Claude Code's shell there) runs the sh one.
-    if (WIN) writeFileSync(`${file}.cmd`, `@"${process.execPath}" "${script}" %*\r\n`);
-    return dir;
+    let wrote = false;
+    for (const [name, what] of [['office-queue', "Agent Office's task queue, for the board agents"], ['office-workers', "Agent Office's workers, for every worker"]]) {
+      const script = binScript(`${name}.js`);
+      if (!script) continue;
+      mkdirSync(dir, { recursive: true, mode: 0o700 });
+      const file = path.join(dir, name);
+      writeFileSync(file, `#!/bin/sh\n# ${what} (see bin/${name}.js).\nexec ${shq(process.execPath)} ${shq(script)} "$@"\n`, { mode: 0o700 });
+      chmodSync(file, 0o700);
+      // cmd.exe and PowerShell find it by PATHEXT; Git Bash (Claude Code's shell there) runs the sh one.
+      if (WIN) writeFileSync(`${file}.cmd`, `@"${process.execPath}" "${script}" %*\r\n`);
+      wrote = true;
+    }
+    return wrote ? dir : undefined;
   }
 
   private saveScrollback(w: Worker) {
@@ -1326,8 +2173,9 @@ process.stdin.on('end', () => {
   }
 
   private persist() {
-    const saved = [...this.workers.values()].map(({ info, tracker, codexTranscript, hookToken, pty, bootBlocked, interrupted }) => ({
+    const saved = [...this.workers.values()].map(({ info, owner, tracker, codexTranscript, hookToken, pty, bootBlocked, interrupted }) => ({
       id: info.id,
+      owner,
       kind: info.kind,
       provider: info.provider,
       model: info.model,
@@ -1339,14 +2187,16 @@ process.stdin.on('end', () => {
       createdAt: info.createdAt,
       prompt: info.prompt,
       worktree: info.worktree,
+      repos: info.repos,
       title: info.title,
       sessionId: info.sessionId,
       activity: info.activity,
       task: info.task,
       pr: info.pr,
       meeting: info.meeting,
+      workedMs: workedMs(info),
       tracker: info.kind === 'agent' ? tracker : undefined,
-      usage: info.provider === 'opencode' || info.provider === 'codex' ? info.usage : undefined,
+      usage: info.provider === 'opencode' || info.provider === 'codex' || info.provider === 'dsh' ? info.usage : undefined,
       codexTranscript: info.provider === 'codex' ? codexTranscript : undefined,
       // A terminal still running in the host, to pick back up after a restart. Its hooks keep the token.
       hookToken,
@@ -1364,13 +2214,13 @@ process.stdin.on('end', () => {
   private restore() {
     if (!existsSync(this.statePath)) return;
     try {
-      const saved = JSON.parse(readFileSync(this.statePath, 'utf8')) as (Partial<WorkerInfo> & { tracker?: unknown; codexTranscript?: unknown; hookToken?: unknown; pty?: any; midTurn?: unknown })[];
+      const saved = JSON.parse(readFileSync(this.statePath, 'utf8')) as (Partial<WorkerInfo> & { owner?: unknown; tracker?: unknown; codexTranscript?: unknown; hookToken?: unknown; pty?: any; midTurn?: unknown })[];
       for (const s of saved) {
         if (!s.id || !s.deskId || !DESK_BY_ID.has(s.deskId) || this.deskOccupied(s.deskId)) continue;
         const tracker = restoreTracker(s.tracker);
         const provider = s.kind === 'shell'
           ? undefined
-          : s.provider === 'claude' || s.provider === 'opencode' || s.provider === 'codex' || s.provider === 'custom'
+          : s.provider === 'claude' || s.provider === 'opencode' || s.provider === 'codex' || s.provider === 'grok' || s.provider === 'muse' || s.provider === 'dsh' || s.provider === 'custom'
             ? s.provider
             : tracker.transcript
               ? 'claude'
@@ -1379,8 +2229,8 @@ process.stdin.on('end', () => {
           id: s.id,
           kind: s.kind === 'shell' ? 'shell' : 'agent',
           provider,
-          model: provider === 'opencode' && isValidOpenCodeModel(s.model) ? s.model : provider === 'claude' && isClaudeModel(s.model) ? s.model : undefined,
-          effort: provider === 'claude' && isAgentEffort(s.effort) ? s.effort : undefined,
+          model: provider === 'opencode' && isValidOpenCodeModel(s.model) ? s.model : provider === 'claude' && isClaudeModel(s.model) ? s.model : provider === 'grok' && isValidGrokModel(s.model) ? s.model : provider === 'muse' && isValidMuseModel(s.model) ? s.model : provider === 'dsh' && isValidDshModel(s.model) ? s.model : undefined,
+          effort: (provider === 'claude' || provider === 'grok' || provider === 'muse' || provider === 'dsh') && isAgentEffort(s.effort) ? s.effort : undefined,
           deskId: s.deskId,
           name: s.name ?? 'Worker',
           color: s.color ?? COLORS[0],
@@ -1390,19 +2240,22 @@ process.stdin.on('end', () => {
           createdAt: s.createdAt ?? Date.now(),
           prompt: s.prompt,
           worktree: s.worktree,
+          repos: s.worktree ? validRepos(s.repos) : undefined,
           title: s.title,
           sessionId: s.sessionId,
           activity: s.activity,
           task: validTask(s.task),
           pr: s.pr && typeof s.pr.number === 'number' && typeof s.pr.url === 'string' ? { number: s.pr.number, url: s.pr.url } : undefined,
-          usage: provider === 'opencode' || provider === 'codex' ? reportedUsage(s.usage) : (provider === 'claude' || provider === 'custom') && tracker.transcript ? trackerUsage(tracker) : undefined,
+          usage: provider === 'opencode' || provider === 'codex' || provider === 'dsh' ? reportedUsage(s.usage) : (provider === 'claude' || provider === 'custom') && tracker.transcript ? trackerUsage(tracker) : undefined,
           cols: 100,
           rows: 30,
           viewers: [],
           viewerIds: [],
           meeting: typeof s.meeting === 'string' && DESK_BY_ID.get(s.deskId)?.room ? s.meeting : undefined,
+          workedMs: typeof s.workedMs === 'number' && Number.isFinite(s.workedMs) && s.workedMs > 0 ? s.workedMs : undefined,
         };
         const w = newWorker(info, tracker, typeof s.hookToken === 'string' && s.hookToken ? s.hookToken : undefined);
+        if (typeof s.owner === 'string' && s.owner) w.owner = s.owner;
         if (provider === 'codex' && typeof s.codexTranscript === 'string') w.codexTranscript = s.codexTranscript;
         w.screenDirty = false;
         if (typeof s.pty?.id === 'string') {
@@ -1555,11 +2408,11 @@ function screenText(term: HeadlessTerminal, from = 0): string {
   return out.join('\n');
 }
 
-/** bin/office-queue.js in the install this office runs from (src/server under tsx, dist/server/server built). */
-function queueScript(): string | undefined {
+/** A script in bin/ of the install this office runs from (src/server under tsx, dist/server/server built). */
+function binScript(name: string): string | undefined {
   let dir = path.dirname(fileURLToPath(import.meta.url));
   for (let i = 0; i < 4; i++, dir = path.dirname(dir)) {
-    const file = path.join(dir, 'bin', 'office-queue.js');
+    const file = path.join(dir, 'bin', name);
     if (existsSync(file)) return file;
   }
   return undefined;
@@ -1626,14 +2479,62 @@ function offlineBanner(info: WorkerInfo): string {
   return `\x1b[2m${info.name} is not running.${hint}\x1b[0m\r\n`;
 }
 
-/** Runs a command without blocking the office; rejects with the last lines of its stderr. */
-function run(cmd: string, args: string[], cwd: string, timeout = 30_000): Promise<string> {
+/** Runs a command without blocking the office (with `env`: as someone else); rejects with the last lines of its stderr. */
+function run(cmd: string, args: string[], cwd: string, timeout = 30_000, env?: Record<string, string>): Promise<string> {
   return new Promise((resolve, reject) => {
-    execFile(cmd, args, { cwd, encoding: 'utf8', timeout, maxBuffer: 4 * 1024 * 1024 }, (err, stdout, stderr) => {
+    execFile(cmd, args, { cwd, encoding: 'utf8', timeout, maxBuffer: 4 * 1024 * 1024, env }, (err, stdout, stderr) => {
       if (err) reject(new Error((stderr || err.message).trim().split('\n').filter(Boolean).slice(-2).join(' ') || `${cmd} failed`));
       else resolve(stdout.trim());
     });
   });
+}
+
+/**
+ * The folder each checkout gets in a workspace: its folder's name, made safe, with -2, -3… when two
+ * checkouts share one (owner-a/api and owner-b/api).
+ */
+export function workspaceNames(dirs: string[]): string[] {
+  const used = new Set<string>();
+  return dirs.map((dir) => {
+    let base = path.basename(path.resolve(dir)).replace(/[^\w.-]+/g, '-').replace(/^[.-]+/, '') || 'project';
+    if (WORKSPACE_FILES.has(base)) base = `${base}-repo`;
+    let name = base;
+    for (let n = 2; used.has(name.toLowerCase()); n++) name = `${base}-${n}`;
+    used.add(name.toLowerCase());
+    return name;
+  });
+}
+
+/** Takes a workspace folder away once its worktrees are gone: only the brief the office wrote, never anything else left in it. */
+function clearWorkspace(abs: string) {
+  try {
+    for (const name of readdirSync(abs)) if (WORKSPACE_FILES.has(name)) unlinkSync(path.join(abs, name));
+    rmdirSync(abs);
+  } catch {
+    // already gone, or something else is in it: it stays
+  }
+}
+
+/** The other repositories of a worker across repositories, as workers.json kept them. */
+function validRepos(raw: unknown): WorkerRepo[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const str = (v: unknown) => (typeof v === 'string' && v ? v : undefined);
+  const repos = raw.flatMap((r): WorkerRepo[] => {
+    const floor = str(r?.floor), name = str(r?.name), dir = str(r?.dir), rel = str(r?.path), branch = str(r?.branch), base = str(r?.base);
+    if (!floor || !name || !dir || !rel || !branch || !base) return [];
+    const pr = r.pr && typeof r.pr.number === 'number' && typeof r.pr.url === 'string' ? { number: r.pr.number, url: r.pr.url } : undefined;
+    return [{ floor, name, repo: str(r.repo), dir, path: rel, branch, base, from: str(r.from), pr }];
+  });
+  return repos.length ? repos : undefined;
+}
+
+/** owner/name of a checkout's origin on GitHub, when it has one. */
+function originRepo(dir: string): string | undefined {
+  try {
+    return normalizeRepo(execFileSync('git', ['remote', 'get-url', 'origin'], { cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 5000 }).trim());
+  } catch {
+    return undefined;
+  }
 }
 
 async function findOpenPr(branch: string, cwd: string): Promise<{ number: number; url: string } | undefined> {
@@ -1642,12 +2543,43 @@ async function findOpenPr(branch: string, cwd: string): Promise<{ number: number
   return found ? { number: found.number, url: found.url } : undefined;
 }
 
+/** `gh pr create` for a pushed branch; resolves to the new pull request. */
+async function createPr(branch: string, base: string | undefined, title: string, body: string, cwd: string, as?: GhAs): Promise<{ number: number; url: string }> {
+  const out = await gh(['pr', 'create', '--head', branch, ...(base ? ['--base', base] : []), '--title', title, '--body', body], cwd, 60_000, as?.env);
+  const url = out.trim().split('\n').pop() ?? '';
+  const number = Number(/\/pull\/(\d+)/.exec(url)?.[1]);
+  if (!number) throw new Error(`gh did not return a pull request URL (${truncate(out, 120)})`);
+  return { number, url };
+}
+
+/** owner/name#12 for a pull request on GitHub (which links it with its title), else its URL. */
+function prRef(url: string): string {
+  const m = /github\.com\/([^/]+\/[^/]+)\/pull\/(\d+)/.exec(url);
+  return m ? `${m[1]}#${m[2]}` : url;
+}
+
+/** The list of a change's pull requests across repositories, for the description of the one at `self`. */
+export function relatedBlock(prs: { repo?: string; url: string }[], self: string, branch: string): string {
+  const lines = prs.map((p) => `- ${p.repo ? `**${p.repo}**: ` : ''}${prRef(p.url)}${p.url === self ? ' (this one)' : ''}`);
+  return [RELATED_START, `**One change across ${prs.length} repositories**, each on \`${branch}\`: review and merge them together.`, '', ...lines, RELATED_END].join('\n');
+}
+
+/** A description with its list of related pull requests put in, or brought up to date. */
+export function withRelated(body: string, block: string): string {
+  const at = body.indexOf(RELATED_START);
+  const end = at < 0 ? -1 : body.indexOf(RELATED_END, at);
+  if (end >= 0) return body.slice(0, at) + block + body.slice(end + RELATED_END.length);
+  return body.trim() ? `${body.trimEnd()}\n\n${block}` : block;
+}
+
 /**
  * A pull request title and body from what the worker was asked to do. The title is the issue's
  * title when the task came off the issues board, else the task's first line; the body carries the
- * task, the commits, a "Closes #n" when the task asked for one, and which desk it came from.
+ * task, the commits, a "Closes #n" when the task asked for one, and which desk it came from. With
+ * `other`, it's for one of the other repositories of a worker across repositories: the issue is its
+ * own floor's (`home`), so this one only mentions it.
  */
-function draftPr(info: WorkerInfo, commits: string[], by: string): { title: string; body: string } {
+function draftPr(info: WorkerInfo, commits: string[], by: string, other?: { home?: string }): { title: string; body: string } {
   const task = (info.prompt ?? '').replace(/\r\n?/g, '\n').trim();
   const firstLine = task.split('\n').map((l) => l.trim()).find(Boolean) ?? '';
   // The issues board hands work over as: Work on GitHub issue #12: "Title".
@@ -1657,7 +2589,8 @@ function draftPr(info: WorkerInfo, commits: string[], by: string): { title: stri
   const parts: string[] = [];
   if (task) parts.push(`## Task\n\n${task.length > PR_TASK_MAX ? `${task.slice(0, PR_TASK_MAX)}…` : task}`);
   parts.push(`## Commits\n\n${commits.map((c) => `- \`${c.slice(0, c.indexOf(' '))}\` ${c.slice(c.indexOf(' ') + 1)}`).join('\n')}`);
-  if (closes) parts.push(`Closes #${closes}`);
+  if (closes && !other) parts.push(`Closes #${closes}`);
+  else if (closes && other?.home) parts.push(`Part of ${other.home}#${closes}`);
   parts.push(`_Opened from Agent Office by ${by} · ${info.name} at ${DESK_BY_ID.get(info.deskId)?.label ?? info.deskId}_`);
   return { title, body: parts.join('\n\n') };
 }
@@ -1680,4 +2613,26 @@ function safeEq(a: string, b: string) {
   let r = 0;
   for (let i = 0; i < a.length; i++) r |= a.charCodeAt(i) ^ b.charCodeAt(i);
   return r === 0;
+}
+
+/** How long a worker has spent working (ms), the stretch it's in now included. */
+export function workedMs(info: WorkerInfo, now = Date.now()): number | undefined {
+  const ms = (info.workedMs ?? 0) + (info.workingSince === undefined ? 0 : Math.max(0, now - info.workingSince));
+  return ms > 0 ? ms : undefined;
+}
+
+/** What starting a worker whose worktree was deleted (see WorkerInfo.lost) says instead. */
+function lostMessage(info: WorkerInfo): string {
+  return `${info.name}'s worktree ${workspaceOf(info)} was deleted outside agent-office — rebuild it or send ${info.name} home from its desk`;
+}
+
+/** Keeps count of how long a worker has worked (WorkerInfo.workedMs) as it goes from its status into `next`. */
+export function clockWork(info: WorkerInfo, next: WorkerStatus, now = Date.now()) {
+  if (next === 'working') {
+    info.workingSince ??= now;
+    return;
+  }
+  if (info.workingSince === undefined) return;
+  info.workedMs = workedMs(info, now);
+  info.workingSince = undefined;
 }

@@ -19,7 +19,7 @@ export interface MeetingWorkers {
   readonly officeDefault?: AgentChoice;
   list(): WorkerInfo[];
   /** Seats an agent at a chair of the meeting table, for meeting `meeting`, in its worktree when it has one. */
-  seat(deskId: string, by: string, prompt: string, provider: AgentProvider, model: string | undefined, effort: AgentEffort | undefined, meeting: { id: string; worktree?: Meeting['worktree'] }): WorkerInfo | string;
+  seat(deskId: string, by: string, prompt: string, provider: AgentProvider, model: string | undefined, effort: AgentEffort | undefined, meeting: { id: string; worktree?: Meeting['worktree'] }, owner?: string): WorkerInfo | string;
   prompt(id: string, text: string, by?: string): string | undefined;
   /** Keys into its terminal: Esc, to stop what it's doing. */
   write(id: string, data: string, by: string): void;
@@ -28,7 +28,8 @@ export interface MeetingWorkers {
 
 /** Git for the meeting's own worktree: made when it starts, tidied away once everyone has gone home. */
 export interface MeetingTrees {
-  create(slug: string): (Required<WorktreeRef> & { from?: string }) | string;
+  /** `note` says when commits the project has were left out of it (see Worktrees.create). */
+  create(slug: string): (Required<Omit<WorktreeRef, 'made'>> & { from?: string; note?: string }) | string;
   inspect(wt: WorktreeRef): Promise<WorktreeState>;
   remove(wt: WorktreeRef, cleanup: 'worktree' | 'all'): Promise<string | undefined>;
 }
@@ -39,7 +40,7 @@ export interface MeetingEvents {
   /** Why nobody may be hired right now (today's budget is spent), if that's so. */
   hiringPaused(): string | undefined;
   /** Posts the review panel's review on its pull request. Resolves to the review's URL. */
-  postReview(pr: number, file: string): Promise<string>;
+  postReview(pr: number, file: string, owner?: string): Promise<string>;
   /** One of the office's prompts as it has it now (rewritten in ⚙️ Settings, or the default). */
   prompt?(id: PromptId): string;
 }
@@ -114,7 +115,8 @@ export class MeetingRoom {
   }
 
   /** Calls a meeting. Returns why it couldn't, or undefined once everyone is sitting down. */
-  start(req: MeetingRequest, by: string): string | undefined {
+  /** `owner` is the account calling it: the workers run on its sign-ins, and a review panel's review is posted as it. */
+  start(req: MeetingRequest, by: string, owner?: string): string | undefined {
     if (this.current?.status === 'running') return `The meeting room is busy with “${this.current.title}”: stop that meeting first`;
     if (!isMeetingPattern(req.pattern)) return 'Unknown meeting pattern';
     const pattern = MEETING_PATTERNS[req.pattern];
@@ -126,8 +128,8 @@ export class MeetingRoom {
     const picked = req.provider !== undefined ? { provider: req.provider, model: req.model, effort: req.effort } : (this.workers.officeDefault ?? { provider: this.workers.defaultProvider });
     const provider = picked.provider;
     if (!isAgentProvider(provider) || (provider === 'custom' && this.workers.defaultProvider !== 'custom')) return 'Unknown agent provider';
-    const model = provider === 'claude' || provider === 'opencode' ? picked.model || undefined : undefined;
-    const effort = provider === 'claude' && isAgentEffort(picked.effort) ? picked.effort : undefined;
+    const model = provider === 'claude' || provider === 'opencode' || provider === 'grok' || provider === 'muse' || provider === 'dsh' ? picked.model || undefined : undefined;
+    const effort = (provider === 'claude' || provider === 'grok' || provider === 'muse' || provider === 'dsh') && isAgentEffort(picked.effort) ? picked.effort : undefined;
     const bad = validateWorkerModel('agent', provider, model) ?? validateWorkerEffort('agent', provider, effort);
     if (bad) return bad;
 
@@ -162,7 +164,9 @@ export class MeetingRoom {
     if (this.trees) {
       const made = this.trees.create(`meeting-${slug}-${id.slice(0, 4)}`);
       if (typeof made === 'string') return made;
-      worktree = made;
+      const { note, ...ref } = made;
+      worktree = ref;
+      if (note) this.events.toast(`🌿 The meeting's worktree ${note}`, 'info');
     }
     const m: Meeting = {
       id,
@@ -187,6 +191,7 @@ export class MeetingRoom {
       costKnown: true,
       status: 'running',
       calledBy: by,
+      ...(owner ? { owner } : {}),
       startedAt: Date.now(),
       worktree,
       // Without git, the notes go with the floor's other state.
@@ -197,7 +202,7 @@ export class MeetingRoom {
     for (let i = 0; i < m.seats.length; i++) {
       const part = first.find((p) => p.seat === i);
       const text = `${this.brief(m, i)}\n\n${part ? this.ask(m, part) : this.say('meeting.wait')}`;
-      const w = this.workers.seat(m.seats[i].deskId, `${by} (meeting)`, text, provider, model, effort, { id, worktree });
+      const w = this.workers.seat(m.seats[i].deskId, `${by} (meeting)`, text, provider, model, effort, { id, worktree }, owner);
       if (typeof w === 'string') {
         for (const s of m.seats) if (s.workerId) void this.workers.kill(s.workerId);
         if (worktree && this.trees) void this.trees.remove(worktree, 'all');
@@ -404,7 +409,7 @@ export class MeetingRoom {
     const cwd = this.cwd(m);
     if (m.pattern === 'review' && m.pr !== undefined) {
       const pr = m.pr;
-      void this.events.postReview(pr, path.join(cwd, m.output)).then(
+      void this.events.postReview(pr, path.join(cwd, m.output), m.owner).then(
         (url) => {
           m.review = { url };
           this.events.toast(`🔍 Posted the panel's review on PR #${pr}`, 'info');

@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { Ledger } from '../src/server/usage.js';
 import { CARRY_ON_PROMPT, WorkerManager, type WorkerEvents } from '../src/server/workers.js';
+import { Worktrees } from '../src/server/worktrees.js';
 import type { AgentProvider, WorkerInfo } from '../src/shared/protocol.js';
 import type { PromptSource } from '../src/server/prompts.js';
 import { PROMPTS } from '../src/shared/prompts.js';
@@ -19,6 +20,11 @@ type Invocation = {
     hookToken?: string;
     hookUrl?: string;
     opencodeConfig?: string;
+    grokHome?: string;
+    grokAuth?: string;
+    xdgConfig?: string;
+    xdgData?: string;
+    xdgState?: string;
     path?: string;
   };
 };
@@ -30,6 +36,8 @@ type Fixture = {
   claude: string;
   opencode: string;
   codex: string;
+  grok: string;
+  muse: string;
   custom: string;
   read(): Invocation[];
   close(): void;
@@ -48,6 +56,7 @@ function isolateProviderEnvironment(f: Fixture, t: { after(fn: () => void): void
     CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR,
     OPENCODE_CONFIG_DIR: process.env.OPENCODE_CONFIG_DIR,
     CODEX_HOME: process.env.CODEX_HOME,
+    GROK_HOME: process.env.GROK_HOME,
   };
   const home = path.join(f.root, 'home');
   const config = path.join(f.root, 'config');
@@ -64,6 +73,7 @@ function isolateProviderEnvironment(f: Fixture, t: { after(fn: () => void): void
   process.env.CLAUDE_CONFIG_DIR = path.join(config, 'claude');
   process.env.OPENCODE_CONFIG_DIR = path.join(config, 'opencode');
   process.env.CODEX_HOME = path.join(config, 'codex');
+  process.env.GROK_HOME = path.join(home, '.grok');
   // Delete by variable name only. Do not read or log any credential value.
   for (const key of Object.keys(process.env)) {
     // These are the office hook variables used by the in-process OpenCode
@@ -94,6 +104,11 @@ const record = (extra = {}) => fs.appendFileSync(log, JSON.stringify({
     hookToken: process.env.AGENT_OFFICE_HOOK_TOKEN,
     hookUrl: process.env.AGENT_OFFICE_HOOK_URL,
     opencodeConfig: process.env.OPENCODE_CONFIG_CONTENT,
+    grokHome: process.env.GROK_HOME,
+    grokAuth: process.env.GROK_AUTH_PATH,
+    xdgConfig: process.env.XDG_CONFIG_HOME,
+    xdgData: process.env.XDG_DATA_HOME,
+    xdgState: process.env.XDG_STATE_HOME,
     path: process.env.PATH,
   },
 }) + '\\n');
@@ -123,15 +138,21 @@ function fixture(): Fixture {
   const opencode = path.join(bin, 'opencode');
   const custom = path.join(bin, 'custom-agent');
   const codex = path.join(bin, 'codex');
+  const grok = path.join(bin, 'grok');
+  const muse = path.join(bin, 'muse');
   mkdirSync(data, { recursive: true });
   mkdirSync(bin, { recursive: true });
   writeFileSync(claude, fakeAgent, { mode: 0o700 });
   writeFileSync(opencode, fakeAgent, { mode: 0o700 });
   writeFileSync(custom, fakeAgent, { mode: 0o700 });
   writeFileSync(codex, fakeAgent, { mode: 0o700 });
+  writeFileSync(grok, fakeAgent, { mode: 0o700 });
+  writeFileSync(muse, fakeAgent, { mode: 0o700 });
   chmodSync(claude, 0o700);
   chmodSync(opencode, 0o700);
   chmodSync(custom, 0o700);
+  chmodSync(grok, 0o700);
+  chmodSync(muse, 0o700);
   writeFileSync(log, '');
   return {
     root,
@@ -140,6 +161,8 @@ function fixture(): Fixture {
     claude,
     opencode,
     codex,
+    grok,
+    muse,
     custom,
     read() {
       if (!existsSync(log)) return [];
@@ -202,7 +225,7 @@ test('Claude workers use the configured executable, pass prompts and resume ids,
 
   const workers = manager(f, f.claude, updates);
   t.after(() => workers.shutdown());
-  const worker = workers.spawn('desk-1', 'test', 'initial Claude prompt');
+  const worker = workers.spawn('desk-2', 'test', 'initial Claude prompt');
   assert.equal(typeof worker, 'object');
   if (typeof worker === 'string') return;
   const first = await waitFor(() => f.read(), (records) => records.some((r) => r.kind === 'claude' && r.args.includes('--settings')));
@@ -227,7 +250,7 @@ test('Claude workers use the configured executable, pass prompts and resume ids,
   assert.equal(workers.get(worker.id)?.activity, 'follow-up');
 
   // Selecting the alternate provider uses its binary with a clean argument set.
-  const alternate = workers.spawn('desk-4', 'test', 'alternate provider prompt', false, 'agent', 'opencode');
+  const alternate = workers.spawn('desk-7', 'test', 'alternate provider prompt', false, 'agent', 'opencode');
   assert.equal(typeof alternate, 'object');
   if (typeof alternate !== 'string') {
     const alternateRecords = await waitFor(() => f.read(), (records) => records.some((r) => r.kind === 'opencode'));
@@ -258,7 +281,7 @@ test('OpenCode workers use OpenCode-only hooks/config, never invoke Claude namin
   const workers = manager(f, f.opencode, updates);
   t.after(() => workers.shutdown());
   assert.equal(workers.defaultProvider, 'opencode');
-  const worker = workers.spawn('desk-2', 'test', 'initial OpenCode prompt');
+  const worker = workers.spawn('desk-4', 'test', 'initial OpenCode prompt');
   assert.equal(typeof worker, 'object');
   if (typeof worker === 'string') return;
 
@@ -272,6 +295,10 @@ test('OpenCode workers use OpenCode-only hooks/config, never invoke Claude namin
   assert.equal(firstWorker.env.workerId, worker.id);
   assert.ok(firstWorker.env.hookToken);
   assert.ok(firstWorker.env.opencodeConfig?.includes('agent-office-opencode'));
+  // The office's MCP server, which OpenCode runs with the worker's environment.
+  const mcp = JSON.parse(firstWorker.env.opencodeConfig!).mcp?.['agent-office'];
+  assert.deepEqual(mcp?.command?.slice(-1), ['mcp']);
+  assert.ok(mcp?.command?.[1].endsWith(path.join('bin', 'office-workers.js')));
   assert.equal(first.filter((r) => r.kind === 'claude').length, 0, 'OpenCode must not launch the Claude task namer');
 
   const transcript = path.join(f.root, 'must-not-be-read.jsonl');
@@ -345,7 +372,7 @@ test('OpenCode model overrides configured model flags on first launch and is omi
 
   const workers = manager(f, f.opencode, updates, ['--model', 'old/model', '--keep', 'yes', '-m', 'older/model']);
   t.after(() => workers.shutdown());
-  const worker = workers.spawn('desk-1', 'test', 'modelled prompt', false, 'agent', 'opencode', 'openai/gpt-5/nested');
+  const worker = workers.spawn('desk-2', 'test', 'modelled prompt', false, 'agent', 'opencode', 'openai/gpt-5/nested');
   assert.equal(typeof worker, 'object');
   if (typeof worker === 'string') return;
   const first = await waitFor(() => f.read(), (records) => records.some((r) => r.kind === 'opencode'));
@@ -382,7 +409,7 @@ test('OpenCode keeps configured model flags when no explicit model is selected, 
 
   const workers = manager(f, f.opencode, updates, ['--model', 'configured/model', '--keep', 'yes']);
   t.after(() => workers.shutdown());
-  const worker = workers.spawn('desk-1', 'test', 'configured prompt');
+  const worker = workers.spawn('desk-2', 'test', 'configured prompt');
   assert.equal(typeof worker, 'object');
   if (typeof worker === 'string') return;
   const first = await waitFor(() => f.read(), (records) => records.some((r) => r.kind === 'opencode'));
@@ -400,25 +427,27 @@ test('OpenCode keeps configured model flags when no explicit model is selected, 
   assert.ok(resumed.args.includes('--keep'));
 });
 
-test('workers reject models for non-OpenCode/Claude providers and malformed model ids', (t) => {
+test('workers reject models for providers that cannot select one and malformed model ids', (t) => {
   const f = fixture();
   t.after(() => f.close());
   const workers = manager(f, f.claude, []);
   t.after(() => workers.shutdown());
-  assert.match(workers.spawn('desk-1', 'test', 'bad', false, 'agent', 'claude', 'openai/gpt-5') as string, /model/i);
-  assert.match(workers.spawn('desk-2', 'test', 'bad', false, 'agent', 'opencode', 'gpt-5') as string, /model|format|provider/i);
-  assert.match(workers.spawn('desk-3', 'test', 'bad', false, 'agent', 'opencode', 'openai/gpt 5') as string, /model|format|whitespace/i);
-  assert.match(workers.spawn('desk-4', 'test', 'bad', false, 'shell', undefined, 'openai/gpt-5') as string, /shell|model/i);
+  assert.match(workers.spawn('desk-2', 'test', 'bad', false, 'agent', 'claude', 'openai/gpt-5') as string, /model/i);
+  assert.match(workers.spawn('desk-4', 'test', 'bad', false, 'agent', 'opencode', 'gpt-5') as string, /model|format|provider/i);
+  assert.match(workers.spawn('desk-5', 'test', 'bad', false, 'agent', 'opencode', 'openai/gpt 5') as string, /model|format|whitespace/i);
+  assert.match(workers.spawn('desk-7', 'test', 'bad', false, 'agent', 'grok', 'openai/gpt-5') as string, /model/i);
+  assert.match(workers.spawn('desk-8', 'test', 'bad', false, 'agent', 'muse', 'openai/gpt-5') as string, /model/i);
+  assert.match(workers.spawn('desk-9', 'test', 'bad', false, 'shell', undefined, 'openai/gpt-5') as string, /shell|model/i);
 });
 
-test('workers reject reasoning effort for non-Claude providers and unknown levels', (t) => {
+test('workers reject reasoning effort for providers without one and unknown levels', (t) => {
   const f = fixture();
   t.after(() => f.close());
   const workers = manager(f, f.claude, []);
   t.after(() => workers.shutdown());
-  assert.match(workers.spawn('desk-1', 'test', 'bad', false, 'agent', 'claude', undefined, 'overdrive' as any) as string, /effort/i);
-  assert.match(workers.spawn('desk-2', 'test', 'bad', false, 'agent', 'opencode', undefined, 'high' as any) as string, /effort|Claude/i);
-  assert.match(workers.spawn('desk-3', 'test', 'bad', false, 'shell', undefined, undefined, 'high' as any) as string, /shell|effort/i);
+  assert.match(workers.spawn('desk-2', 'test', 'bad', false, 'agent', 'claude', undefined, 'overdrive' as any) as string, /effort/i);
+  assert.match(workers.spawn('desk-4', 'test', 'bad', false, 'agent', 'opencode', undefined, 'high' as any) as string, /effort|Claude/i);
+  assert.match(workers.spawn('desk-5', 'test', 'bad', false, 'shell', undefined, undefined, 'high' as any) as string, /shell|effort/i);
 });
 
 test('an explicit Claude model/effort overrides --agent-args and persists across resume', async (t) => {
@@ -439,7 +468,7 @@ test('an explicit Claude model/effort overrides --agent-args and persists across
 
   const workers = manager(f, f.claude, updates, ['--model', 'opus']);
   t.after(() => workers.shutdown());
-  const worker = workers.spawn('desk-1', 'test', 'haiku task', false, 'agent', 'claude', 'haiku', 'high');
+  const worker = workers.spawn('desk-2', 'test', 'haiku task', false, 'agent', 'claude', 'haiku', 'high');
   assert.equal(typeof worker, 'object');
   if (typeof worker === 'string') return;
   assert.equal(workers.get(worker.id)?.model, 'haiku');
@@ -482,7 +511,7 @@ test('a worker hired on Fable launches with --model fable and keeps it across a 
 
   const workers = manager(f, f.claude, [], ['--model', 'opus']);
   t.after(() => workers.shutdown());
-  const worker = workers.spawn('desk-1', 'test', 'fable task', false, 'agent', 'claude', 'fable');
+  const worker = workers.spawn('desk-2', 'test', 'fable task', false, 'agent', 'claude', 'fable');
   assert.equal(typeof worker, 'object');
   if (typeof worker === 'string') return;
   const records = await waitFor(() => f.read(), (rs) => rs.some((r) => r.kind === 'claude'));
@@ -508,10 +537,10 @@ test('provider and hook boundaries reject invalid combinations', async (t) => {
     if (previousLog === undefined) delete process.env.FAKE_AGENT_LOG;
     else process.env.FAKE_AGENT_LOG = previousLog;
   });
-  const invalidProvider = workers.spawn('desk-3', 'test', undefined, false, 'agent', 'custom' as AgentProvider);
+  const invalidProvider = workers.spawn('desk-5', 'test', undefined, false, 'agent', 'custom' as AgentProvider);
   assert.equal(typeof invalidProvider, 'string');
   assert.match(invalidProvider as string, /configured|provider|executable/i);
-  const claude = workers.spawn('desk-3', 'test', 'claude task');
+  const claude = workers.spawn('desk-5', 'test', 'claude task');
   assert.equal(typeof claude, 'object');
   if (typeof claude === 'string') return;
   assert.equal(workers.handleOpenCodeHook(claude.id, 'any-token', { type: 'session', sessionId: 'wrong', status: 'starting' }), false);
@@ -530,7 +559,7 @@ test('provider and hook boundaries reject invalid combinations', async (t) => {
     customFixture.close();
   });
   assert.equal(customWorkers.defaultProvider, 'custom');
-  const custom = customWorkers.spawn('desk-4', 'test', 'custom wrapper task');
+  const custom = customWorkers.spawn('desk-7', 'test', 'custom wrapper task');
   assert.equal(typeof custom, 'object');
   if (typeof custom !== 'string') {
     const invocation = await waitFor(() => customFixture.read(), (records) => records.some((r) => r.kind === 'custom-agent'));
@@ -549,7 +578,7 @@ test('OpenCode usage snapshots replace totals, persist across restart, and never
   const book = ledger(f.data);
   const workers = new WorkerManager(f.root, f.data, f.opencode, [], { url: 'http://127.0.0.1:1', token: '' }, events([]), book);
   t.after(() => workers.shutdown());
-  const worker = workers.spawn('desk-1', 'test');
+  const worker = workers.spawn('desk-2', 'test');
   assert.notEqual(typeof worker, 'string'); if (typeof worker === 'string') return;
   const invocations = await waitFor(f.read, x => x.some(r => r.kind === 'opencode'));
   const token = invocations.find(r => r.kind === 'opencode')!.env.hookToken!;
@@ -590,13 +619,16 @@ test('Codex workers preserve native approvals, follow authenticated root hooks, 
   const book = ledger(f.data);
   const workers = new WorkerManager(f.root, f.data, f.claude, ['--claude-only'], { url: 'http://127.0.0.1:1', token: '' }, events([]), book);
   t.after(() => workers.shutdown());
-  const worker = workers.spawn('desk-1', 'test', '- fix the login', false, 'agent', 'codex');
+  const worker = workers.spawn('desk-2', 'test', '- fix the login', false, 'agent', 'codex');
   assert.notEqual(typeof worker, 'string'); if (typeof worker === 'string') return;
   const calls = await waitFor(f.read, x => x.some(r => r.kind === 'codex'));
   const first = calls.find(r => r.kind === 'codex')!;
   const token = first.env.hookToken!;
   assert.equal(worker.status, 'starting');
   assert.ok(first.args.includes('--no-alt-screen'));
+  // The office's MCP server, with the office's variables passed on to it, which Codex doesn't do unasked.
+  assert.ok(first.args.some((a) => a.startsWith('mcp_servers.agent-office.args=') && a.includes('office-workers.js')));
+  assert.ok(first.args.includes('mcp_servers.agent-office.env_vars=["AGENT_OFFICE_HOOK_URL","AGENT_OFFICE_WORKER_ID","AGENT_OFFICE_HOOK_TOKEN"]'));
   assert.deepEqual(first.args.slice(-2), ['--', '- fix the login']);
   assert.equal(first.args.some(a => /bypass|--yolo|--claude-only|--settings/.test(a)), false);
   assert.equal(first.args.filter(a => a.startsWith('hooks.')).length, 7);
@@ -640,6 +672,161 @@ test('Codex workers preserve native approvals, follow authenticated root hooks, 
 });
 
 
+test('Grok workers isolate GROK_HOME, follow authenticated hooks, and resume their session', async (t) => {
+  const f = fixture();
+  isolateProviderEnvironment(f, t);
+  const oldLog = process.env.FAKE_AGENT_LOG;
+  process.env.FAKE_AGENT_LOG = f.log;
+  t.after(() => { if (oldLog === undefined) delete process.env.FAKE_AGENT_LOG; else process.env.FAKE_AGENT_LOG = oldLog; f.close(); });
+  const book = ledger(f.data);
+  const workers = new WorkerManager(f.root, f.data, f.claude, ['--claude-only'], { url: 'http://127.0.0.1:1', token: '' }, events([]), book);
+  t.after(() => workers.shutdown());
+  const worker = workers.spawn('desk-2', 'test', '- fix the login', false, 'agent', 'grok', 'grok-4.6', 'high');
+  assert.notEqual(typeof worker, 'string'); if (typeof worker === 'string') return;
+  const calls = await waitFor(f.read, x => x.some(r => r.kind === 'grok'));
+  const first = calls.find(r => r.kind === 'grok')!;
+  const token = first.env.hookToken!;
+  assert.equal(worker.status, 'starting');
+  assert.equal(worker.model, 'grok-4.6');
+  assert.equal(worker.effort, 'high');
+  assert.ok(first.args.includes('--no-alt-screen'));
+  assert.ok(first.args.includes('--trust'));
+  assert.ok(first.args.includes('--session-id'));
+  assert.ok(first.args.includes('--model'));
+  assert.ok(first.args.includes('grok-4.6'));
+  assert.ok(first.args.includes('--effort'));
+  assert.ok(first.args.includes('high'));
+  assert.deepEqual(first.args.slice(-2), ['--', '- fix the login']);
+  assert.equal(first.args.includes('--claude-only'), false);
+  assert.equal(first.env.grokHome, path.join(f.data, 'grok-home'));
+  assert.equal(calls.some(r => r.kind === 'claude'), false);
+  const sessionId = worker.sessionId!;
+  assert.match(sessionId, /^[0-9a-f-]{36}$/i);
+  const hook = (event: string, extra = {}) => workers.handleGrokHook(worker.id, token, event, { sessionId, ...extra });
+  assert.equal(workers.handleGrokHook(worker.id, 'wrong', 'SessionStart', { sessionId }), false);
+  assert.equal(hook('SessionStart', { source: 'startup' }), true);
+  assert.equal(worker.status, 'idle');
+  assert.equal(hook('UserPromptSubmit', { prompt: 'Implement the actual task' }), true);
+  assert.equal(worker.status, 'working');
+  assert.equal(hook('PreToolUse', { toolName: 'run_terminal_command' }), true);
+  assert.equal(hook('Notification', { notificationType: 'permission_prompt' }), true);
+  assert.equal(worker.status, 'needs_input');
+  assert.equal(hook('Stop', { subagentType: 'explore' }), false);
+  assert.equal(worker.status, 'needs_input');
+  assert.equal(hook('Stop'), true);
+  assert.equal(worker.status, 'done');
+  assert.equal(workers.handleHook(worker.id, token, 'Stop', { session_id: 'claude' }), false);
+  assert.equal(workers.handleCodexHook(worker.id, token, 'Stop', { session_id: sessionId }), false);
+  assert.equal(worker.usage, undefined);
+  assert.equal(book.state().total.calls, 0);
+  workers.shutdown();
+  const restored = manager(f, f.claude, [], []);
+  t.after(() => restored.shutdown());
+  await restored.start();
+  const nextCalls = await waitFor(f.read, x => x.filter(r => r.kind === 'grok' && !r.stdin).length >= 2);
+  const next = nextCalls.filter(r => r.kind === 'grok' && !r.stdin).at(-1)!;
+  assert.ok(next.args.includes('--resume'));
+  assert.ok(next.args.includes(sessionId));
+  assert.equal(next.args.includes('--session-id'), false);
+  assert.equal(next.args.includes('--model'), false);
+  assert.notEqual(next.env.hookToken, token);
+  assert.equal(restored.get(worker.id)?.provider, 'grok');
+  assert.equal(restored.get(worker.id)?.model, 'grok-4.6');
+  assert.equal(restored.get(worker.id)?.effort, 'high');
+  assert.equal(restored.handleGrokHook(worker.id, token, 'Stop', { sessionId }), false);
+  assert.equal(restored.handleGrokHook(worker.id, next.env.hookToken!, 'SessionStart', { sessionId, source: 'resume' }), true);
+  assert.equal(restored.get(worker.id)?.status, 'idle');
+});
+
+
+test('Muse workers isolate XDG, follow authenticated hooks, resume by uuid, and paste a follow-up prompt', async (t) => {
+  const f = fixture();
+  isolateProviderEnvironment(f, t);
+  const oldLog = process.env.FAKE_AGENT_LOG;
+  process.env.FAKE_AGENT_LOG = f.log;
+  t.after(() => {
+    if (oldLog === undefined) delete process.env.FAKE_AGENT_LOG; else process.env.FAKE_AGENT_LOG = oldLog;
+    delete process.env.FAKE_AGENT_EXIT_MS;
+    f.close();
+  });
+  const book = ledger(f.data);
+  const workers = new WorkerManager(f.root, f.data, f.claude, ['--claude-only'], { url: 'http://127.0.0.1:1', token: '' }, events([]), book);
+  t.after(() => workers.shutdown());
+  const worker = workers.spawn('desk-2', 'test', '- fix the login', false, 'agent', 'muse', 'muse-spark-1.3-contributor', 'high');
+  assert.notEqual(typeof worker, 'string'); if (typeof worker === 'string') return;
+  const calls = await waitFor(f.read, x => x.some(r => r.kind === 'muse'));
+  const first = calls.find(r => r.kind === 'muse')!;
+  const token = first.env.hookToken!;
+  assert.equal(worker.status, 'starting');
+  assert.equal(worker.model, 'muse-spark-1.3-contributor');
+  assert.equal(worker.effort, 'high');
+  assert.equal(worker.sessionId, undefined);
+  assert.ok(first.args.includes('--trust-workspace'));
+  assert.ok(first.args.includes('--model'));
+  assert.ok(first.args.includes('muse-spark-1.3-contributor'));
+  assert.ok(first.args.includes('--reasoning-effort'));
+  assert.ok(first.args.includes('high'));
+  assert.deepEqual(first.args.slice(-2), ['--', '- fix the login']);
+  assert.equal(first.args.includes('resume'), false);
+  assert.equal(first.args.includes('--yolo'), false);
+  assert.equal(first.args.includes('--claude-only'), false);
+  assert.equal(first.env.xdgConfig, path.join(f.data, 'muse-home', 'config'));
+  assert.equal(first.env.xdgData, path.join(f.data, 'muse-home', 'share'));
+  assert.equal(first.env.xdgState, path.join(f.data, 'muse-home', 'state'));
+  assert.equal(calls.some(r => r.kind === 'claude'), false);
+  const sessionId = 'muse-root';
+  const hook = (event: string, extra = {}) => workers.handleMuseHook(worker.id, token, event, { session_id: sessionId, ...extra });
+  assert.equal(workers.handleMuseHook(worker.id, 'wrong', 'SessionStart', { session_id: sessionId }), false);
+  assert.equal(hook('SessionStart', { source: 'startup' }), true);
+  assert.equal(worker.status, 'idle');
+  assert.equal(worker.sessionId, sessionId);
+  assert.equal(hook('UserPromptSubmit', { prompt: 'Implement the actual task' }), true);
+  assert.equal(worker.status, 'working');
+  assert.equal(hook('PreToolUse', { tool_name: 'run_terminal_command' }), true);
+  assert.equal(hook('PermissionRequest', { tool_name: 'shell' }), true);
+  assert.equal(worker.status, 'needs_input');
+  assert.equal(hook('PostToolUseFailure', { tool_name: 'shell' }), true);
+  assert.equal(worker.status, 'working');
+  assert.equal(hook('Stop', { subagent_type: 'explore' }), false);
+  assert.equal(worker.status, 'working');
+  assert.equal(hook('Stop'), true);
+  assert.equal(worker.status, 'done');
+  assert.equal(workers.handleHook(worker.id, token, 'Stop', { session_id: 'claude' }), false);
+  assert.equal(workers.handleGrokHook(worker.id, token, 'Stop', { sessionId }), false);
+  assert.equal(worker.usage, undefined);
+  assert.equal(book.state().total.calls, 0);
+  workers.shutdown();
+  process.env.FAKE_AGENT_EXIT_MS = '1500';
+  const restored = manager(f, f.claude, [], []);
+  t.after(() => restored.shutdown());
+  await restored.start();
+  const nextCalls = await waitFor(f.read, x => x.filter(r => r.kind === 'muse' && !r.stdin).length >= 2);
+  const next = nextCalls.filter(r => r.kind === 'muse' && !r.stdin).at(-1)!;
+  assert.ok(next.args.includes('--trust-workspace'));
+  assert.ok(next.args.includes('resume'));
+  assert.ok(next.args.includes(sessionId));
+  assert.equal(next.args.includes('--model'), false);
+  assert.equal(next.args.includes('- fix the login'), false);
+  assert.notEqual(next.env.hookToken, token);
+  assert.equal(restored.get(worker.id)?.provider, 'muse');
+  assert.equal(restored.get(worker.id)?.model, 'muse-spark-1.3-contributor');
+  assert.equal(restored.get(worker.id)?.effort, 'high');
+  assert.equal(restored.handleMuseHook(worker.id, token, 'Stop', { session_id: sessionId }), false);
+  assert.equal(restored.handleMuseHook(worker.id, next.env.hookToken!, 'SessionStart', { session_id: sessionId, source: 'resume' }), true);
+  assert.equal(restored.get(worker.id)?.status, 'idle');
+  await waitFor(() => restored.get(worker.id)?.status, (status) => status === 'exited');
+  delete process.env.FAKE_AGENT_EXIT_MS;
+  assert.equal(restored.resume(worker.id, 'follow-up from the queue'), undefined);
+  const pastedLaunch = await waitFor(f.read, x => x.filter(r => r.kind === 'muse' && !r.stdin).length >= 3);
+  const launched = pastedLaunch.filter(r => r.kind === 'muse' && !r.stdin).at(-1)!;
+  assert.ok(launched.args.includes('resume'));
+  assert.ok(launched.args.includes(sessionId));
+  assert.equal(launched.args.includes('follow-up from the queue'), false);
+  assert.equal(restored.handleMuseHook(worker.id, launched.env.hookToken!, 'SessionStart', { session_id: sessionId, source: 'resume' }), true);
+  await waitFor(f.read, x => x.some(r => r.kind === 'muse' && r.stdin?.includes('follow-up from the queue') === true));
+});
+
+
 test('Codex token snapshots survive restart, preserve permissions, and stay outside Claude spend', async (t) => {
   const f = fixture();
   isolateProviderEnvironment(f, t);
@@ -650,7 +837,7 @@ test('Codex token snapshots survive restart, preserve permissions, and stay outs
   const book = ledger(f.data);
   const workers = new WorkerManager(f.root, f.data, f.codex, [], { url: 'http://127.0.0.1:1', token: '' }, events([]), book);
   t.after(() => workers.shutdown());
-  const worker = workers.spawn('desk-1', 'test');
+  const worker = workers.spawn('desk-2', 'test');
   assert.notEqual(typeof worker, 'string'); if (typeof worker === 'string') return;
   const calls = await waitFor(f.read, x => x.some(r => r.kind === 'codex'));
   const token = calls.find(r => r.kind === 'codex')!.env.hookToken!;
@@ -713,7 +900,7 @@ test('a board agent is hired with its brief on the first prompt, then prompted, 
   // Each start of the agent, not what it reads from its terminal afterwards.
   const launches = () => f.read().filter((r) => r.kind === 'claude' && r.args.includes('--settings') && r.stdin === undefined);
 
-  assert.match(workers.station('desk-1', 'test', 'file an issue') as string, /no agent/i);
+  assert.match(workers.station('desk-2', 'test', 'file an issue') as string, /no agent/i);
   assert.match(workers.station('station-issues', 'test', '   ') as string, /empty/i);
   assert.match(workers.spawn('station-issues', 'test', undefined, false, 'shell') as string, /shell/i);
 
@@ -788,7 +975,7 @@ test('a worker nobody picked a model for starts on the office default, and a boa
   assert.deepEqual([flag(first.args, '--model'), flag(first.args, '--effort')], ['sonnet', 'low']);
 
   // Picked at the desk, the pick wins, down to "the provider's own model".
-  const desk = workers.spawn('desk-1', 'Ada', 'Fix it', false, 'agent', 'claude');
+  const desk = workers.spawn('desk-2', 'Ada', 'Fix it', false, 'agent', 'claude');
   assert.equal(typeof desk, 'object');
   if (typeof desk === 'string') return;
   assert.deepEqual([desk.provider, desk.model, desk.effort], ['claude', undefined, undefined]);
@@ -845,9 +1032,9 @@ test('the queue agent is launched without file-editing tools, and board agents g
   assert.equal(second.args.at(-1), 'Also bump the version');
   assert.ok(onPath(second));
 
-  // The other board agents keep their tools but get the command; a desk worker gets neither.
+  // The other board agents keep their tools; they, and a desk worker, get the commands all the same.
   const pulls = workers.station('station-pulls', 'Ada', 'Sum up the open PRs');
-  const desk = workers.spawn('desk-2', 'Ada', 'Fix login');
+  const desk = workers.spawn('desk-4', 'Ada', 'Fix login');
   assert.ok(typeof pulls === 'object' && typeof desk === 'object');
   if (typeof pulls !== 'object' || typeof desk !== 'object') return;
   const [pullsLaunch] = await waitFor(() => launches(pulls.info.id), (l) => l.length === 1);
@@ -855,7 +1042,44 @@ test('the queue agent is launched without file-editing tools, and board agents g
   assert.equal(denied(pullsLaunch.args), undefined);
   assert.ok(onPath(pullsLaunch));
   assert.equal(denied(deskLaunch.args), undefined);
-  assert.equal((deskLaunch.env.path ?? '').split(path.delimiter).includes(bin), false);
+  assert.ok(onPath(deskLaunch), 'office-workers is first on a desk worker\'s PATH');
+});
+
+test("every Claude worker gets the office's MCP server, and office-workers on its PATH", async (t) => {
+  const f = fixture();
+  isolateProviderEnvironment(f, t);
+  const previousLog = process.env.FAKE_AGENT_LOG;
+  process.env.FAKE_AGENT_LOG = f.log;
+  t.after(() => {
+    if (previousLog === undefined) delete process.env.FAKE_AGENT_LOG;
+    else process.env.FAKE_AGENT_LOG = previousLog;
+    f.close();
+  });
+  const workers = manager(f, f.claude, []);
+  t.after(() => workers.shutdown());
+
+  const bin = path.join(f.data, 'bin');
+  accessSync(path.join(bin, 'office-workers'), constants.X_OK);
+  assert.match(execFileSync(path.join(bin, 'office-workers'), ['--help'], { encoding: 'utf8' }), /office-workers home --merged/);
+  // Claude Code's --mcp-config: the shipped script, run as an MCP server by the office's own node.
+  const config = path.join(f.data, 'agent-office-mcp.json');
+  const server = JSON.parse(readFileSync(config, 'utf8')).mcpServers['agent-office'];
+  assert.equal(server.command, process.execPath);
+  assert.deepEqual(server.args.slice(1), ['mcp']);
+  assert.ok(server.args[0].endsWith(path.join('bin', 'office-workers.js')));
+  // Looking is allowed without asking; hiring and sending home aren't.
+  assert.deepEqual(JSON.parse(readFileSync(path.join(f.data, 'claude-hooks.json'), 'utf8')).permissions, { allow: ['mcp__agent-office__list_workers'] });
+
+  const desk = workers.spawn('desk-4', 'Ada', 'Fix login');
+  assert.equal(typeof desk, 'object');
+  if (typeof desk !== 'object') return;
+  const [launch] = await waitFor(() => f.read().filter((r) => r.kind === 'claude' && r.stdin === undefined && r.env.workerId === desk.id), (l) => l.length === 1);
+  // Before --settings, which ends the list of configs --mcp-config takes.
+  const at = launch.args.indexOf('--mcp-config');
+  assert.ok(at >= 0);
+  assert.equal(launch.args[at + 1], config);
+  assert.equal(launch.args[at + 2], '--settings');
+  assert.equal((launch.env.path ?? '').split(path.delimiter)[0], bin);
 });
 
 test('a Claude worker acts out its latest tool call, and puts its head in its hands when its tests keep failing', async (t) => {
@@ -874,7 +1098,7 @@ test('a Claude worker acts out its latest tool call, and puts its head in its ha
   });
   const workers = manager(f, f.claude, []);
   t.after(() => workers.shutdown());
-  const worker = workers.spawn('desk-1', 'test', 'make the tests pass');
+  const worker = workers.spawn('desk-2', 'test', 'make the tests pass');
   if (typeof worker === 'string') return assert.fail(worker);
   const [launch] = await waitFor(() => f.read().filter((r) => r.kind === 'claude' && r.args.includes('--settings')), (l) => l.length === 1);
   const settings = JSON.parse(readFileSync(launch.args[launch.args.indexOf('--settings') + 1], 'utf8'));
@@ -924,7 +1148,7 @@ test('a worker is stamped with when it started waiting on someone, afresh each t
   t.after(() => { if (oldLog === undefined) delete process.env.FAKE_AGENT_LOG; else process.env.FAKE_AGENT_LOG = oldLog; f.close(); });
   const workers = manager(f, f.claude, []);
   t.after(() => workers.shutdown());
-  const worker = workers.spawn('desk-1', 'test', 'fix the login');
+  const worker = workers.spawn('desk-2', 'test', 'fix the login');
   assert.notEqual(typeof worker, 'string'); if (typeof worker === 'string') return;
   const calls = await waitFor(f.read, (x) => x.some((r) => r.kind === 'claude' && r.args.includes('--settings')));
   const token = calls.find((r) => r.kind === 'claude' && r.args.includes('--settings'))!.env.hookToken!;
@@ -983,9 +1207,9 @@ test('a restart that takes a mid-turn worker down resumes it with continue; a fi
   const f = carryOnFixture(t);
   const before = manager(f, f.claude, []);
   // Never started, so its terminals run in-process and go down with it.
-  await hireInState(f, before, 'desk-1', 'mid-turn', 'working');
-  await hireInState(f, before, 'desk-2', 'asking', 'needs_input');
-  await hireInState(f, before, 'desk-3', 'finished', 'done');
+  await hireInState(f, before, 'desk-2', 'mid-turn', 'working');
+  await hireInState(f, before, 'desk-4', 'asking', 'needs_input');
+  await hireInState(f, before, 'desk-5', 'finished', 'done');
   before.shutdown(true);
   await new Promise((resolve) => setTimeout(resolve, 200));
 
@@ -1006,7 +1230,7 @@ test('a worker whose terminal outlives the office is picked back up mid-turn, no
   const f = carryOnFixture(t);
   const before = manager(f, f.claude, []);
   await before.start();
-  const worker = await hireInState(f, before, 'desk-1', 'kept', 'working');
+  const worker = await hireInState(f, before, 'desk-2', 'kept', 'working');
   before.shutdown(true);
 
   const after = manager(f, f.claude, []);
@@ -1030,7 +1254,7 @@ test('a worker whose terminal was in the host when an older office went down car
     hookToken: `${id}-token`,
     pty: { id: `${id}-pty`, status, acked: true },
   });
-  writeFileSync(path.join(f.data, 'workers.json'), JSON.stringify([saved('upgraded', 'desk-1', 'was-working', 'working'), saved('idle', 'desk-2', 'was-done', 'done')]));
+  writeFileSync(path.join(f.data, 'workers.json'), JSON.stringify([saved('upgraded', 'desk-2', 'was-working', 'working'), saved('idle', 'desk-4', 'was-done', 'done')]));
   const workers = manager(f, f.claude, []);
   t.after(() => workers.shutdown());
   await workers.start();
@@ -1044,7 +1268,7 @@ test('stopping the office on purpose (Ctrl+C) leaves nothing to carry on', async
   const before = manager(f, f.claude, []);
   // Its terminals run in the host, which ends them without telling the office they exited.
   await before.start();
-  await hireInState(f, before, 'desk-1', 'stopped', 'working');
+  await hireInState(f, before, 'desk-2', 'stopped', 'working');
   before.shutdown(false);
   await new Promise((resolve) => setTimeout(resolve, 200));
 
@@ -1054,4 +1278,245 @@ test('stopping the office on purpose (Ctrl+C) leaves nothing to carry on', async
   const resumed = (await waitFor(() => launches(f), (x) => x.length >= 2))[1];
   assert.ok(resumed.args.includes('stopped'));
   assert.equal(promptOf(resumed), undefined);
+});
+
+test('a worktree worker that makes its own branch is followed there: O finds the PR it opened, and sending it home tidies both branches', async (t) => {
+  const f = carryOnFixture(t);
+  const git = (cwd: string, ...args: string[]) => execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', ...args], { cwd, encoding: 'utf8' }).trim();
+  git(f.root, 'init', '-q', '-b', 'main');
+  writeFileSync(path.join(f.root, 'a.txt'), 'a');
+  git(f.root, 'add', 'a.txt');
+  git(f.root, 'commit', '-qm', 'init');
+  // GitHub has one open pull request, from the branch the worker is about to make.
+  writeFileSync(path.join(path.dirname(f.claude), 'gh'), `#!/bin/sh\ncase "$*" in *"--head fix-x "*) echo '[{"number":242,"url":"https://github.com/o/r/pull/242"}]';; *) echo '[]';; esac\n`, { mode: 0o700 });
+  const updates: WorkerInfo[] = [];
+  const workers = manager(f, f.claude, updates);
+  t.after(() => workers.shutdown());
+  const worker = workers.spawn('desk-2', 'test', 'fix x on a new branch and open a PR', true);
+  assert.notEqual(typeof worker, 'string'); if (typeof worker === 'string') return;
+  const office = worker.worktree!.branch;
+  assert.match(office, /^office\//);
+  const token = (await waitFor(() => launches(f), (x) => x.length > 0))[0].env.hookToken!;
+  const hook = (event: string, extra = {}) => assert.equal(workers.handleHook(worker.id, token, event, { session_id: 'own-branch', ...extra }), true);
+  hook('SessionStart');
+  hook('UserPromptSubmit', { prompt: 'fix x on a new branch and open a PR' });
+  // What the task (or the repo's CLAUDE.md) told it to do: a branch of its own, a commit, a PR from there.
+  const cwd = path.join(f.root, worker.worktree!.path);
+  git(cwd, 'checkout', '-qb', 'fix-x');
+  writeFileSync(path.join(cwd, 'x.txt'), 'x');
+  git(cwd, 'add', 'x.txt');
+  git(cwd, 'commit', '-qm', 'fix x');
+  hook('Stop');
+  const info = await waitFor(() => workers.get(worker.id)!, (w) => w.worktree?.branch === 'fix-x');
+  assert.equal(info.worktree!.made, office);
+  assert.equal(updates.at(-1)?.worktree?.branch, 'fix-x');
+  // Saved, for a restarted office and for `agent-office prune`.
+  const saved = JSON.parse(readFileSync(path.join(f.data, 'workers.json'), 'utf8')) as WorkerInfo[];
+  assert.deepEqual(saved.find((w) => w.id === worker.id)?.worktree, info.worktree);
+  // O at the desk: the PR it opened, not "has no commits on office/… yet".
+  const pr = await workers.openPr(worker.id, 'Cody');
+  assert.deepEqual(pr, { prs: [{ number: 242, url: 'https://github.com/o/r/pull/242', existed: true, dirty: false }], failed: [] });
+  assert.deepEqual(workers.get(worker.id)?.pr, { number: 242, url: 'https://github.com/o/r/pull/242' });
+  // Sent home: the worktree goes, with its branch and the office's (which holds nothing fix-x lacks).
+  const home = await workers.kill(worker.id, 'all');
+  assert.equal(home.error, undefined);
+  assert.equal(home.note, `Deleted ${worker.name}'s worktree and branch fix-x`);
+  assert.equal(git(f.root, 'branch', '--list', 'fix-x', office), '');
+  assert.ok(!existsSync(cwd));
+  // One that checked out a branch from before it was hired leaves that branch be.
+  execFileSync('git', ['branch', 'release'], { cwd: f.root, env: { ...process.env, GIT_COMMITTER_DATE: '@1000000000 +0000' } });
+  const other = workers.spawn('desk-4', 'test', 'look at the release branch', true);
+  assert.notEqual(typeof other, 'string'); if (typeof other === 'string') return;
+  git(path.join(f.root, other.worktree!.path), 'checkout', '-q', 'release');
+  const left = await workers.kill(other.id, 'all');
+  assert.equal(left.note, `Deleted ${other.name}'s worktree and branch ${other.worktree!.branch}`);
+  assert.equal(git(f.root, 'branch', '--list', '--format=%(refname:short)', 'release', other.worktree!.branch), 'release');
+});
+
+test("the office's branch keeps a worker's commits once it has moved on: the dialog warns, and sending it home never deletes them", async (t) => {
+  const f = carryOnFixture(t);
+  const git = (cwd: string, ...args: string[]) => execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', ...args], { cwd, encoding: 'utf8' }).trim();
+  git(f.root, 'init', '-q', '-b', 'main');
+  writeFileSync(path.join(f.root, 'a.txt'), 'a');
+  git(f.root, 'add', 'a.txt');
+  git(f.root, 'commit', '-qm', 'init');
+  execFileSync('git', ['branch', 'release'], { cwd: f.root, env: { ...process.env, GIT_COMMITTER_DATE: '@1000000000 +0000' } });
+  const workers = manager(f, f.claude, []);
+  t.after(() => workers.shutdown());
+  /** A worker that commits on the office's branch, then goes to another one. */
+  const hire = (desk: string, ...checkout: string[]) => {
+    const w = workers.spawn(desk, 'test', 'commit, then switch branches', true);
+    if (typeof w === 'string') throw new Error(w);
+    const cwd = path.join(f.root, w.worktree!.path);
+    writeFileSync(path.join(cwd, `${desk}.txt`), desk);
+    git(cwd, 'add', `${desk}.txt`);
+    git(cwd, 'commit', '-qm', `work at ${desk}`);
+    git(cwd, 'checkout', '-q', ...checkout);
+    return { w, cwd, office: w.worktree!.branch };
+  };
+  const tip = (branch: string) => git(f.root, 'log', '-1', '--format=%s', branch);
+  // Onto release, which was there before it: the commit is only on the office's branch.
+  const a = hire('desk-2', 'release');
+  assert.deepEqual(await workers.inspectWorktree(a.w.id), { exists: true, dirty: 0, ahead: 1, unpushed: 1 });
+  assert.equal(workers.get(a.w.id)?.worktree?.made, a.office);
+  // Deleting the worktree and branch anyway: release isn't the office's, and the office's has the commit.
+  const sent = await workers.kill(a.w.id, 'all');
+  assert.equal(sent.error, undefined);
+  assert.equal(sent.note, `Deleted ${a.w.name}'s worktree and kept branch ${a.office} — it has 1 unpushed commit`);
+  assert.ok(!existsSync(a.cwd));
+  assert.equal(tip(a.office), 'work at desk-2');
+  assert.equal(tip('release'), 'init');
+  // Sent home with no choice (the queue recycling its desk, leave-on-merge): nothing goes.
+  const b = hire('desk-4', 'release');
+  assert.equal((await workers.kill(b.w.id)).note, `Kept ${b.w.name}'s worktree and branch release — it has 1 unpushed commit`);
+  assert.ok(existsSync(b.cwd));
+  assert.equal(tip(b.office), 'work at desk-4');
+  // A branch of its own, cut from main without that commit: it goes, the office's stays.
+  const c = hire('desk-5', '-b', 'fix-z', 'main');
+  const own = await workers.kill(c.w.id, 'all');
+  assert.equal(own.note, `Deleted ${c.w.name}'s worktree and branch fix-z, and kept branch ${c.office} — it has 1 unpushed commit`);
+  assert.equal(git(f.root, 'branch', '--list', 'fix-z'), '');
+  assert.equal(tip(c.office), 'work at desk-5');
+});
+
+test("a worker that renames the office's branch goes home with it; one that deletes it leaves the branch it's on", async (t) => {
+  const f = carryOnFixture(t);
+  const git = (cwd: string, ...args: string[]) => execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', ...args], { cwd, encoding: 'utf8' }).trim();
+  git(f.root, 'init', '-q', '-b', 'main');
+  writeFileSync(path.join(f.root, 'a.txt'), 'a');
+  git(f.root, 'add', 'a.txt');
+  git(f.root, 'commit', '-qm', 'init');
+  const workers = manager(f, f.claude, []);
+  t.after(() => workers.shutdown());
+  const hire = (desk: string) => {
+    const w = workers.spawn(desk, 'test', 'fix x and name the branch after it', true);
+    if (typeof w === 'string') throw new Error(w);
+    return { w, cwd: path.join(f.root, w.worktree!.path), office: w.worktree!.branch };
+  };
+  const a = hire('desk-2');
+  const token = (await waitFor(() => launches(f), (x) => x.length > 0))[0].env.hookToken!;
+  const hook = (event: string, extra = {}) => assert.equal(workers.handleHook(a.w.id, token, event, { session_id: 'renamed', ...extra }), true);
+  hook('SessionStart');
+  hook('UserPromptSubmit', { prompt: 'fix x and name the branch after it' });
+  writeFileSync(path.join(a.cwd, 'x.txt'), 'x');
+  git(a.cwd, 'add', 'x.txt');
+  git(a.cwd, 'commit', '-qm', 'fix x');
+  git(a.cwd, 'branch', '-m', 'fix-x');
+  hook('Stop');
+  // Followed there, with nothing to remember: office/… is gone, fix-x is it.
+  const info = await waitFor(() => workers.get(a.w.id)!, (w) => w.worktree?.branch === 'fix-x');
+  assert.equal(info.worktree!.made, undefined);
+  const sent = await workers.kill(a.w.id, 'all');
+  assert.equal(sent.error, undefined);
+  assert.equal(sent.note, `Deleted ${a.w.name}'s worktree and branch fix-x`);
+  assert.equal(git(f.root, 'branch', '--list', 'fix-x', a.office), '');
+  assert.ok(!existsSync(a.cwd));
+  // Renamed with nothing unpushed (its PR merged, say) and sent home before it came to rest: all of it goes.
+  const b = hire('desk-4');
+  git(b.cwd, 'branch', '-m', 'fix-y');
+  assert.deepEqual(await workers.kill(b.w.id), { note: `Deleted ${b.w.name}'s worktree and branch fix-y` });
+  assert.equal(git(f.root, 'branch', '--list', 'fix-y', b.office), '');
+  // The office's branch deleted instead: git can't say whether the one it's on is its own, so it stays.
+  const c = hire('desk-5');
+  git(c.cwd, 'checkout', '-qb', 'fix-w');
+  git(c.cwd, 'branch', '-D', c.office);
+  assert.deepEqual(await workers.kill(c.w.id, 'all'), { note: `Deleted ${c.w.name}'s worktree and kept branch fix-w` });
+  assert.equal(git(f.root, 'branch', '--list', '--format=%(refname:short)', 'fix-w', c.office), 'fix-w');
+  assert.ok(!existsSync(c.cwd));
+});
+
+test("only a branch the worker made is its own to delete, and the office's stays when it has commits that one doesn't", async (t) => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'office-made-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const git = (...args: string[]) => execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', ...args], { cwd: dir, encoding: 'utf8' }).trim();
+  git('init', '-q', '-b', 'main');
+  writeFileSync(path.join(dir, 'a.txt'), 'a');
+  git('add', 'a.txt');
+  git('commit', '-qm', 'init');
+  // A branch that was there long before any worker (its reflog says it was made in 2001).
+  execFileSync('git', ['branch', 'release'], { cwd: dir, env: { ...process.env, GIT_COMMITTER_DATE: '@1000000000 +0000' } });
+  const trees = new Worktrees(dir);
+  const made = trees.create('mochi-1234');
+  assert.notEqual(typeof made, 'string'); if (typeof made === 'string') return;
+  const cwd = path.join(dir, made.path);
+  const gitIn = (...args: string[]) => execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', ...args], { cwd, encoding: 'utf8' }).trim();
+  // A commit on the office's branch, then a fresh branch from main that doesn't have it.
+  writeFileSync(path.join(cwd, 'o.txt'), 'o');
+  gitIn('add', 'o.txt');
+  gitIn('commit', '-qm', 'on the office branch');
+  gitIn('checkout', '-qb', 'fix-y', 'main');
+  assert.equal(await trees.branchOf(made), 'fix-y');
+  assert.equal(await trees.madeSince('fix-y', made.branch), true);
+  assert.equal(await trees.madeSince('release', made.branch), false);
+  assert.equal(await trees.madeSince('main', made.branch), false);
+  assert.equal(await trees.remove({ ...made, branch: 'fix-y', made: made.branch }, 'all'), undefined);
+  assert.equal(git('branch', '--list', 'fix-y'), '');
+  assert.equal(git('branch', '--list', made.branch).replace(/^\*?\s+/, ''), made.branch);
+});
+
+test("a worker whose worktree was deleted outside the office waits, marked lost, instead of failing to start; rebuilding puts it back and it carries on", async (t) => {
+  const f = carryOnFixture(t);
+  const git = (cwd: string, ...args: string[]) => execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', ...args], { cwd, encoding: 'utf8' }).trim();
+  git(f.root, 'init', '-q', '-b', 'main');
+  writeFileSync(path.join(f.root, 'a.txt'), 'a');
+  git(f.root, 'add', 'a.txt');
+  git(f.root, 'commit', '-qm', 'init');
+  const officeWith = (updates: WorkerInfo[], toasts: string[]) =>
+    new WorkerManager(f.root, f.data, f.claude, ['--from-test'], { url: 'http://127.0.0.1:1', token: '' }, { ...events(updates), toast: (text) => toasts.push(text) }, ledger(f.data));
+  const before = officeWith([], []);
+  const hire = async (deskId: string, session: string) => {
+    const n = launches(f).length;
+    const w = before.spawn(deskId, 'test', `task for ${session}`, true);
+    assert.notEqual(typeof w, 'string');
+    if (typeof w === 'string') throw new Error(w);
+    const token = (await waitFor(() => launches(f), (x) => x.length > n)).at(-1)!.env.hookToken!;
+    assert.equal(before.handleHook(w.id, token, 'SessionStart', { session_id: session }), true);
+    return w;
+  };
+  const kept = await hire('desk-2', 'kept-branch');
+  const gone = await hire('desk-4', 'gone-branch');
+  // Kept did some work on its branch; gone's branch goes with its folder.
+  const keptDir = path.join(f.root, kept.worktree!.path);
+  writeFileSync(path.join(keptDir, 'work.txt'), 'work');
+  git(keptDir, 'add', 'work.txt');
+  git(keptDir, 'commit', '-qm', 'work');
+  before.shutdown(true);
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  // Deleted while the office was down, by hand.
+  rmSync(keptDir, { recursive: true, force: true });
+  rmSync(path.join(f.root, gone.worktree!.path), { recursive: true, force: true });
+  git(f.root, 'worktree', 'prune');
+  git(f.root, 'branch', '-D', gone.worktree!.branch);
+
+  const updates: WorkerInfo[] = [];
+  const toasts: string[] = [];
+  const after = officeWith(updates, toasts);
+  t.after(() => after.shutdown());
+  const launched = launches(f).length;
+  await after.start();
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  // Nobody started, nobody was told "could not start": both wait at their desks, marked lost.
+  assert.equal(launches(f).length, launched);
+  assert.deepEqual(toasts, []);
+  assert.deepEqual(after.get(kept.id)?.lost, { branch: 'here' });
+  assert.deepEqual(after.get(gone.id)?.lost, { branch: 'gone' });
+  assert.equal(after.get(kept.id)?.status, 'offline');
+  assert.match(after.resume(kept.id) ?? '', /worktree .* was deleted outside agent-office/);
+  assert.equal(launches(f).length, launched);
+
+  // Put back on its own branch, work and all, and it carries on its conversation.
+  assert.deepEqual(await after.rebuild(kept.id), { rebuilt: true, note: undefined });
+  assert.equal(git(keptDir, 'rev-parse', '--abbrev-ref', 'HEAD'), kept.worktree!.branch);
+  assert.ok(existsSync(path.join(keptDir, 'work.txt')));
+  assert.equal(after.get(kept.id)?.lost, undefined);
+  const resumed = await waitFor(() => launches(f).slice(launched), (x) => x.length > 0);
+  assert.ok(resumed[0].args.includes('--resume') && resumed[0].args.includes('kept-branch'));
+
+  // Its branch gone too: made again from where it started.
+  const again = await after.rebuild(gone.id);
+  assert.equal(again.rebuilt, true);
+  assert.match(again.note ?? '', /was deleted too/);
+  assert.equal(git(path.join(f.root, gone.worktree!.path), 'rev-parse', 'HEAD'), gone.worktree!.base);
+  assert.equal(after.get(gone.id)?.lost, undefined);
+  assert.deepEqual(toasts, []);
 });

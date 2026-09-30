@@ -10,7 +10,7 @@ import type { GhPull, QueueTask, WorkerInfo, WorkerStatus } from '../src/shared/
 
 function worker(id: string, status: WorkerStatus = 'done', more: Partial<WorkerInfo> = {}): WorkerInfo {
   return {
-    id, kind: 'agent', deskId: 'desk-1', name: id, color: '#fff', status, acked: false, createdBy: 'test', createdAt: 0, cols: 80, rows: 24, viewers: [],
+    id, kind: 'agent', deskId: 'desk-2', name: id, color: '#fff', status, acked: false, createdBy: 'test', createdAt: 0, cols: 80, rows: 24, viewers: [],
     worktree: { path: `.agent-office/worktrees/${id}`, branch: `office/${id}`, base: 'abc' },
     ...more,
   };
