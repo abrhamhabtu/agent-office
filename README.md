@@ -373,3 +373,5 @@ Every change to the app that lands on `main` is published as a GitHub release by
 The **Session Desk kiosk** beside the lounge opens the dashboard with **E** when you walk up to it. **J** still opens it anywhere on the office floor. Find “Session Desk” in the command palette and use **Shift+Enter** to walk to the kiosk.
 
 For optional real-time NQ, ES and GC, use **Session Desk → Data connections → ProjectX** with TopstepX API access, then **Enable real-time futures**. Quotes stream and provider candles refresh every 20 seconds; completed candles drive proposals. Until connected with eligible API access, futures remain visibly delayed. BTC candles and historical backtests remain Yahoo. See [the setup and source details](docs/trading-office.md#optional-real-time-futures).
+
+Trading desks have a centered keyboard-and-mouse set under their two monitors. **News & calendar** has separate Calendar and Headlines pages with source timestamps. **Trade proposals** starts with one priority setup per market; open **All setups** for every playbook and expand a row for checks, risk and decision records. [Details](docs/trading-office.md#news-pages-and-proposal-overview).

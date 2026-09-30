@@ -1,3 +1,4 @@
+import { calendarRows, eventTime, marketBrief, nextCondition, PROPOSAL_STATUS } from './brief';
 import * as THREE from 'three';
 import { dataFreshness, marketTime } from '../../shared/freshness';
 import type { AccountState, Bar, FloorRole, Levels, PlaybookId, Proposal, Quote, Symbol, TradingSnapshot } from '../../shared/trading';
@@ -16,7 +17,7 @@ export const pct = (v: number) => `${sign(v)}${Math.abs(v).toFixed(2)}%`;
 export const money = (v: number) => `${v < 0 ? '−' : ''}$${Math.abs(Math.round(v)).toLocaleString('en-US')}`;
 const tone = (v: number) => (v >= 0 ? INK.up : INK.down);
 export const STAGE_COLOR: Record<string, string> = { live: INK.info, ready: INK.warn, won: INK.up, lost: INK.down, closed: INK.dim, watching: '#5d6b8f', done: INK.dim, failed: INK.down, off: '#3b4768' };
-export const STAGE_LABEL: Record<string, string> = { live: '● IN TRADE', ready: '● AT THE LEVEL', won: '✓ TARGET', lost: '✗ STOPPED', closed: 'FLAT', watching: 'WATCHING', done: 'DONE TODAY', failed: 'FAILED', off: 'OFF HOURS' };
+export const STAGE_LABEL: Record<string, string> = { live: '● PAPER TRADE', ready: '● AT ENTRY', won: '✓ TARGET', lost: '✗ STOPPED', closed: 'FLAT', watching: 'WATCHING', done: 'DONE TODAY', failed: 'FAILED', off: 'OFF HOURS' };
 
 function rr(g: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number) {
   g.beginPath();
@@ -78,6 +79,9 @@ export abstract class Screen {
     this.g = t.g;
     this.texture = t.tex;
   }
+  readonly pages: readonly { id: string; label: string }[] = [];
+  page = '';
+  setPage(id: string) { if (this.pages.some(p => p.id === id)) this.page = id; }
   abstract draw(s: TradingSnapshot, role: FloorRole, now: number): void;
   render(s: TradingSnapshot | null, role: FloorRole) {
     const g = this.g;
@@ -382,101 +386,55 @@ export function guardBar(g: CanvasRenderingContext2D, x: number, y: number, w: n
 }
 
 export class NewsBoard extends Screen {
-  constructor() {
-    super(1200, 600);
-  }
+  readonly pages = [{ id: 'calendar', label: 'Calendar' }, { id: 'headlines', label: 'Headlines' }] as const;
+  page = 'calendar';
+  constructor() { super(1200, 600); }
   draw(s: TradingSnapshot, _role: FloorRole, now: number) {
     const g = this.g;
-    const cal = s.news.filter((n) => n.kind === 'calendar').sort((a, b) => a.at - b.at);
-    const next = cal.find((n) => n.impact === 'high' && n.at > now);
-    this.header('📰 News & calendar', next ? `next high impact in ${until(next.at - now)}` : 'no high impact left', s, INK.info);
-    guardBar(g, 20, 90, this.W - 40, 44, s, now);
-    // The calendar: what's left, then what's just out (dimmed), each row with its time in its own column.
-    const upcoming = cal.filter((n) => n.at > now - 45 * 60_000).slice(0, 6);
-    const colW = 650;
-    g.fillStyle = INK.dim;
-    g.font = `900 16px ${SANS}`;
-    g.fillText('ECONOMIC CALENDAR · US · PACIFIC TIME', 24, 160);
-    upcoming.forEach((n, i) => {
-      const y = 170 + i * 69;
-      const past = n.at < now;
-      const high = n.impact === 'high';
-      const c = high ? INK.down : INK.warn;
-      g.globalAlpha = past ? 0.5 : 1;
-      g.fillStyle = high && !past && n.at - now < 60 * 60_000 ? 'rgba(255,93,115,.14)' : INK.panel;
-      rr(g, 20, y, colW, 62, 12);
-      g.fill();
-      g.fillStyle = c;
-      rr(g, 20, y, 8, 62, 4);
-      g.fill();
-      // When: the day over the time, so nothing sits on top of it.
-      const [day, time] = n.time.includes(' ') ? n.time.split(' ') : ['Today', n.time];
-      g.fillStyle = INK.dim;
-      g.font = `800 14px ${SANS}`;
-      g.fillText(day!.toUpperCase(), 40, y + 24);
-      g.fillStyle = INK.text;
-      g.font = `900 24px ${MONO}`;
-      g.fillText(time!, 40, y + 50);
-      // What, with its numbers underneath.
-      g.fillStyle = INK.text;
-      g.font = `800 21px ${SANS}`;
-      g.fillText(clip(g, n.headline.split(' · ')[0]!, 330), 150, y + 28);
-      g.font = `700 15px ${MONO}`;
-      let nx = 150;
-      for (const [label, v, ink] of [['ACT', n.actual, INK.up], ['CONS', n.forecast, INK.text], ['PREV', n.previous, INK.dim]] as const) {
-        if (!v) continue;
-        g.fillStyle = INK.dim;
-        g.fillText(label, nx, y + 51);
-        nx += g.measureText(`${label} `).width;
-        g.fillStyle = ink;
-        g.fillText(v, nx, y + 51);
-        nx += g.measureText(`${v}   `).width;
-      }
-      // Impact and how long until it prints, on the right.
-      g.textAlign = 'right';
-      g.fillStyle = c;
+    const calendar = this.page === 'calendar';
+    const next = s.news.filter(n => n.kind === 'calendar' && n.impact === 'high' && n.at >= now).sort((a, b) => a.at - b.at)[0];
+    this.header(calendar ? 'Economic calendar' : 'Market headlines', `PAGE ${calendar ? '1' : '2'} / 2`, s, INK.info);
+    guardBar(g, 20, 90, this.W - 40, 36, s, now);
+    if (calendar) {
+      const items = calendarRows(s.news, now);
+      g.fillStyle = INK.dim; g.font = `800 16px ${SANS}`;
+      g.fillText(next ? `NEXT HIGH IMPACT: ${next.headline.split(' · ')[0]} · in ${until(next.at - now)}` : 'US releases · all times Pacific', 24, 152, this.W - 48);
+      const columns = [['TIME (PT)', 36], ['EVENT', 170], ['IMPACT', 720], ['ACTUAL', 860], ['EXPECTED', 985], ['PREVIOUS', 1110]] as const;
       g.font = `900 14px ${SANS}`;
-      g.fillText(high ? '● HIGH' : '● MED', 20 + colW - 16, y + 26);
-      g.fillStyle = past ? INK.dim : INK.text;
-      g.font = `900 18px ${MONO}`;
-      g.fillText(past ? 'out' : `in ${until(n.at - now)}`, 20 + colW - 16, y + 50);
-      g.textAlign = 'left';
-      g.globalAlpha = 1;
-    });
-    if (!upcoming.length) {
-      g.fillStyle = INK.dim;
-      g.font = `800 22px ${SANS}`;
-      g.fillText('Nothing left on the calendar this week', 32, 210);
-    }
-    // The wire down the right.
-    const x = colW + 40;
-    const w = this.W - x - 20;
-    g.fillStyle = INK.dim;
-    g.font = `900 16px ${SANS}`;
-    g.fillText('THE WIRE', x, 160);
-    s.news
-      .filter((n) => n.kind === 'headline')
-      .slice(0, 7)
-      .forEach((n, i) => {
-        const y = 170 + i * 59;
-        g.fillStyle = n.impact === 'high' ? 'rgba(255,93,115,.12)' : INK.panel;
-        rr(g, x, y, w, 53, 10);
-        g.fill();
-        g.fillStyle = n.impact === 'high' ? INK.down : n.impact === 'med' ? INK.warn : INK.line;
-        rr(g, x, y, 6, 53, 3);
-        g.fill();
-        g.fillStyle = INK.text;
-        g.font = `800 18px ${SANS}`;
-        g.fillText(clip(g, n.headline, w - 30), x + 18, y + 24);
-        g.fillStyle = INK.dim;
-        g.font = `700 14px ${SANS}`;
-        g.fillText(`${n.source} · ${age(n.at, now)} ago`, x + 18, y + 45);
-        g.textAlign = 'right';
-        g.fillStyle = INK.info;
-        g.font = `800 14px ${MONO}`;
-        g.fillText(n.symbols.filter((sym) => s.markets.includes(sym)).join(' '), x + w - 12, y + 45);
-        g.textAlign = 'left';
+      for (const [label, x] of columns) g.fillText(label, x, 184);
+      items.forEach((n, i) => {
+        const y = 198 + i * 68;
+        const released = n.at < now;
+        g.fillStyle = i === 0 && !released ? INK.panel2 : INK.panel;
+        rr(g, 20, y, this.W - 40, 60, 8); g.fill();
+        g.fillStyle = INK.text; g.font = `900 23px ${MONO}`; g.fillText(eventTime(n.at), 36, y + 27);
+        g.fillStyle = INK.dim; g.font = `700 13px ${SANS}`;
+        g.fillText(released ? n.actual ? 'Released' : 'Awaiting actual' : n.time.includes(' ') ? n.time.split(' ')[0]! : 'Today', 36, y + 48);
+        g.fillStyle = INK.text; g.font = `800 22px ${SANS}`;
+        g.fillText(clip(g, n.headline.split(' · ')[0]!, 525), 170, y + 37);
+        g.fillStyle = n.impact === 'high' ? INK.down : n.impact === 'med' ? INK.warn : INK.dim;
+        g.font = `900 16px ${SANS}`; g.fillText(n.impact === 'med' ? 'MEDIUM' : n.impact.toUpperCase(), 720, y + 36);
+        g.fillStyle = INK.text; g.font = `800 19px ${MONO}`;
+        for (const [value, x] of [[n.actual, 860], [n.forecast, 985], [n.previous, 1110]] as const) g.fillText(clip(g, value || '—', 100), x, y + 36);
       });
+      if (!items.length) this.empty('No calendar releases received', 'Open details to check the source status.');
+    } else {
+      g.fillStyle = INK.dim; g.font = `800 16px ${SANS}`; g.fillText('NEWEST FIRST · OPEN FULL DETAILS FOR SOURCE LINKS AND MARKET FILTERS', 24, 155);
+      const items = s.news.filter(n => n.kind === 'headline').sort((a, b) => b.at - a.at).slice(0, 5);
+      items.forEach((n, i) => {
+        const y = 174 + i * 74;
+        g.fillStyle = INK.panel; rr(g, 20, y, this.W - 40, 66, 8); g.fill();
+        g.fillStyle = INK.text; g.font = `800 24px ${SANS}`; g.fillText(clip(g, n.headline, this.W - 74), 36, y + 29);
+        g.fillStyle = INK.dim; g.font = `700 15px ${SANS}`; g.fillText(`${n.source} · ${marketTime(n.at)} · ${n.impact === 'med' ? 'MEDIUM' : n.impact.toUpperCase()} IMPACT`, 36, y + 53);
+        g.textAlign = 'right'; g.fillStyle = INK.info; g.font = `900 16px ${MONO}`;
+        g.fillText(n.symbols.join(' · '), this.W - 36, y + 53); g.textAlign = 'left';
+      });
+      if (!items.length) this.empty('No headlines received', 'Open details to check the source status.');
+    }
+    const feed = s.feeds.find(f => f.id === (calendar ? 'calendar' : 'headlines'));
+    g.fillStyle = INK.dim; g.font = `700 14px ${SANS}`;
+    g.fillText(`${feed?.name ?? 'Waiting for source'} · Fetched ${marketTime(feed?.lastAt)}${feed && !feed.ok ? ' · SOURCE UNAVAILABLE' : ''}`, 24, 572, 830);
+    g.textAlign = 'right'; g.fillStyle = INK.info; g.fillText('Open display to choose a page →', this.W - 24, 572); g.textAlign = 'left';
   }
 }
 
@@ -550,93 +508,50 @@ export class PlaybookBoard extends Screen {
 
 // ---- 🎯 Live proposals ------------------------------------------------------------------------------------
 export class ProposalsBoard extends Screen {
-  constructor() {
-    super(1200, 600);
-  }
+  constructor() { super(1200, 600); }
   draw(s: TradingSnapshot, _role: FloorRole, now: number) {
     const g = this.g;
-    const hot = s.proposals.filter((p) => p.stage === 'live' || p.stage === 'ready').length;
-    this.header('🎯 Trade proposals', `${s.markets.join(' · ')}${hot ? ` · ${hot} at a level` : ''}`, s, INK.warn);
-    const list = s.proposals.filter((p) => p.stage !== 'off' && p.mark !== 'skipped').slice(0, 8);
+    this.header('Trade proposals', 'OVERVIEW · ONE PER MARKET', s, INK.warn);
     if (s.guard.level !== 'ok') guardBar(g, 20, 90, this.W - 40, 36, s, now);
-    if (!list.length) return this.empty('Nothing to propose right now', `The playbooks are watching ${s.markets.join(', ')}`);
-    const cols = 4;
+    const cols = Math.max(1, s.markets.length);
     const cw = (this.W - 40 - (cols - 1) * 12) / cols;
-    const banner = s.guard.level !== 'ok';
-    const ch = banner ? 226 : 244;
-    // Standing down: the setups stay up to learn from, dimmed, so nobody mistakes them for a go.
-    g.globalAlpha = s.guard.level === 'stop' ? 0.5 : 1;
-    list.forEach((p, i) => {
-      const x = 20 + (i % cols) * (cw + 12);
-      const y = (banner ? 134 : 92) + Math.floor(i / cols) * (ch + 10);
-      proposalCard(g, x, y, cw, ch, p, s, now);
+    const y = s.guard.level !== 'ok' ? 142 : 100;
+    const ch = 410;
+    s.markets.forEach((sym, i) => {
+      const x = 20 + i * (cw + 12);
+      const brief = marketBrief(s.proposals, sym);
+      const p = brief.primary;
+      const q = quoteOf(s, sym);
+      g.fillStyle = INK.panel; rr(g, x, y, cw, ch, 12); g.fill();
+      g.fillStyle = INSTRUMENTS[sym].ink; g.font = `900 30px ${MONO}`; g.fillText(sym, x + 16, y + 42);
+      g.textAlign = 'right'; g.fillStyle = INK.dim; g.font = `800 ${cols === 4 ? 16 : 20}px ${MONO}`;
+      g.fillText(q ? fmt(q.last, q.decimals) : '—', x + cw - 16, y + 41); g.textAlign = 'left';
+      const status = p ? PROPOSAL_STATUS[p.stage] : 'No unskipped setup';
+      g.fillStyle = p?.stage === 'live' ? INK.info : p?.stage === 'ready' ? INK.warn : INK.dim;
+      g.font = `900 ${cols === 4 ? 20 : 24}px ${SANS}`; g.fillText(clip(g, status, cw - 32), x + 16, y + 83);
+      g.fillStyle = INK.text; g.font = `900 21px ${SANS}`;
+      g.fillText(clip(g, p ? PLAYBOOK_BY_ID[p.playbook].name : 'Watching the market', cw - 32), x + 16, y + 123);
+      g.fillStyle = INK.dim; g.font = `700 16px ${SANS}`;
+      g.fillText(clip(g, p ? nextCondition(p) : 'Open All setups to review decisions.', cw - 32), x + 16, y + 153);
+      if (p?.entry != null && p.stage !== 'off') {
+        const w = (cw - 32) / 3;
+        for (const [k, label, value] of [[0, 'ENTRY', p.entry], [1, 'STOP', p.stop], [2, 'TARGET', p.target]] as const) {
+          g.fillStyle = INK.dim; g.font = `900 13px ${SANS}`; g.fillText(label, x + 16 + k * w, y + 194);
+          g.fillStyle = INK.text; g.font = `900 ${cols === 4 ? 15 : 19}px ${MONO}`;
+          g.fillText(fmt(value, q?.decimals), x + 16 + k * w, y + 224, w - 5);
+        }
+        g.fillStyle = INK.dim; g.font = `800 16px ${SANS}`;
+        g.fillText(`${p.side === 'long' ? 'Long' : p.side === 'short' ? 'Short' : 'Neutral'} setup${p.mark === 'taken' ? ' · You recorded this trade' : ''}`, x + 16, y + 254, cw - 32);
+      } else {
+        g.fillStyle = INK.dim; g.font = `700 17px ${SANS}`;
+        g.fillText('No entry to review in this session.', x + 16, y + 212, cw - 32);
+      }
+      drawFreshness(g, x + 16, y + 296, cw - 32, q, p?.dataAt ?? null, now, 12, p?.dataSource);
+      g.fillStyle = INK.info; g.font = `800 15px ${SANS}`;
+      g.fillText(brief.active > 1 ? `${brief.active} active paper trades · View all` : `${brief.others.length} other setups · View all`, x + 16, y + 378, cw - 32);
     });
-    g.globalAlpha = 1;
-  }
-}
-
-function proposalCard(g: CanvasRenderingContext2D, x: number, y: number, cw: number, ch: number, p: Proposal, s: TradingSnapshot, now: number) {
-  const q = quoteOf(s, p.symbol);
-  const book = PLAYBOOK_BY_ID[p.playbook];
-  const color = STAGE_COLOR[p.stage] ?? INK.line;
-  const pulse = p.stage === 'ready' || p.stage === 'live' ? 0.5 + 0.5 * Math.sin(now / 240) : 0;
-  g.fillStyle = INK.panel;
-  rr(g, x, y, cw, ch, 14);
-  g.fill();
-  g.lineWidth = 2 + pulse * 3;
-  g.strokeStyle = color;
-  g.stroke();
-  g.fillStyle = book.color;
-  g.fillRect(x + 14, y + 12, cw - 28, 5);
-  g.fillStyle = INSTRUMENTS[p.symbol].ink;
-  g.font = `900 30px ${MONO}`;
-  g.fillText(p.symbol, x + 14, y + 50);
-  if (p.side) {
-    g.fillStyle = p.side === 'long' ? INK.up : INK.down;
-    rr(g, x + cw - 86, y + 26, 72, 28, 8);
-    g.fill();
-    g.fillStyle = INK.bg;
-    g.font = `900 17px ${SANS}`;
-    g.textAlign = 'center';
-    g.fillText(p.side.toUpperCase(), x + cw - 50, y + 46);
-    g.textAlign = 'left';
-  }
-  g.fillStyle = book.color;
-  g.font = `900 16px ${SANS}`;
-  g.fillText(book.name, x + 14, y + 74);
-  g.fillStyle = INK.text;
-  g.font = `800 17px ${SANS}`;
-  g.fillText(clip(g, p.title, cw - 28), x + 14, y + 98);
-  const rows: [string, number | null, string][] = [
-    ['ENTRY', p.entry, INK.text],
-    ['STOP', p.stop, INK.down],
-    ['TARGET', p.target, INK.up],
-  ];
-  rows.forEach(([label, v, c], k) => {
-    g.fillStyle = INK.dim;
-    g.font = `800 13px ${SANS}`;
-    g.fillText(label, x + 14, y + 111 + k * 17);
-    g.fillStyle = c;
-    g.font = `900 16px ${MONO}`;
-    g.textAlign = 'right';
-    g.fillText(fmt(v, q?.decimals ?? 2), x + cw - 14, y + 111 + k * 17);
-    g.textAlign = 'left';
-  });
-  drawFreshness(g, x + 14, y + ch - 72, cw - 28, q, p.dataAt ?? null, now, 10, p.dataSource);
-  const size = p.sizing.find((z) => z.micros > 0);
-  g.fillStyle = INK.dim;
-  g.font = `800 14px ${SANS}`;
-  if (size) g.fillText(clip(g, `${size.micros} ${INSTRUMENTS[p.symbol].micro} on ${shortAccount(size.accountId)} ($${size.risk} risk)`, cw - 28), x + 14, y + ch - 36);
-  else if (p.distance != null) g.fillText(`${fmt(Math.abs(p.distance), q?.decimals ?? 2)} pts from the entry`, x + 14, y + ch - 36);
-  g.fillStyle = color;
-  g.font = `900 17px ${SANS}`;
-  g.fillText(STAGE_LABEL[p.stage] ?? p.stage.toUpperCase(), x + 14, y + ch - 14);
-  if (p.r != null) {
-    g.textAlign = 'right';
-    g.fillStyle = INK.warn;
-    g.font = `900 22px ${MONO}`;
-    g.fillText(`${p.r}R`, x + cw - 14, y + ch - 13);
-    g.textAlign = 'left';
+    g.fillStyle = INK.dim; g.font = `700 15px ${SANS}`;
+    g.fillText('Paper simulation, not broker positions · Open full details for all setups, checks and account sizing', 24, 582);
   }
 }
 

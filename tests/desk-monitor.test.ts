@@ -17,3 +17,14 @@ test('matching screens fit side by side on a desk with clear panels above the ta
   assert.ok(panel.min.y > .15, 'panel clears the tabletop and keyboard');
   assert.equal(new THREE.Box3().setFromObject(right.face).getSize(new THREE.Vector3()).y, panel.getSize(new THREE.Vector3()).y);
 });
+
+test('keyboard and mouse form one centered input set with room in front of both monitors', async () => {
+  const { buildDeskInput } = await import('../src/client/world/desk-input');
+  const input = buildDeskInput(new THREE.Texture());
+  const bounds = new THREE.Box3().setFromObject(input);
+  assert.ok(Math.abs(bounds.min.x + bounds.max.x) < 0.00001, 'the complete set is centered between monitor centers');
+  assert.ok(bounds.min.x > -DESK_SIZE.width / 2 && bounds.max.x < DESK_SIZE.width / 2);
+  assert.ok(bounds.max.z < DESK_SIZE.depth / 2, 'keyboard palm rest stays on the desk');
+  assert.ok(bounds.min.z > DESK_MONITOR.z + .1, 'keyboard clears the monitor bases');
+  assert.ok(bounds.min.y > -0.000001, 'mouse and keyboard sit above the tabletop');
+});

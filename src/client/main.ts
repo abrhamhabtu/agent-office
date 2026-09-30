@@ -332,7 +332,7 @@ function previewWallScreen(kind: 'issues' | 'queue' | 'pulls' | 'services') {
     place: 'TRADING FLOOR · WALL DISPLAY',
     screen: board.screen,
     detail: 'A close-up of the same live display on the wall. Prices, plans, news, and results update here as they change in the office.',
-    onDetails: () => openTrading(role, board.tab),
+    onDetails: () => openTrading(role, board.tab, board.screen instanceof NewsBoard ? { newsPage: board.screen.page === 'headlines' ? 'headlines' : 'calendar' } : undefined),
   });
 }
 {
@@ -2930,9 +2930,12 @@ function paletteEntries(): PaletteEntry[] {
   out.push({ icon: '🖼️', kind: 'Action', title: 'Hang a picture', detail: 'On a wall of this floor', keywords: ['decorate', 'frame', 'art'], open: startHanging });
   out.push({ icon: '🔎', kind: 'Action', title: 'Search the chat and every terminal', keywords: ['find'], open: showSearch });
 
-  out.push(at('issues', 'the Issues board', { icon: '📌', kind: 'Board', title: 'Issues board', open: () => openBoard('issues', net, boardActions()) }));
-  out.push(at('pulls', 'the PR board', { icon: '🔀', kind: 'Board', title: 'PR board', keywords: ['pull requests'], open: () => openBoard('pulls', net, boardActions()) }));
-  out.push(at('services', 'the Services board', { icon: '🌐', kind: 'Board', title: 'Services board', detail: 'Web servers the workers are running', open: () => openServices() }));
+  for (const kind of ['issues', 'queue', 'pulls', 'services'] as const) {
+    const board = BOARD_SET[tradingRole()][kind];
+    const [icon, ...words] = board.label.split(' ');
+    const title = words.join(' ');
+    out.push(at(kind, `the ${title} display`, { icon: icon!, kind: 'Board', title, detail: 'Enlarge the wall display · open its full details', keywords: [board.tab], open: () => previewWallScreen(kind) }));
+  }
   out.push(at('whiteboard', 'the whiteboard', { icon: '📝', kind: 'Board', title: 'Whiteboard', open: () => openWhiteboard(net) }));
   out.push(at('meeting', 'the meeting room', { icon: '🤝', kind: 'Board', title: 'Meeting room', keywords: ['call a meeting'], open: () => showMeeting() }));
 

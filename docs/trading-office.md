@@ -29,7 +29,7 @@ remain read-only. The floor stays visible behind the window. Close with ✕ or E
 around. The shortcut stays out of text fields and worker terminals.
 
 Every trading desk, including desks 17–20 in the expandable wing, has two matching monitors and
-one keyboard. The left monitor shows the hired worker's live terminal, with a persistent provider
+one centered keyboard-and-mouse set with raised keys, legends, a palm rest, mouse buttons and a scroll wheel. These sit on the desk, so hiring or replacing an agent keeps the input set in place. The left monitor shows the hired worker's live terminal, with a persistent provider
 header and status, model and task footer. The right monitor keeps the desk's market or job view.
 The provider is read from the saved worker, so changing the floor's default does not relabel an
 existing worker. Vacant desks show an available terminal; resident advisers show their role until
@@ -92,3 +92,22 @@ candidate. Merge the accepted branch back into `trading-office`; the merge ances
 updates use the new shared base.
 
 The **Session Desk kiosk** beside the lounge opens the dashboard with **E** when you walk up to it. **J** still opens it anywhere on the office floor. Find “Session Desk” in the command palette and use **Shift+Enter** to walk to the kiosk.
+
+## News pages and proposal overview
+
+The News & calendar wall display has two full-width pages: **Calendar** and **Headlines**. Click the
+wall screen and choose the page above its close-up; that page remains on the wall as the feed updates.
+Open full details to read the same page. Calendar details offer **Upcoming**, **Today** and **This week**,
+with releases grouped by Pacific date and separate Actual, Expected and Previous columns. Actual
+values remain blank until provided by the source. Headlines have a market filter, source links and
+pages of eight items. Feed fetch time and an unavailable-source notice stay visible.
+
+The Trade proposals wall now shows one priority setup for each tracked market: active paper trades,
+then setups at entry, then waiting setups. It identifies these as **paper simulation**, with source
+times shown for every proposal. Multiple active paper trades are counted so they are not mistaken
+for a single position. Open full details for **Overview** or **All setups**; a local market filter only
+changes what you read. Checks, account sizing and decision records are inside **Checks, risk and actions**.
+Expanded rows stay open during updates. **Record that I took it**, **Skip setup** and **Undo record**
+only record a decision; they do not place orders. **Tracked markets** changes the shared evaluation
+watchlist and is separate from the reading filter. Completed, skipped and off-hours setups remain
+available in All setups.
