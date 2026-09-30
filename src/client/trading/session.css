@@ -1,0 +1,33 @@
+.session-desk { width: min(1180px, 100%); }
+.session-desk > header .grow { flex: 1; }
+.session-desk header h2 { margin: 0; }
+.session-subtitle { font-size: 13px; color: var(--muted); }
+.session-body { display: grid; grid-template-columns: minmax(0, 1fr) 310px; gap: 16px; max-height: 76vh; overflow: auto; }
+.session-main, .session-side { display: grid; gap: 14px; align-content: start; min-width: 0; }
+.session-card { background: var(--paper-2); border: 1px solid #dacebf; border-radius: 12px; padding: 14px; min-width: 0; }
+.session-card h3 { font-size: 15px; margin: 0 0 10px; }
+.session-card p { margin: 6px 0; }
+.session-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.session-desk select { font: inherit; color: var(--ink); padding: 6px 10px; border: 1px solid #b9ab9a; border-radius: 6px; background: var(--paper); max-width: 100%; }
+.session-price, .session-levels dd, .session-countdown { font-family: ui-monospace, Menlo, monospace; }
+.session-price { font-size: 24px; }
+.session-desk canvas { display: block; width: 100%; height: auto; background: #0f1522; border-radius: 8px; margin-top: 10px; }
+.session-freshness { font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+.session-levels { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin: 0; }
+.session-levels dt { font-size: 12px; color: var(--muted); }
+.session-levels dd { font-size: 15px; font-weight: 800; margin: 2px 0 0; }
+.session-plan { margin-top: 10px; font-size: 14px; }
+.session-checks { list-style: none; padding: 0; margin: 8px 0 0; display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: 13px; }
+.session-desk [data-tone=ok] { color: #087750; }
+.session-desk [data-tone=warn] { color: #815900; }
+.session-desk [data-tone=stop] { color: #b12840; }
+.session-event { display: grid; gap: 5px; font-size: 14px; }
+.session-countdown { font-size: 20px; }
+.session-accounts { display: grid; gap: 12px; font-size: 13px; }
+.session-account { border-top: 1px solid #dacebf; padding-top: 10px; display: grid; gap: 4px; }
+.session-desk small { display: block; color: var(--muted); font-size: 11px; }
+.session-morning { display: grid; gap: 12px; font-size: 13px; }
+.session-morning label { display: flex; align-items: start; gap: 8px; cursor: pointer; }
+.session-morning input { margin: 3px 0 0; accent-color: #087750; }
+.session-desk footer { font-size: 12px; }
+@media (max-width: 800px) { .session-body { grid-template-columns: 1fr; } .session-levels { grid-template-columns: repeat(2, minmax(0, 1fr)); } }

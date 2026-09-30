@@ -1,5 +1,6 @@
 import * as THREE from 'three';
-import { DESK_SIZE, DESKS } from '../../shared/layout';
+import { dataFreshness } from '../../shared/freshness';
+import { DESK_SIZE, DESKS, WING_DESKS } from '../../shared/layout';
 import type { FloorRole, PlaybookId, Symbol, TradingSnapshot } from '../../shared/trading';
 import { INSTRUMENTS, PLAYBOOK_BY_ID, PLAYBOOKS, PODS, PROP_ACCOUNTS, seatJob } from '../../shared/trading';
 import { DESK_BY_ID, STATION_AGENT } from '../../shared/layout';
@@ -7,12 +8,12 @@ import { Worker } from '../world/character';
 import { Laptop } from '../world/laptop';
 import type { DeskView } from '../world/office';
 import type { PanelTab } from './panel';
-import { mesh, roundedBox, toon } from '../world/toon';
-import { accountRow, clip, guardBar, drawChart, fives, fmt, INK, money, pct, Screen, sparkline, STAGE_COLOR, STAGE_LABEL, type ChartOpts } from './screens';
+import { buildDeskMonitor, DESK_MONITOR } from '../world/desk-monitor';
+import { accountRow, clip, guardBar, drawChart, drawFreshness, fives, fmt, INK, money, pct, Screen, sparkline, STAGE_COLOR, STAGE_LABEL, type ChartOpts } from './screens';
 
 // The trading desks: a monitor on every desk showing that seat's job live (its playbook's chart, the news,
 // the accounts, the journal, the backtest), the way a trading floor's desks each have their own screens,
-// and a few traders already sat at their laptops, working the tape, until someone hires a worker into
+// and a few traders already at their terminals, working the tape, until someone hires a worker into
 // their seat.
 
 const SANS = 'Nunito, ui-rounded, system-ui, sans-serif';
@@ -114,8 +115,8 @@ class DeskMonitor extends Screen {
   }
   draw(s: TradingSnapshot, role: FloorRole, now: number) {
     const g = this.g;
-    const job = JOBS[role][this.n - 1]!;
-    const pod = PODS[role][Math.floor((this.n - 1) / 4)]!;
+    const job: Job = JOBS[role][this.n - 1] ?? { kind: 'chart', playbook: null, symbol: 0, view: vwapView };
+    const pod = PODS[role][Math.floor((this.n - 1) / 4)] ?? PODS[role][0]!;
     switch (job.kind) {
       case 'chart': {
         const sym = marketAt(s, job.symbol);
@@ -126,7 +127,9 @@ class DeskMonitor extends Screen {
         if (plan) {
           g.fillStyle = STAGE_COLOR[plan.stage] ?? INK.dim;
           g.font = `900 18px ${SANS}`;
-          g.fillText(clip(g, `${STAGE_LABEL[plan.stage] ?? ''}  ${plan.title}`, this.W - 32), 16, 68);
+          g.fillText(clip(g, `${STAGE_LABEL[plan.stage] ?? ''}  ${plan.title}`, this.W - 32), 16, 66);
+          g.font = `700 10px ${MONO}`;
+          g.fillText(dataFreshness(q, now, plan.dataAt ?? null).detail, 16, 79, this.W - 32);
         }
         if (q) drawChart(g, 8, 80, this.W - 16, this.H - 88, job.fives ? fives(s.bars[sym]).slice(-36) : s.bars[sym].slice(-70), q, s.levels[sym], { ...job.view, grid: true, tag: true, plan: plan && ['ready', 'live', 'watching'].includes(plan.stage) ? plan : null });
         return;
@@ -191,23 +194,24 @@ class DeskMonitor extends Screen {
       }
       case 'proposals': {
         this.title('Session chief · what’s live', pod.color);
-        s.proposals.filter((p) => p.stage !== 'off').slice(0, 6).forEach((p, i) => {
-          const y = 56 + i * 50;
+        s.proposals.filter((p) => p.stage !== 'off').slice(0, 4).forEach((p, i) => {
+          const y = 56 + i * 74;
           g.fillStyle = i % 2 ? INK.bg : INK.panel;
-          g.fillRect(8, y, this.W - 16, 46);
+          g.fillRect(8, y, this.W - 16, 70);
           g.fillStyle = INSTRUMENTS[p.symbol].ink;
           g.font = `900 21px ${MONO}`;
-          g.fillText(p.symbol, 18, y + 31);
+          g.fillText(p.symbol, 18, y + 22);
           g.fillStyle = PLAYBOOK_BY_ID[p.playbook].color;
           g.font = `900 18px ${SANS}`;
-          g.fillText(PLAYBOOK_BY_ID[p.playbook].short, 84, y + 30);
+          g.fillText(PLAYBOOK_BY_ID[p.playbook].short, 84, y + 22);
           g.fillStyle = STAGE_COLOR[p.stage] ?? INK.dim;
-          g.fillText(STAGE_LABEL[p.stage] ?? p.stage, 190, y + 30);
+          g.fillText(STAGE_LABEL[p.stage] ?? p.stage, 190, y + 22);
+          drawFreshness(g, 18, y + 36, this.W - 36, s.quotes.find(q => q.symbol === p.symbol), p.dataAt ?? null, now, 10);
           if (p.r != null) {
             g.textAlign = 'right';
             g.fillStyle = INK.warn;
             g.font = `900 20px ${MONO}`;
-            g.fillText(`${p.r}R`, this.W - 18, y + 31);
+            g.fillText(`${p.r}R`, this.W - 18, y + 22);
             g.textAlign = 'left';
           }
         });
@@ -329,35 +333,29 @@ export interface TradingDesks {
 }
 
 export function buildTradingDesks(desks: Map<string, DeskView>): TradingDesks {
-  const { height, depth } = DESK_SIZE;
-  const W = 0.86;
-  const H = W * (360 / 640);
+  const { height } = DESK_SIZE;
   const monitors: { n: number; screen: DeskMonitor; at: THREE.Vector3; drawn: number; role: FloorRole | null }[] = [];
-  const frameMat = toon('#1b2033');
-  for (const def of DESKS) {
+  const emptyTerminals: { view: DeskView; terminal: Laptop }[] = [];
+  for (const def of [...DESKS, ...WING_DESKS]) {
     const view = desks.get(def.id);
     const n = Number(/^desk-(\d+)$/.exec(def.id)?.[1]);
     if (!view || !n) continue;
     const screen = new DeskMonitor(n);
-    // On a stand to the right of the laptop, turned in toward the chair: laptop and monitor side by side.
-    const mon = new THREE.Group();
-    mon.add(mesh(roundedBox(W + 0.06, H + 0.06, 0.05, 0.02), frameMat, 0, 0, 0));
-    const face = new THREE.Mesh(new THREE.PlaneGeometry(W, H), new THREE.MeshBasicMaterial({ map: screen.texture, toneMapped: false }));
-    face.position.z = 0.028;
-    mon.add(face);
-    mon.add(mesh(new THREE.BoxGeometry(W - 0.12, 0.012, 0.014), toon('#06d6a0'), 0, H / 2 + 0.018, 0.03, false));
-    mon.add(mesh(new THREE.SphereGeometry(0.012, 8, 8), toon('#06d6a0', { emissive: '#06d6a0' }), W / 2 - 0.055, -H / 2 - 0.015, 0.03, false));
-    // Only the second screen opens a market preview. The laptop and the desk still open the terminal.
+    const { group: mon, face } = buildDeskMonitor(screen.texture);
     face.userData.interact = { kind: 'monitor', x: def.x, z: def.z, radius: 4.5, deskId: def.id };
-    mon.add(mesh(new THREE.BoxGeometry(0.05, 0.2, 0.05), frameMat, 0, -H / 2 - 0.08, -0.03, false));
-    mon.add(mesh(roundedBox(0.3, 0.025, 0.2, 0.01), frameMat, 0, -H / 2 - 0.18, -0.01, false));
-    mon.position.set(0.56, height + 0.19 + H / 2, -depth / 2 + 0.24);
-    mon.rotation.set(-0.05, -0.32, 0, 'YXZ');
+    mon.position.set(DESK_MONITOR.x, height, DESK_MONITOR.z);
     view.group.add(mon);
     monitors.push({ n, screen, at: new THREE.Vector3(def.x, 1.2, def.z), drawn: -1, role: null });
+    if (!def.station) {
+      const terminal = new Laptop('monitor');
+      terminal.setPlaceholder('Choose an agent to start');
+      terminal.setIdentity('AGENT TERMINAL', 'Available · hire at this desk');
+      view.laptopAnchor.add(terminal.root);
+      emptyTerminals.push({ view, terminal });
+    }
   }
 
-  // The traders at their laptops: each is visible only while nobody's been hired into the seat.
+  // The resident traders: each is visible only while nobody's been hired into the seat.
   const traders = (['bell', 'office'] as FloorRole[]).flatMap((role) =>
     TRADERS[role].map((n) => {
       const id = `desk-${n}`;
@@ -371,7 +369,9 @@ export function buildTradingDesks(desks: Map<string, DeskView>): TradingDesks {
       const model = new Worker(name, station && station in RESIDENT_TITLES ? STATION_AGENT[station].color : pod.color);
       model.setStatus('working', false);
       view.seatAnchor.add(model.root);
-      const laptop = new Laptop();
+      const laptop = new Laptop('monitor');
+      laptop.setIdentity('RESIDENT ADVISER', job);
+      laptop.setPlaceholder('Ask me at this desk');
       const i = TRADERS[role].indexOf(n);
       laptop.chartFor = () => ({ symbol: (['NQ', 'GC', 'BTC', 'NQ'] as Symbol[])[i]!, view: role === 'bell' && i === 1 ? 'zones' : role === 'bell' && i === 2 ? 'profile' : 'vwap' });
       view.laptopAnchor.add(laptop.root);
@@ -407,6 +407,10 @@ export function buildTradingDesks(desks: Map<string, DeskView>): TradingDesks {
         budget--;
         cursor = (cursor + k + 1) % monitors.length;
         k = -1;
+      }
+      for (const { view, terminal } of emptyTerminals) {
+        terminal.root.visible = view.vacancy.visible;
+        if (terminal.root.visible) terminal.update(dt, undefined, view.group.position.distanceTo(cam));
       }
       // A trader's seat shows no "+" while they're in it; every other seat keeps its marker.
       const sitting = new Set(traders.filter((tr) => tr.role === role && tr.view.vacancy.visible).map((tr) => tr.view));

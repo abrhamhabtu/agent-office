@@ -1,4 +1,5 @@
 import type { FloorRole, Proposal, TradingSnapshot } from '../../shared/trading';
+import { dataFreshness } from '../../shared/freshness';
 import { DAILY_STOP, INSTRUMENTS, PLAYBOOK_BY_ID, PLAYBOOKS, PROP_ACCOUNTS, SYMBOLS } from '../../shared/trading';
 import { h, openModal } from '../ui/dom';
 import { trading } from './feed';
@@ -63,6 +64,7 @@ export function openTrading(role: FloorRole, start?: PanelTab) {
     return card(
       row(mono(p.symbol, INSTRUMENTS[p.symbol].ink), p.side ? mono(p.side.toUpperCase(), p.side === 'long' ? GOOD : BAD) : null, h('b', { style: `color:${book.color}` }, book.name), h('span.grow', {}), mono(STAGE_LABEL[p.stage] ?? p.stage, STAGE_COLOR[p.stage]), p.r != null ? mono(`${p.r}R`) : null),
       h('b', {}, p.title),
+      dim(dataFreshness(q, Date.now(), p.dataAt ?? null).detail),
       p.entry != null ? row(mono(`entry ${fmt(p.entry, d)}`), mono(`stop ${fmt(p.stop, d)}`, BAD), mono(`target ${fmt(p.target, d)}`, GOOD), q ? dim(`last ${fmt(q.last, d)}${p.distance != null ? ` · ${fmt(Math.abs(p.distance), d)} pts away` : ''}`) : null) : null,
       p.checks.length ? h('div', {}, ...p.checks.map(check)) : null,
       p.sizing.length && p.entry != null ? h('div', { style: 'opacity:.8' }, 'Law of 10: ', ...p.sizing.map((z) => h('span', { style: 'margin-right:14px' }, `${accountLabel(z.accountId)} `, mono(`${z.micros} ${INSTRUMENTS[p.symbol].micro}`), dim(` ($${z.risk})`)))) : null,
@@ -82,7 +84,7 @@ export function openTrading(role: FloorRole, start?: PanelTab) {
       return [
         row(dim('Markets:'), ...SYMBOLS.map((sym) => h('button.btn', { type: 'button', class: s.markets.includes(sym) ? 'on' : '', title: INSTRUMENTS[sym].name, onclick: () => pick(sym) }, sym)), h('span.grow', {}), dim('Every playbook replays today’s real 1-minute bars. Law-of-10 sizes per active account. Never an order.')),
         ...shown.map((p) => proposalCard(p, s)),
-        off.length ? card(h('b', {}, 'Off hours'), dim(off.map((p) => `${p.symbol} ${PLAYBOOK_BY_ID[p.playbook].short}: ${p.title}`).join(' · '))) : null,
+        off.length ? card(h('b', {}, 'Off hours'), dim(off.map((p) => `${p.symbol} ${PLAYBOOK_BY_ID[p.playbook].short}: ${p.title} · ${dataFreshness(s.quotes.find(q => q.symbol === p.symbol), Date.now(), p.dataAt ?? null).detail}`).join(' • '))) : null,
       ];
     },
     news: (s) => {

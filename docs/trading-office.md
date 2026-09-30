@@ -19,6 +19,36 @@ The graphics controls still offer Battery saver and High quality. Battery saver 
 behind the first-person hands while disabling outlines and shadows. The upstream sky cycles through
 a day and night every hour, so compare lighting at the same sky time, weather and graphics quality.
 
+## Session Desk and cleaner desks
+
+Press **J**, click **Session Desk** in the top bar, or search for it in the command palette.
+The window combines an active chart, key levels, a selected playbook's setup checks, the next
+scheduled calendar event and account status. Market and playbook selections are remembered in this
+browser. Morning checklist items use the same saved checklist as the wall board; automatic items
+remain read-only. The floor stays visible behind the window. Close with ✕ or Esc to resume looking
+around. The shortcut stays out of text fields and worker terminals.
+
+Every trading desk, including desks 17–20 in the expandable wing, has two matching monitors and
+one keyboard. The left monitor shows the hired worker's live terminal, with a persistent provider
+header and status, model and task footer. The right monitor keeps the desk's market or job view.
+The provider is read from the saved worker, so changing the floor's default does not relabel an
+existing worker. Vacant desks show an available terminal; resident advisers show their role until
+hired. Clicking a worker opens its full terminal; clicking the right monitor opens its live close-up.
+
+Charts and proposals show the quote source and source timestamp, plus the Yahoo bar timestamp
+used for the chart or proposal replay. All timestamps include the Pacific date and time.
+**DELAYED** always identifies Yahoo-sourced quotes, even after a successful refresh. **CURRENT**
+means the quote source timestamp is recent, without promising exchange real-time delivery.
+**DELAYED BARS** identifies a recent Coinbase quote displayed alongside Yahoo bars; quote and bar
+statuses are separate, so the chart never inherits the quote’s live-feed label. **STALE**
+means the source reported stale quotes, or quotes/bars exceeded their freshness window (15 minutes
+for Yahoo quotes, 2 minutes for Coinbase quotes; 15 minutes for bars alongside Yahoo quotes,
+3 minutes alongside Coinbase quotes). Missing timestamps show **TIMESTAMP UNKNOWN**; missing
+quotes show **NO DATA**. Refresh time never replaces an absent source timestamp. A fresh Coinbase
+BTC price does not make old Yahoo chart/proposal bars fresh. Labels continue aging after failed
+refreshes, and Session Desk indicates when office snapshots stop arriving. Manual account balances
+are explicitly labeled as manual.
+
 ## Trying an upstream integration separately
 
 Use a branch and worktree based on `trading-office`. Merge `upstream/main` there and resolve conflicts

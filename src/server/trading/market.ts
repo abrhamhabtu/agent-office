@@ -149,8 +149,8 @@ export class Market {
             high: m.regularMarketDayHigh ?? m.regularMarketPrice!,
             low: m.regularMarketDayLow ?? m.regularMarketPrice!,
             open: cur?.open ?? prev,
-            updatedAt: fromCoinbase ? cur!.updatedAt : (m.regularMarketTime ?? Date.now() / 1000) * 1000,
-            source: fromCoinbase ? 'Coinbase' : 'CME · Yahoo',
+            updatedAt: fromCoinbase ? cur!.updatedAt : (m.regularMarketTime ?? 0) * 1000,
+            source: fromCoinbase ? 'Coinbase' : sym === 'BTC' ? 'Yahoo' : 'CME · Yahoo',
           });
         } else {
           const c = CONTEXT.find((x) => x.yahoo === r.symbol)!;
@@ -193,7 +193,7 @@ export class Market {
         high: Math.max(cur?.high ?? price, price),
         low: Math.min(cur?.low ?? price, price),
         open: cur?.open ?? Number(msg.open_24h ?? price),
-        updatedAt: msg.time ? Date.parse(msg.time) : Date.now(),
+        updatedAt: msg.time ? Date.parse(msg.time) : 0,
         source: 'Coinbase',
       });
       this.mark('coinbase', true);
@@ -254,7 +254,7 @@ export class Market {
         change: last - prevClose,
         changePct: prevClose ? ((last - prevClose) / prevClose) * 100 : 0,
         updatedAt,
-        source: live?.source ?? 'CME · Yahoo',
+        source: live?.source ?? (sym === 'BTC' ? 'Yahoo' : 'CME · Yahoo'),
         stale: Date.now() - updatedAt > (sym === 'BTC' ? 120_000 : 15 * 60_000),
       });
     }

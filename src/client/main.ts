@@ -73,6 +73,7 @@ import { IS_MAC } from './ui/termkeys';
 import { floorRole, PLAYBOOK_BY_ID, PODS, podOf, seatJob, SYMBOLS, type FloorRole } from '../shared/trading';
 import { trading } from './trading/feed';
 import { openTrading, type PanelTab } from './trading/panel';
+import { openSessionDesk } from './trading/session';
 import { BacktestBoard, BossScreen, EvalBoard, MarketMap, NewsBoard, PaperBoard, PlaybookBoard, ProposalsBoard, TickerStrip, bellText, type Screen as TradingScreen } from './trading/screens';
 import { buildTradingDesks, deskDetailsTab } from './trading/desks';
 import { openScreenPreview } from './trading/preview';
@@ -313,7 +314,7 @@ function previewDeskMonitor(deskId: string) {
     title: tradingDeskName(deskId),
     place: `DESK ${String(n).padStart(2, '0')} · SECOND MONITOR`,
     screen,
-    detail: 'This is the live market view on the monitor beside the laptop. The laptop still shows the worker’s Codex, Claude Code, OpenCode, or shell session.',
+    detail: 'This is the live market view on the right-hand monitor. The matching left-hand monitor shows the worker’s Codex, Claude Code, OpenCode, or shell session.',
     onDetails: () => openTrading(role, deskDetailsTab(deskId, role)),
   });
 }
@@ -2204,7 +2205,7 @@ function syncWorkers() {
       if (desk.def.room && !seatedAlready) arrivals.add(model, desk);
       // In the castle, a worker at the tables gets up and walks about (see Court): a new one runs in to its seat.
       else if (court && inCourt(w)) court.add(w.id, model, desk, seatedAlready ? undefined : cameFrom(w));
-      const laptop = new Laptop(world.device);
+      const laptop = new Laptop(inOffice() && /^desk-\d+$/.test(desk.def.id) ? 'monitor' : world.device);
       laptop.chartFor = () => laptopChart(w.deskId);
       desk.laptopAnchor.add(laptop.root);
       noOutline(desk.group);
@@ -2238,6 +2239,7 @@ function syncWorkers() {
     const deskDef = plan().byId.get(w.deskId);
     // Keys clack while it types, not while it reads, watches its tests or browses.
     if (deskDef) sound.setTyping(w.id, deskDef.x, deskDef.z, w.status === 'working' && (!w.action || w.action === 'edit'));
+    v.laptop.setIdentity(w.kind === 'shell' ? 'Shell' : providerLabel(w.provider, store.project), `${w.status.replaceAll('_', ' ').toUpperCase()} · ${engineBadge ?? ''}${engineBadge ? ' · ' : ''}${w.task?.name ?? w.action ?? w.name}`);
     const again = w.kind === 'shell' ? 'restart' : 'resume';
     v.laptop.setPlaceholder(w.lost ? `🌿 ${w.name}'s worktree was deleted — press E to fix it` : w.status === 'offline' ? `💤 ${w.name} is asleep — press R to ${again}` : w.status === 'exited' ? `${w.name} exited` : 'booting…');
   }
@@ -2887,6 +2889,7 @@ function at(kind: InteractKind, what: string, entry: Omit<PaletteEntry, 'walk'>)
 /** Everything the palette finds, in the order it lists them before you type. */
 function paletteEntries(): PaletteEntry[] {
   const out: PaletteEntry[] = [];
+  if (inOffice()) out.push({ icon: '📊', kind: 'Action', title: 'Session Desk', detail: 'Chart, levels, checklist, next event and accounts · J', keywords: ['trading', 'active chart'], open: openSessionDesk });
   for (const w of store.workers.values()) {
     const desk = DESK_BY_ID.get(w.deskId);
     const spot = desk && deskSpot(desk);
@@ -4062,7 +4065,7 @@ function deskHint(deskId: string): Hint {
               m.pressure ? h('span.cost', { title: `This machine is under pressure: ${m.pressure}` }, '⚠️ Machine under pressure') : '',
               ...(paused ? [h('span.cost', {}, '💸 Budget spent — hiring resumes tomorrow')] : [key('E', 'Hire a worker'), key('P', 'Hire with a task')]),
               key('B', 'Shell'),
-              aside('Click side monitor to preview'),
+              aside('Click market monitor to preview'),
             ]),
         labelKey,
       ],
@@ -4091,7 +4094,7 @@ function deskHint(deskId: string): Hint {
       doing ? aside(doing) : '',
       spent ? h('span.cost', { title: usageTitle(w.usage!, workerProvider) }, spent) : '',
       key('E', 'Open terminal'),
-      aside('Click side monitor to preview'),
+      aside('Click market monitor to preview'),
       key('C', 'Changes'),
       isAsleep(w.status) ? key('R', shell ? 'Restart' : 'Resume') : key('P', shell ? 'Run command' : 'Prompt'),
       w.repos?.length ? reposKey(w) : w.pr ? key('O', `PR #${w.pr.number}`) : w.prOpening ? aside('⏳ Opening PR…') : prReady(w) ? key('O', 'Open PR') : '',
@@ -4381,6 +4384,10 @@ function officeKey(e: KeyboardEvent): boolean {
       return true;
     case 'KeyM':
       voice.toggleMute();
+      return true;
+    case 'KeyJ':
+      e.preventDefault();
+      if (!e.repeat && inOffice()) openSessionDesk();
       return true;
     case 'KeyH':
       openHelp();
@@ -4714,6 +4721,7 @@ const waitingNow = () => waitingInOrder(store.workers.values());
 const noMedia = () => (window.isSecureContext ? undefined : 'Voice and screen sharing need HTTPS or localhost — use a TLS proxy, --self-signed, or an SSH tunnel');
 const hud = mountHud(
   [
+    { id: 'session-desk', icon: '📊', label: 'Session Desk', section: 'Open', key: 'J', shown: () => inOffice(), status: () => inOffice(), chip: () => 'Session Desk', title: () => 'Active chart, levels, checklist, event and accounts (J)', run: openSessionDesk },
     { id: 'issues', icon: '🎯', label: 'Proposals', section: 'Open', count: () => trading.snap?.proposals.filter((p) => p.stage === 'ready' || p.stage === 'live').length ?? 0, title: () => 'Live setups from the playbooks', run: () => openTrading(tradingRole(), 'proposals') },
     { id: 'pulls', icon: '📰', label: 'News', section: 'Open', count: () => trading.snap?.news.filter((n) => n.kind === 'calendar' && n.impact === 'high' && n.at > Date.now()).length ?? 0, title: () => 'The calendar and the wire', run: () => openTrading(tradingRole(), 'news') },
     { id: 'queue', icon: '🛡️', label: 'Prop accounts', section: 'Open', title: () => 'Prop accounts and Law-of-10 risk', run: () => openTrading(tradingRole(), 'accounts') },
@@ -5084,7 +5092,7 @@ function frame(ts: number) {
     v.model.held = d < (v.model.held ? HOLD_LEAVE : HOLD_NEAR);
     v.model.update(dt, t);
     // A board agent's kiosk has no laptop to paint (see buildKiosk).
-    if (!desk.station) v.laptop.update(dt, store.screens.get(id), Math.hypot(desk.x - camPos.x, desk.z - camPos.z));
+    if (!desk.station || /^desk-\d+$/.test(desk.id)) v.laptop.update(dt, store.screens.get(id), Math.hypot(desk.x - camPos.x, desk.z - camPos.z));
   }
   for (const a of idleAgents) if (a.view.vacancy.visible) a.model.update(dt, t);
   if (!upTop && inOffice()) tradingDesks.update(dt, t, camPos, tradingRole(), trading.snap, trading.tick);

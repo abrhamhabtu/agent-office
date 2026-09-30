@@ -1,7 +1,7 @@
 import type { ProposalAction, TradingSnapshot, TvAlert } from '../../shared/trading';
 
 /** The market desk as the browser sees it: one snapshot, refreshed every second or so, and who wants to hear. */
-class TradingFeed {
+export class TradingFeed {
   snap: TradingSnapshot | null = null;
   private listeners = new Set<() => void>();
   private alertListeners = new Set<(a: TvAlert) => void>();
@@ -39,13 +39,22 @@ class TradingFeed {
   private async pull() {
     if (this.busy) return;
     this.busy = true;
+    let received = false;
     try {
       const res = await fetch('/api/trading/snapshot', { credentials: 'same-origin' });
-      if (res.ok) this.set((await res.json()) as TradingSnapshot);
+      if (res.ok) {
+        this.set((await res.json()) as TradingSnapshot);
+        received = true;
+      }
     } catch {
       // The office is restarting; the last snapshot stays up.
     } finally {
       this.busy = false;
+      // A failed refresh must still age every screen's freshness label; retain source timestamps.
+      if (!received && this.snap) {
+        this.tick++;
+        for (const fn of this.listeners) fn();
+      }
     }
   }
 

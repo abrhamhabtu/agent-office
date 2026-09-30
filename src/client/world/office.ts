@@ -21,6 +21,7 @@ import { buildSlide, type OfficeSlide } from './slide';
 import { buildHoop, type HoopView } from './hoop';
 import { buildKitchen } from './kitchen';
 import { buildDeskSigns, type DeskSigns } from './desksigns';
+import { DESK_MONITOR } from './desk-monitor';
 import { HOOP } from '../../shared/hoop';
 
 export interface Collider {
@@ -1152,8 +1153,7 @@ export function buildDesk(def: DeskDef, index: number, trimMat: THREE.Material):
   }
 
   const laptopAnchor = new THREE.Object3D();
-  laptopAnchor.position.set(-0.36, height, -0.06);
-  laptopAnchor.scale.setScalar(1.3);
+  laptopAnchor.position.set(-DESK_MONITOR.x, height, DESK_MONITOR.z);
   group.add(laptopAnchor);
 
   // On the chair, facing the desk.

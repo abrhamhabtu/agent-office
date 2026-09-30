@@ -4,6 +4,7 @@ import { mesh, roundedBox, toon } from './toon';
 import { SYMBOLS, type Symbol } from '../../shared/trading';
 import { trading } from '../trading/feed';
 import { paintLaptopChart, paintLaptopTape } from '../trading/screens';
+import { buildDeskMonitor } from './desk-monitor';
 
 /** Hands each new laptop the next market to chart, until its desk says which one its pod reads. */
 let nextSymbol = 0;
@@ -150,16 +151,30 @@ export class Laptop {
   chartFor: () => { symbol: Symbol; view: 'vwap' | 'zones' | 'profile' } = () => ({ symbol: this.symbol, view: 'vwap' });
   /** Anything else of its own to free (the tome's page). */
   private owned: THREE.Material[] = [];
+  private identity = '';
+  private activity = '';
 
   /** `tome`: a leather-bound book whose inside page shows the terminal, for the castle; it opens and shuts like the laptop. */
-  constructor(style: 'laptop' | 'tome' = 'laptop') {
+  constructor(private style: 'laptop' | 'tome' | 'monitor' = 'laptop') {
     this.canvas.width = 1024;
-    this.canvas.height = 680;
+    this.canvas.height = style === 'monitor' ? 576 : 680;
     this.ctx = this.canvas.getContext('2d')!;
     this.texture = new THREE.CanvasTexture(this.canvas);
     this.texture.colorSpace = THREE.SRGBColorSpace;
     this.texture.anisotropy = 8;
     this.texture.minFilter = THREE.LinearMipmapLinearFilter;
+
+    if (style === 'monitor') {
+      const monitor = buildDeskMonitor(this.texture);
+      this.root.add(monitor.group);
+      this.owned.push(monitor.face.material as THREE.Material);
+      this.root.add(mesh(roundedBox(0.56, 0.018, 0.18, 0.015), toon('#293b4f'), 0.04, 0.01, 0.36, false));
+      this.root.add(mesh(roundedBox(0.07, 0.025, 0.1, 0.02), toon('#293b4f'), 0.4, 0.015, 0.36, false));
+      this.openT = 1;
+      paintScreen(this.ctx, this.canvas.width, this.canvas.height, undefined, 'Choose an agent');
+      this.texture.needsUpdate = true;
+      return;
+    }
 
     // Lid, hinged along the back edge
     this.lid.position.set(0, 0.035, -0.24);
@@ -218,6 +233,14 @@ export class Laptop {
     this.drawnVersion = -2;
   }
 
+  /** This header stays above the changing terminal output, including asleep and exited sessions. */
+  setIdentity(provider: string, activity: string) {
+    if (provider === this.identity && activity === this.activity) return;
+    this.identity = provider;
+    this.activity = activity;
+    this.drawnVersion = -2;
+  }
+
   /** `distance` to the camera throttles repaints: far-away laptops refresh rarely. */
   update(dt: number, screen: ScreenState | undefined, distance = 0) {
     if (this.openT < 1) this.setLid(Math.min(1, this.openT + dt * 1.6));
@@ -232,18 +255,38 @@ export class Laptop {
       this.drawnTick = trading.tick;
       const { width, height } = this.canvas;
       // Nothing on the terminal yet: the chart. Otherwise the terminal, with the four tickers along its foot.
-      if (!screen && trading.snap) {
+      if (this.style === 'monitor') {
+        this.ctx.save();
+        this.ctx.beginPath();
+        this.ctx.rect(0, 90, width, height - 140);
+        this.ctx.clip();
+        this.ctx.translate(0, 90);
+        paintScreen(this.ctx, width, height - 140, screen, this.placeholder, 18);
+        this.ctx.restore();
+        this.ctx.fillStyle = TERM_THEME.background;
+        this.ctx.fillRect(0, 0, width, 90);
+        this.ctx.fillRect(0, height - 50, width, 50);
+        this.ctx.fillStyle = '#64dfd2';
+        this.ctx.font = '700 42px ui-monospace, Menlo, monospace';
+        this.ctx.textAlign = 'left';
+        this.ctx.textBaseline = 'alphabetic';
+        this.ctx.fillText(this.identity || 'AGENT TERMINAL', 24, 60, width - 48);
+        this.ctx.fillStyle = TERM_THEME.foreground;
+        this.ctx.font = '700 27px ui-monospace, Menlo, monospace';
+        this.ctx.fillText(this.activity || 'Available · choose an agent', 24, height - 16, width - 48);
+      } else if (!screen && trading.snap) {
         const c = this.chartFor();
         paintLaptopChart(this.ctx, width, height, trading.snap, c.symbol, c.view);
       }
       else paintScreen(this.ctx, width, height, screen, this.placeholder, 22);
-      if (screen) paintLaptopTape(this.ctx, width, height, trading.snap);
+      if (screen && this.style !== 'monitor') paintLaptopTape(this.ctx, width, height, trading.snap);
       this.texture.needsUpdate = true;
     }
   }
 
   /** Folds the lid down a little further (it snaps shut at the end); true once it's closed. */
   shut(dt: number): boolean {
+    if (this.style === 'monitor') return true;
     this.setLid(Math.max(0, this.openT - dt * 2));
     return this.openT === 0;
   }

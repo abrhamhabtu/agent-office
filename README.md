@@ -9,7 +9,7 @@
 
 # 🏢 Agent Office
 
-This fork also includes [Trading Office](docs/trading-office.md): Opening Bell and Back Office, with live market screens, resident advisers and paper simulation alongside the latest upstream office features. Its elevator aligns across the office, rooftop and garage, beside the opening bell and clear of the expandable wing.
+This fork also includes [Trading Office](docs/trading-office.md): Opening Bell and Back Office, with live market screens, resident advisers and paper simulation alongside the latest upstream office features. Its elevator aligns across the office, rooftop and garage, beside the opening bell and clear of the expandable wing. Press **J** for Session Desk: chart, levels, setup checklist, next event and account status in one window. Matching dual monitors keep hired-agent providers and live activity visible; charts and proposals show source timestamps and delayed/stale status.
 
 **A 3D office your team shares with its coding agents.**
 

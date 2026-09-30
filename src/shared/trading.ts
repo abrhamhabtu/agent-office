@@ -229,6 +229,8 @@ export interface Proposal {
   /** The person's own call on it: took it, skipped it, or nothing yet. */
   mark: 'taken' | 'skipped' | null;
   note: string;
+  /** Timestamp of the last closed Yahoo minute bar actually used to compute this proposal. */
+  dataAt?: number;
 }
 
 export interface PaperTrade {

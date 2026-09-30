@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { dataFreshness, marketTime } from '../../shared/freshness';
 import type { AccountState, Bar, FloorRole, Levels, PlaybookId, Proposal, Quote, Symbol, TradingSnapshot } from '../../shared/trading';
 import { INSTRUMENTS, PLAYBOOK_BY_ID, PLAYBOOKS, PROP_ACCOUNTS, SYMBOLS } from '../../shared/trading';
 
@@ -143,8 +144,28 @@ export interface ChartOpts {
   plan?: Proposal | null;
 }
 
+/** Source clocks remain visible even when the chart or terminal is still waiting. */
+export function drawFreshness(g: CanvasRenderingContext2D, x: number, y: number, w: number, q: Quote | undefined, barAt: number | null, now: number, size = 11) {
+  const f = dataFreshness(q, now, barAt);
+  g.save();
+  g.globalAlpha = 1;
+  g.textAlign = 'left';
+  g.textBaseline = 'alphabetic';
+  g.font = `700 ${size}px ${MONO}`;
+  g.fillStyle = f.tone === 'ok' ? INK.up : f.tone === 'stop' ? INK.down : INK.warn;
+  g.fillText(`${f.source} · ${f.status}`, x, y, w);
+  g.fillStyle = INK.dim;
+  g.fillText(`Quote ${marketTime(q?.updatedAt)} · ${f.quoteStatus}`, x, y + size + 3, w);
+  g.fillText(`Yahoo bars ${marketTime(barAt)} · ${f.barStatus}`, x, y + (size + 3) * 2, w);
+  g.restore();
+}
+
 /** Candles and whichever of the day's levels the playbook reads, scaled to what's on screen. */
 export function drawChart(g: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, bars: Bar[], q: Quote, lv: Levels | null, opts: ChartOpts = {}) {
+  const fsFoot = Math.min(13, Math.max(10, w / 48));
+  const footer = (fsFoot + 3) * 3 + 4;
+  drawFreshness(g, x + 4, y + h - footer + fsFoot, w - 8, q, bars.at(-1)?.ts ?? null, Date.now(), fsFoot);
+  h -= footer;
   if (!bars.length) return;
   let lo = Math.min(...bars.map((b) => b.low));
   let hi = Math.max(...bars.map((b) => b.high));
@@ -593,14 +614,15 @@ function proposalCard(g: CanvasRenderingContext2D, x: number, y: number, cw: num
   ];
   rows.forEach(([label, v, c], k) => {
     g.fillStyle = INK.dim;
-    g.font = `800 15px ${SANS}`;
-    g.fillText(label, x + 14, y + 122 + k * 23);
+    g.font = `800 13px ${SANS}`;
+    g.fillText(label, x + 14, y + 111 + k * 17);
     g.fillStyle = c;
-    g.font = `900 19px ${MONO}`;
+    g.font = `900 16px ${MONO}`;
     g.textAlign = 'right';
-    g.fillText(fmt(v, q?.decimals ?? 2), x + cw - 14, y + 123 + k * 23);
+    g.fillText(fmt(v, q?.decimals ?? 2), x + cw - 14, y + 111 + k * 17);
     g.textAlign = 'left';
   });
+  drawFreshness(g, x + 14, y + ch - 72, cw - 28, q, p.dataAt ?? null, now, 10);
   const size = p.sizing.find((z) => z.micros > 0);
   g.fillStyle = INK.dim;
   g.font = `800 14px ${SANS}`;
@@ -1022,7 +1044,10 @@ export class BossScreen extends Screen {
     }
     live.forEach((p, i) => {
       g.fillStyle = STAGE_COLOR[p.stage] ?? INK.dim;
-      g.fillText(clip(g, `${p.symbol} ${PLAYBOOK_BY_ID[p.playbook].short} ${p.side ?? ''} · ${STAGE_LABEL[p.stage]} · ${p.title}`, this.W - 60), 28, 518 + i * 28);
+      g.fillText(clip(g, `${p.symbol} ${PLAYBOOK_BY_ID[p.playbook].short} ${p.side ?? ''} · ${STAGE_LABEL[p.stage]} · ${p.title}`, this.W - 60), 28, 512 + i * 28);
+      g.font = `700 11px ${MONO}`;
+      g.fillText(dataFreshness(quoteOf(s, p.symbol), Date.now(), p.dataAt ?? null).detail, 28, 526 + i * 28, this.W - 60);
+      g.font = `800 19px ${SANS}`;
     });
   }
 }

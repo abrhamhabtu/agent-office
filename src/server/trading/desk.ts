@@ -162,6 +162,7 @@ export class TradingDesk {
   private paperFile: string;
   private saved: Saved;
   private live = new Map<Symbol, DayResult>();
+  private liveAt = new Map<Symbol, number>();
   private paperHistory = new Map<string, PaperTrade>();
   private backtest: BacktestSummary | null = null;
   private timers: NodeJS.Timeout[] = [];
@@ -256,6 +257,7 @@ export class TradingDesk {
     if (!today.length && !prior.length) return;
     // Nothing traded yet today (a weekend, or before Globex): show where yesterday finished.
     const res = today.length ? replayDay(sym, today, prior, { live: true }) : replayDay(sym, prior, [], { live: false });
+    this.liveAt.set(sym, (today.length ? today : prior).at(-1)?.ts ?? 0);
     this.live.set(sym, res);
     // The paper book keeps every trade the day actually took, so a restart or a revised bar can't rewrite history.
     let changed = false;
@@ -455,6 +457,7 @@ export class TradingDesk {
         out.push({
           id,
           symbol: sym,
+          dataAt: this.liveAt.get(sym),
           playbook: p.id,
           agent: p.agent,
           side: v.side,

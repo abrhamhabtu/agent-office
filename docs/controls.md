@@ -20,6 +20,7 @@ Back to the [README](../README.md).
 | F | Hang a picture from the web on a wall (scroll to size it, click to hang it) |
 | Q | Put back the issue card you're carrying, or drop the basketball |
 | H | These controls; in a car, honk the horn |
+| J | Session Desk on a trading office floor: chart, levels, checklist, next event and accounts |
 | T / Enter | Chat |
 | G / 1–6 | Emote: hold G for the wheel (point and let go) or press 1–6 to wave, give a thumbs up, clap, dance, point or facepalm; everyone on your floor sees it |
 | / | Search the chat and every terminal on your floor |
