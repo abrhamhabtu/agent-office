@@ -131,6 +131,8 @@ export interface Quote {
   updatedAt: number;
   /** Where it came from: "CME · Yahoo" or "Coinbase". */
   source: string;
+  /** Provider of the displayed candles, independently of the last-price stream. */
+  barSource?: string;
   /** No update from the source for a while (the market's closed, or the feed is down). */
   stale: boolean;
 }
@@ -229,8 +231,9 @@ export interface Proposal {
   /** The person's own call on it: took it, skipped it, or nothing yet. */
   mark: 'taken' | 'skipped' | null;
   note: string;
-  /** Timestamp of the last closed Yahoo minute bar actually used to compute this proposal. */
+  /** Timestamp of the last closed minute bar actually used to compute this proposal. */
   dataAt?: number;
+  dataSource?: string;
 }
 
 export interface PaperTrade {
@@ -474,6 +477,7 @@ export interface TradingSnapshot {
   accounts: AccountState[];
   alerts: TvAlert[];
   journal: JournalInfo;
+  projectXMarketEnabled?: boolean;
   session: SessionInfo;
   /** The TradingView webhook: where to point an alert, and the key it needs. */
   webhook: { path: string; key: string };

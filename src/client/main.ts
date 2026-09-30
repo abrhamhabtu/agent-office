@@ -1,3 +1,4 @@
+import { buildSessionStation } from './trading/station';
 import './style.css';
 import * as THREE from 'three';
 import { OutlineEffect } from 'three/examples/jsm/effects/OutlineEffect.js';
@@ -305,6 +306,10 @@ const BOARD_SET: Record<FloorRole, Record<'issues' | 'queue' | 'pulls' | 'servic
 const tape = new TickerStrip();
 const tradingDesks = buildTradingDesks(office.desks);
 const bossMarkets = new BossScreen();
+const sessionStation = buildSessionStation();
+office.group.add(sessionStation.group);
+office.colliders.push(sessionStation.collider);
+office.interactables.push(sessionStation.interact);
 function previewDeskMonitor(deskId: string) {
   const role = tradingRole();
   const screen = tradingDesks.screenFor(deskId, role, trading.snap);
@@ -350,6 +355,7 @@ function paintTrading() {
     b.screen.render(snap, role);
   }
   bossMarkets.render(snap, role);
+  sessionStation.screen.render(snap, role);
 }
 /** The name of a seat on this floor: its job on the trading floor, if it has one. */
 function tradingDeskName(id: string): string {
@@ -2883,13 +2889,14 @@ function nearestFreeDesk(): DeskDef | undefined {
 /** An entry that walks you over to `kind`'s spot (Shift+Enter) before doing what Enter does. */
 function at(kind: InteractKind, what: string, entry: Omit<PaletteEntry, 'walk'>): PaletteEntry {
   const it = spotOf(kind);
-  return { ...entry, walk: it ? () => walkThen(it, what, entry.open) : undefined };
+  const face = kind === 'session-desk' ? sessionStation.group.position : undefined;
+  return { ...entry, walk: it ? () => walkThen(it, what, entry.open, face) : undefined };
 }
 
 /** Everything the palette finds, in the order it lists them before you type. */
 function paletteEntries(): PaletteEntry[] {
   const out: PaletteEntry[] = [];
-  if (inOffice()) out.push({ icon: '📊', kind: 'Action', title: 'Session Desk', detail: 'Chart, levels, checklist, next event and accounts · J', keywords: ['trading', 'active chart'], open: openSessionDesk });
+  if (inOffice()) out.push(at('session-desk', 'the Session Desk kiosk beside the lounge', { icon: '📊', kind: 'Action', title: 'Session Desk', detail: 'Lounge kiosk · J to open · Shift+Enter to walk over', keywords: ['trading', 'active chart', 'kiosk'], open: openSessionDesk }));
   for (const w of store.workers.values()) {
     const desk = DESK_BY_ID.get(w.deskId);
     const spot = desk && deskSpot(desk);
@@ -3122,7 +3129,8 @@ function interact(target: Interactable | null, key: DeskKey, note = aimedNote) {
   if (note && key === 'E') return pickUp(note);
   if (note && key === 'O') return openIssue(note, net, boardActions());
   if (key !== 'E') return;
-  if (target.kind === 'elevator') showElevator();
+  if (target.kind === 'session-desk') openSessionDesk();
+  else if (target.kind === 'elevator') showElevator();
   else if (target.kind === 'issues' || target.kind === 'pulls' || target.kind === 'services' || target.kind === 'queue') openTrading(tradingRole(), BOARD_SET[tradingRole()][target.kind].tab);
   else if (target.kind === 'tv') watchShare();
   else if (target.kind === 'jukebox') showJukebox();
@@ -3855,6 +3863,8 @@ function hintFor(it: Interactable): Hint {
   const title = (text: string) => h('span.title', {}, text);
   const board = (name: string): Hint => ({ k: '', parts: [title(name), key('E', 'Open details'), aside('Click screen to enlarge')] });
   switch (it.kind) {
+    case 'session-desk':
+      return { k: '', parts: [title('📊 Session Desk'), key('E', 'Open session')] };
     case 'desk':
       return it.deskId ? deskHint(it.deskId) : { k: '', parts: [] };
     case 'monitor':
@@ -4524,7 +4534,7 @@ document.addEventListener('pointerlockchange', () => {
 const raycaster = new THREE.Raycaster();
 const CROSSHAIR = new THREE.Vector2(0, 0);
 /** How close (meters from your eyes) you must be to use each kind of thing. */
-const REACH: Record<InteractKind, number> = { desk: 4.5, monitor: 5, ticker: 12, slide: 3, station: 4.5, coffee: 3, issues: 9, pulls: 9, services: 9, queue: 9, tv: 10, decor: 9, smoke: 3, elevator: 4.5, gong: 3.5, dog: 3.2, jukebox: 4, seat: 3, whiteboard: 7, cabinet: 4, ladder: 3, pole: 4, meeting: 7, bar: 3.5, dj: 6, golf: 3.5, ball: 3.2, bookshelf: 4, darts: 4, axe: 5.5, telescope: 3.5, car: 4, expand: 8, herald: 5 };
+const REACH: Record<InteractKind, number> = { 'session-desk': 3.5, desk: 4.5, monitor: 5, ticker: 12, slide: 3, station: 4.5, coffee: 3, issues: 9, pulls: 9, services: 9, queue: 9, tv: 10, decor: 9, smoke: 3, elevator: 4.5, gong: 3.5, dog: 3.2, jukebox: 4, seat: 3, whiteboard: 7, cabinet: 4, ladder: 3, pole: 4, meeting: 7, bar: 3.5, dj: 6, golf: 3.5, ball: 3.2, bookshelf: 4, darts: 4, axe: 5.5, telescope: 3.5, car: 4, expand: 8, herald: 5 };
 const eye = new THREE.Vector3();
 
 /** What the ray through `ndc` lands on first, whether it is within reach (plus `slack` meters), and where it hit. */

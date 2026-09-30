@@ -64,7 +64,7 @@ export function openTrading(role: FloorRole, start?: PanelTab) {
     return card(
       row(mono(p.symbol, INSTRUMENTS[p.symbol].ink), p.side ? mono(p.side.toUpperCase(), p.side === 'long' ? GOOD : BAD) : null, h('b', { style: `color:${book.color}` }, book.name), h('span.grow', {}), mono(STAGE_LABEL[p.stage] ?? p.stage, STAGE_COLOR[p.stage]), p.r != null ? mono(`${p.r}R`) : null),
       h('b', {}, p.title),
-      dim(dataFreshness(q, Date.now(), p.dataAt ?? null).detail),
+      dim(dataFreshness(q, Date.now(), p.dataAt ?? null, p.dataSource).detail),
       p.entry != null ? row(mono(`entry ${fmt(p.entry, d)}`), mono(`stop ${fmt(p.stop, d)}`, BAD), mono(`target ${fmt(p.target, d)}`, GOOD), q ? dim(`last ${fmt(q.last, d)}${p.distance != null ? ` · ${fmt(Math.abs(p.distance), d)} pts away` : ''}`) : null) : null,
       p.checks.length ? h('div', {}, ...p.checks.map(check)) : null,
       p.sizing.length && p.entry != null ? h('div', { style: 'opacity:.8' }, 'Law of 10: ', ...p.sizing.map((z) => h('span', { style: 'margin-right:14px' }, `${accountLabel(z.accountId)} `, mono(`${z.micros} ${INSTRUMENTS[p.symbol].micro}`), dim(` ($${z.risk})`)))) : null,
@@ -84,7 +84,7 @@ export function openTrading(role: FloorRole, start?: PanelTab) {
       return [
         row(dim('Markets:'), ...SYMBOLS.map((sym) => h('button.btn', { type: 'button', class: s.markets.includes(sym) ? 'on' : '', title: INSTRUMENTS[sym].name, onclick: () => pick(sym) }, sym)), h('span.grow', {}), dim('Every playbook replays today’s real 1-minute bars. Law-of-10 sizes per active account. Never an order.')),
         ...shown.map((p) => proposalCard(p, s)),
-        off.length ? card(h('b', {}, 'Off hours'), dim(off.map((p) => `${p.symbol} ${PLAYBOOK_BY_ID[p.playbook].short}: ${p.title} · ${dataFreshness(s.quotes.find(q => q.symbol === p.symbol), Date.now(), p.dataAt ?? null).detail}`).join(' • '))) : null,
+        off.length ? card(h('b', {}, 'Off hours'), dim(off.map((p) => `${p.symbol} ${PLAYBOOK_BY_ID[p.playbook].short}: ${p.title} · ${dataFreshness(s.quotes.find(q => q.symbol === p.symbol), Date.now(), p.dataAt ?? null, p.dataSource).detail}`).join(' • '))) : null,
       ];
     },
     news: (s) => {
@@ -215,8 +215,8 @@ export function openTrading(role: FloorRole, start?: PanelTab) {
       const tpKey = h('input', { placeholder: 'Trade Pilot signal key', type: 'password', autocomplete: 'off', style: 'width:240px' });
       const template = JSON.stringify({ symbol: '{{ticker}}', side: 'long', setup: 'VWAP Double Break', price: '{{close}}', message: '{{strategy.order.comment}}' });
       return [
-        heading('Live data'),
-        ...s.feeds.map((f) => card(row(mono(f.ok ? 'LIVE' : 'DOWN', f.ok ? GOOD : BAD), h('b', {}, f.name), h('span.grow', {}), f.lastAt ? dim(`updated ${new Date(f.lastAt).toLocaleTimeString()}`) : null), dim(f.note))),
+        heading('Data connections'),
+        ...s.feeds.map((f) => card(row(mono(f.ok ? 'CONNECTED' : 'DOWN', f.ok ? GOOD : BAD), h('b', {}, f.name), h('span.grow', {}), f.lastAt ? dim(`updated ${new Date(f.lastAt).toLocaleTimeString()}`) : null), dim(f.note))),
         heading('TradingView → the office'),
         card(
           dim('In TradingView, create an alert on your indicator or strategy, tick Webhook URL and paste this. When it fires, the office dings, the playbook’s desk agent jumps up, and the alert lands on the Risk & Journal screen.'),
@@ -225,13 +225,16 @@ export function openTrading(role: FloorRole, start?: PanelTab) {
           h('code', { style: 'white-space:pre-wrap;font-size:12px' }, template),
           dim(/localhost|127\.0\.0\.1/.test(origin) ? 'TradingView’s servers can’t reach localhost: open a tunnel (for example `cloudflared tunnel --url http://localhost:4600`) and use its https address in place of this one.' : 'TradingView only posts to https on port 443.'),
         ),
-        heading('ProjectX (TopstepX, Lucid, Top One) → the journal'),
+        heading('ProjectX → accounts, journal and market data'),
         card(
           s.journal.connected
             ? row(mono('CONNECTED', GOOD), h('b', {}, s.journal.userName ?? ''), dim(`${s.journal.accounts.length} accounts · synced ${s.journal.syncedAt ? new Date(s.journal.syncedAt).toLocaleTimeString() : '—'}`), h('span.grow', {}), h('button.btn', { onclick: () => run(trading.post('/api/trading/projectx', { action: 'disconnect' }), 'Disconnected') }, 'Disconnect'))
             : row(user, key, base, h('button.btn.primary', { onclick: () => run(trading.post('/api/trading/projectx', { userName: user.value, apiKey: key.value, baseUrl: base.value }), 'Connected') }, 'Connect')),
           s.journal.error ? mono(s.journal.error, BAD) : null,
-          dim('Read-only: the office reads balances and fills, never orders. The key stays on this machine (readable only by you). Each firm has its own ProjectX gateway: TopstepX is the default; paste your firm’s API address if it’s different.'),
+          s.journal.userName ? row(h('button.btn', { onclick: () => run(trading.post('/api/trading/projectx', { action: 'market-data', enabled: !s.projectXMarketEnabled }), s.projectXMarketEnabled ? 'Real-time data disabled' : 'Connecting to real-time data') }, s.projectXMarketEnabled ? 'Disable real-time futures' : 'Enable real-time futures'), dim(s.projectXMarketEnabled ? 'TopstepX market connection enabled · check source status above' : 'Optional · requires TopstepX API access')) : null,
+          dim('For real-time NQ, ES and GC: activate API access in your TopstepX/ProjectX dashboard, connect here, then enable real-time futures. This connector uses TopstepX’s simulation data subscription. Other ProjectX gateways currently support journal syncing only. BTC quotes continue through Coinbase; BTC candles and historical backtests use Yahoo.'),
+          h('a', { href: 'https://help.topstep.com/en/articles/11187768-topstepx-api-access', target: '_blank', rel: 'noopener noreferrer' }, 'TopstepX API setup guide'),
+          dim('Read-only: the office reads market data, balances and fills, never orders. The key stays on this machine (readable only by you). Each firm has its own ProjectX gateway: TopstepX is the default; paste your firm’s API address if it’s different.'),
         ),
         heading('Trade Pilot'),
         card(

@@ -162,6 +162,7 @@ export class TradingDesk {
   private paperFile: string;
   private saved: Saved;
   private live = new Map<Symbol, DayResult>();
+  private liveSource = new Map<Symbol, string>();
   private liveAt = new Map<Symbol, number>();
   private paperHistory = new Map<string, PaperTrade>();
   private backtest: BacktestSummary | null = null;
@@ -180,7 +181,7 @@ export class TradingDesk {
     // The desk agents read the tape from this file (their terminals can't sign in to the office's API).
     this.liveFile = path.join(dir, 'live.json');
     process.env.TRADING_OFFICE_SNAPSHOT = this.liveFile;
-    this.projectx = new ProjectX(dataDir);
+    this.projectx = new ProjectX(dataDir, this.market);
     let s: Partial<Saved> = {};
     try {
       s = JSON.parse(readFileSync(this.file, 'utf8')) as Partial<Saved>;
@@ -206,7 +207,12 @@ export class TradingDesk {
   }
 
   start() {
-    this.market.onBars = (sym) => this.dirty.add(sym);
+    this.market.onBars = (sym) => {
+      if (this.liveSource.get(sym) !== this.market.barSource(sym)) {
+        this.live.delete(sym); this.liveAt.delete(sym); this.liveSource.delete(sym);
+      }
+      this.dirty.add(sym);
+    };
     this.market.start();
     this.news.start();
     this.projectx.start();
@@ -257,6 +263,7 @@ export class TradingDesk {
     if (!today.length && !prior.length) return;
     // Nothing traded yet today (a weekend, or before Globex): show where yesterday finished.
     const res = today.length ? replayDay(sym, today, prior, { live: true }) : replayDay(sym, prior, [], { live: false });
+    this.liveSource.set(sym, this.market.barSource(sym));
     this.liveAt.set(sym, (today.length ? today : prior).at(-1)?.ts ?? 0);
     this.live.set(sym, res);
     // The paper book keeps every trade the day actually took, so a restart or a revised bar can't rewrite history.
@@ -458,6 +465,7 @@ export class TradingDesk {
           id,
           symbol: sym,
           dataAt: this.liveAt.get(sym),
+          dataSource: this.liveSource.get(sym),
           playbook: p.id,
           agent: p.agent,
           side: v.side,
@@ -677,6 +685,7 @@ export class TradingDesk {
       accounts,
       alerts: [...this.saved.alerts].reverse(),
       journal,
+      projectXMarketEnabled: this.projectx.marketEnabled(),
       session: sessionAt(now),
       webhook: { path: '/api/trading/tradingview', key: this.saved.webhookKey },
       tradePilot: { url: this.saved.tradePilot.url, forwarding: !!(this.saved.tradePilot.url && this.saved.tradePilot.key) },

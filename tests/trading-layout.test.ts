@@ -45,3 +45,13 @@ test('resident advisers leave their seated desks using clear routes rather than 
     }
   }
 });
+
+test('session kiosk has an accessible approach and navigation avoids its footprint', async () => {
+  const { SESSION_STATION: kiosk } = await import('../src/shared/layout');
+  const { officeNav } = await import('../src/shared/nav');
+  const nav = officeNav();
+  assert.equal(nav.walkable(kiosk.x, kiosk.z), false);
+  assert.equal(nav.walkable(kiosk.x, kiosk.approachZ), true);
+  assert.ok(nav.route([5, 4.5], [kiosk.x, kiosk.approachZ]).length > 1);
+  assert.equal(nav.walkable(8.5, kiosk.z), true, 'elevator aisle remains clear');
+});

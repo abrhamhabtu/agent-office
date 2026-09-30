@@ -594,3 +594,6 @@ export const POLES: readonly PoleSpot[] = [
 ];
 /** A pole's hole in the floor, the railing round it, and how far from the pole you hang on. */
 export const POLE = { hole: 0.68, rail: 0.9, grip: 0.4, radius: 0.055 } as const;
+
+/** Lounge kiosk: keep the elevator aisle clear; approach from the south. */
+export const SESSION_STATION = { x: 10.2, z: -3.8, width: 1.4, depth: 0.7, approachZ: -2.4 } as const;

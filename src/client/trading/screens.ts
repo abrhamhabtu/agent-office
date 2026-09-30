@@ -145,8 +145,8 @@ export interface ChartOpts {
 }
 
 /** Source clocks remain visible even when the chart or terminal is still waiting. */
-export function drawFreshness(g: CanvasRenderingContext2D, x: number, y: number, w: number, q: Quote | undefined, barAt: number | null, now: number, size = 11) {
-  const f = dataFreshness(q, now, barAt);
+export function drawFreshness(g: CanvasRenderingContext2D, x: number, y: number, w: number, q: Quote | undefined, barAt: number | null, now: number, size = 11, barSource = q?.barSource ?? 'Yahoo') {
+  const f = dataFreshness(q, now, barAt, barSource);
   g.save();
   g.globalAlpha = 1;
   g.textAlign = 'left';
@@ -156,7 +156,7 @@ export function drawFreshness(g: CanvasRenderingContext2D, x: number, y: number,
   g.fillText(`${f.source} · ${f.status}`, x, y, w);
   g.fillStyle = INK.dim;
   g.fillText(`Quote ${marketTime(q?.updatedAt)} · ${f.quoteStatus}`, x, y + size + 3, w);
-  g.fillText(`Yahoo bars ${marketTime(barAt)} · ${f.barStatus}`, x, y + (size + 3) * 2, w);
+  g.fillText(`${f.barSource} bars ${marketTime(barAt)} · ${f.barStatus}`, x, y + (size + 3) * 2, w);
   g.restore();
 }
 
@@ -622,7 +622,7 @@ function proposalCard(g: CanvasRenderingContext2D, x: number, y: number, cw: num
     g.fillText(fmt(v, q?.decimals ?? 2), x + cw - 14, y + 111 + k * 17);
     g.textAlign = 'left';
   });
-  drawFreshness(g, x + 14, y + ch - 72, cw - 28, q, p.dataAt ?? null, now, 10);
+  drawFreshness(g, x + 14, y + ch - 72, cw - 28, q, p.dataAt ?? null, now, 10, p.dataSource);
   const size = p.sizing.find((z) => z.micros > 0);
   g.fillStyle = INK.dim;
   g.font = `800 14px ${SANS}`;
@@ -1046,7 +1046,7 @@ export class BossScreen extends Screen {
       g.fillStyle = STAGE_COLOR[p.stage] ?? INK.dim;
       g.fillText(clip(g, `${p.symbol} ${PLAYBOOK_BY_ID[p.playbook].short} ${p.side ?? ''} · ${STAGE_LABEL[p.stage]} · ${p.title}`, this.W - 60), 28, 512 + i * 28);
       g.font = `700 11px ${MONO}`;
-      g.fillText(dataFreshness(quoteOf(s, p.symbol), Date.now(), p.dataAt ?? null).detail, 28, 526 + i * 28, this.W - 60);
+      g.fillText(dataFreshness(quoteOf(s, p.symbol), Date.now(), p.dataAt ?? null, p.dataSource).detail, 28, 526 + i * 28, this.W - 60);
       g.font = `800 19px ${SANS}`;
     });
   }

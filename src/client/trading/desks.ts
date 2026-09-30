@@ -129,7 +129,7 @@ class DeskMonitor extends Screen {
           g.font = `900 18px ${SANS}`;
           g.fillText(clip(g, `${STAGE_LABEL[plan.stage] ?? ''}  ${plan.title}`, this.W - 32), 16, 66);
           g.font = `700 10px ${MONO}`;
-          g.fillText(dataFreshness(q, now, plan.dataAt ?? null).detail, 16, 79, this.W - 32);
+          g.fillText(dataFreshness(q, now, plan.dataAt ?? null, plan.dataSource).detail, 16, 79, this.W - 32);
         }
         if (q) drawChart(g, 8, 80, this.W - 16, this.H - 88, job.fives ? fives(s.bars[sym]).slice(-36) : s.bars[sym].slice(-70), q, s.levels[sym], { ...job.view, grid: true, tag: true, plan: plan && ['ready', 'live', 'watching'].includes(plan.stage) ? plan : null });
         return;
@@ -206,7 +206,7 @@ class DeskMonitor extends Screen {
           g.fillText(PLAYBOOK_BY_ID[p.playbook].short, 84, y + 22);
           g.fillStyle = STAGE_COLOR[p.stage] ?? INK.dim;
           g.fillText(STAGE_LABEL[p.stage] ?? p.stage, 190, y + 22);
-          drawFreshness(g, 18, y + 36, this.W - 36, s.quotes.find(q => q.symbol === p.symbol), p.dataAt ?? null, now, 10);
+          drawFreshness(g, 18, y + 36, this.W - 36, s.quotes.find(q => q.symbol === p.symbol), p.dataAt ?? null, now, 10, p.dataSource);
           if (p.r != null) {
             g.textAlign = 'right';
             g.fillStyle = INK.warn;

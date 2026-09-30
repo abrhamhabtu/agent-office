@@ -59,7 +59,7 @@ function merge(into: Bar[], fresh: Bar[]): Bar[] {
   return [...map.values()].filter((b) => b.ts >= cut).sort((a, b) => a.ts - b.ts);
 }
 
-interface Live {
+export interface Live {
   last: number;
   prevClose: number;
   high: number;
@@ -72,6 +72,9 @@ interface Live {
 export class Market {
   private bars = new Map<Symbol, Bar[]>();
   private live = new Map<Symbol, Live>();
+  private projectXBars = new Map<Symbol, { bars: Bar[]; source: string }>();
+  private projectXQuotes = new Map<Symbol, Live>();
+  private projectXUp = false;
   private context = new Map<string, ContextQuote>();
   private status = new Map<string, FeedStatus>();
   private timers: NodeJS.Timeout[] = [];
@@ -209,10 +212,41 @@ export class Market {
     ws.on('error', () => ws.close());
   }
 
+  projectXStatus(ok: boolean, note: string) {
+    this.projectXUp = ok;
+    const before = this.status.get('projectx-market');
+    this.status.set('projectx-market', { id: 'projectx-market', name: 'TopstepX · real-time futures', ok, lastAt: ok ? Date.now() : before?.lastAt ?? null, note });
+  }
+
+  projectXNote(note: string) {
+    const status = this.status.get('projectx-market');
+    if (status) status.note = note;
+  }
+  setProjectXQuote(sym: Symbol, quote: Live, note?: string) {
+    const previous = this.projectXQuotes.get(sym);
+    if (previous && quote.updatedAt < previous.updatedAt) return;
+    this.projectXQuotes.set(sym, quote);
+    this.projectXStatus(true, note ?? 'Exchange quotes streaming; ProjectX closed 1-minute candles refresh every 20s. Simulation subscription; no orders.');
+  }
+  setProjectXBars(sym: Symbol, fresh: Bar[], source: string) {
+    const before = this.projectXBars.get(sym);
+    this.projectXBars.set(sym, { bars: merge(before?.source === source ? before.bars : [], fresh), source });
+    this.onBars(sym);
+  }
+  hasProjectXBars(sym: Symbol) { return !!this.projectXBars.get(sym)?.bars.length; }
+  barSource(sym: Symbol) { return this.projectXBars.get(sym)?.source ?? 'Yahoo'; }
+  clearProjectX() {
+    const symbols = [...this.projectXBars.keys()];
+    this.projectXBars.clear(); this.projectXQuotes.clear(); this.projectXUp = false;
+    this.status.delete('projectx-market');
+    for (const sym of symbols) this.onBars(sym);
+  }
+  private selectedBars(sym: Symbol) { return this.projectXBars.get(sym)?.bars ?? this.bars.get(sym) ?? []; }
+
   /** The minute bars for a market, with the forming minute closed on the live price. */
   barsOf(sym: Symbol): Bar[] {
-    const bars = this.bars.get(sym) ?? [];
-    const live = this.live.get(sym);
+    const bars = this.selectedBars(sym);
+    const live = this.projectXQuotes.get(sym) ?? this.live.get(sym);
     if (!bars.length || !live) return bars;
     const tail = bars[bars.length - 1]!;
     const minute = Math.floor(Date.now() / 60_000) * 60_000;
@@ -224,7 +258,7 @@ export class Market {
   /** Bars that have finished: the forming minute is left out, so a setup never triggers on half a candle. */
   closedBars(sym: Symbol): Bar[] {
     const minute = Math.floor(Date.now() / 60_000) * 60_000;
-    const bars = this.bars.get(sym) ?? [];
+    const bars = this.selectedBars(sym);
     return bars.length && bars[bars.length - 1]!.ts >= minute ? bars.slice(0, -1) : bars;
   }
 
@@ -232,8 +266,8 @@ export class Market {
     const out: Quote[] = [];
     for (const sym of SYMBOLS) {
       const spec = INSTRUMENTS[sym];
-      const live = this.live.get(sym);
-      const bars = this.bars.get(sym) ?? [];
+      const live = this.projectXQuotes.get(sym) ?? this.live.get(sym);
+      const bars = this.selectedBars(sym);
       const last = live?.last ?? bars.at(-1)?.close;
       if (last == null) continue;
       const day = tradingDay(Date.now());
@@ -254,8 +288,9 @@ export class Market {
         change: last - prevClose,
         changePct: prevClose ? ((last - prevClose) / prevClose) * 100 : 0,
         updatedAt,
-        source: live?.source ?? (sym === 'BTC' ? 'Yahoo' : 'CME · Yahoo'),
-        stale: Date.now() - updatedAt > (sym === 'BTC' ? 120_000 : 15 * 60_000),
+        barSource: this.barSource(sym),
+        source: live?.source ?? (this.projectXBars.has(sym) ? `${this.barSource(sym)} · candle close` : sym === 'BTC' ? 'Yahoo' : 'CME · Yahoo'),
+        stale: (this.projectXQuotes.has(sym) && !this.projectXUp) || Date.now() - updatedAt > (sym === 'BTC' || live?.source.startsWith('ProjectX') ? 120_000 : 15 * 60_000),
       });
     }
     return out;

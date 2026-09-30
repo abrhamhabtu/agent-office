@@ -1,3 +1,5 @@
+import { ProjectXMarket } from './projectx-market.js';
+import type { Market } from './market.js';
 import { chmodSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import type { JournalInfo, JournalTrade } from '../../shared/trading.js';
@@ -13,6 +15,7 @@ interface Saved {
   userName: string;
   apiKey: string;
   baseUrl: string;
+  marketData?: boolean;
 }
 
 interface Fill {
@@ -89,13 +92,20 @@ export function tradesFromFills(fills: Fill[], accountId: number): JournalTrade[
 
 export class ProjectX {
   private file: string;
+  private stream: ProjectXMarket | null = null;
   private saved: Saved | null = null;
   private token: string | null = null;
   private timer: NodeJS.Timeout | null = null;
   private info: JournalInfo = { connected: false, userName: null, error: null, accounts: [], today: [], syncedAt: null };
 
-  constructor(dataDir: string) {
+  constructor(dataDir: string, market?: Market) {
     this.file = path.join(dataDir, 'trading', 'projectx.json');
+    if (market) this.stream = new ProjectXMarket(market, (route, body) => this.marketRead(route, body), async () => {
+      if (!this.marketEnabled()) throw new Error('Market data disabled');
+      if (!this.token) await this.login();
+      if (!this.marketEnabled()) throw new Error('Market data disabled');
+      return this.token!;
+    });
     try {
       const s = JSON.parse(readFileSync(this.file, 'utf8')) as Saved;
       if (typeof s.userName === 'string' && typeof s.apiKey === 'string') this.saved = { ...s, baseUrl: gatewayUrl(s.baseUrl) ?? DEFAULT_BASE };
@@ -106,24 +116,47 @@ export class ProjectX {
 
   start() {
     if (this.saved) void this.sync();
+    if (this.saved?.marketData && this.saved.baseUrl === DEFAULT_BASE) this.stream?.start();
     this.timer = setInterval(() => void this.sync(), SYNC_EVERY);
   }
 
   stop() {
     if (this.timer) clearInterval(this.timer);
+    void this.stream?.stop();
   }
 
   state(): JournalInfo {
     return { ...this.info, userName: this.saved?.userName ?? null };
   }
 
+  marketEnabled() { return !!this.saved?.marketData && this.saved.baseUrl === DEFAULT_BASE; }
+
+  async setMarketData(enabled: boolean): Promise<string | undefined> {
+    if (!this.saved) return 'Connect ProjectX first';
+    if (enabled && this.saved.baseUrl !== DEFAULT_BASE) return 'Real-time market data currently supports the default TopstepX gateway. Other gateways can still sync the journal.';
+    this.saved.marketData = enabled;
+    writeFileSync(this.file, JSON.stringify(this.saved), { mode: 0o600 });
+    chmodSync(this.file, 0o600);
+    if (enabled) this.stream?.start(); else await this.stream?.stop();
+  }
+
+  private async marketRead(route: 'Contract/available' | 'History/retrieveBars', body: unknown) {
+    if (!this.saved || !this.saved.marketData || this.saved.baseUrl !== DEFAULT_BASE) throw new Error('Market data is disabled');
+    if (!this.token) await this.login();
+    try { return await this.call(route, body, this.token!); }
+    catch (e) { if (this.token) throw e; await this.login(); return this.call(route, body, this.token!); }
+  }
+
   private async call(pathName: string, body: unknown, token?: string): Promise<Record<string, unknown>> {
-    const res = await fetch(`${this.saved!.baseUrl}/${pathName}`, {
+    const saved = this.saved;
+    if (!saved) throw new Error('Disconnected');
+    const res = await fetch(`${saved.baseUrl}/${pathName}`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}) },
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(20_000),
     });
+    if (saved !== this.saved) throw new Error('Connection changed');
     if (res.status === 401) {
       this.token = null;
       throw new Error('Session expired');
@@ -135,7 +168,10 @@ export class ProjectX {
   }
 
   private async login() {
-    const auth = await this.call('Auth/loginKey', { userName: this.saved!.userName, apiKey: this.saved!.apiKey });
+    const saved = this.saved;
+    if (!saved) throw new Error('Disconnected');
+    const auth = await this.call('Auth/loginKey', { userName: saved.userName, apiKey: saved.apiKey });
+    if (saved !== this.saved) throw new Error('Connection changed');
     if (typeof auth.token !== 'string' || !auth.token) throw new Error('ProjectX did not return a session');
     this.token = auth.token;
   }
@@ -147,12 +183,14 @@ export class ProjectX {
     const base = gatewayUrl(baseUrl);
     if (!base) return 'The gateway has to be an https:// address';
     const before = this.saved;
+    await this.stream?.stop();
     this.saved = { userName: userName.trim(), apiKey, baseUrl: base };
     this.token = null;
     try {
       await this.login();
     } catch (e) {
       this.saved = before;
+      if (before?.marketData && before.baseUrl === DEFAULT_BASE) this.stream?.start();
       return (e as Error).message;
     }
     mkdirSync(path.dirname(this.file), { recursive: true });
@@ -163,6 +201,7 @@ export class ProjectX {
   }
 
   disconnect() {
+    void this.stream?.stop();
     this.saved = null;
     this.token = null;
     this.info = { connected: false, userName: null, error: null, accounts: [], today: [], syncedAt: null };
@@ -171,6 +210,7 @@ export class ProjectX {
 
   private async sync() {
     if (!this.saved) return;
+    const saved = this.saved;
     try {
       if (!this.token) await this.login();
       const data = await this.call('Account/search', { onlyActiveAccounts: true }, this.token!);
@@ -182,8 +222,10 @@ export class ProjectX {
         const h = await this.call('Trade/search', { accountId: a.id, startTimestamp: since, endTimestamp: new Date().toISOString() }, this.token!);
         today.push(...tradesFromFills((h.trades as Fill[]) ?? [], a.id));
       }
-      this.info = { connected: true, userName: this.saved.userName, error: null, accounts, today: today.sort((x, y) => y.exitAt - x.exitAt), syncedAt: Date.now() };
+      if (saved !== this.saved) return;
+      this.info = { connected: true, userName: saved.userName, error: null, accounts, today: today.sort((x, y) => y.exitAt - x.exitAt), syncedAt: Date.now() };
     } catch (e) {
+      if (saved !== this.saved) return;
       this.info = { ...this.info, connected: false, error: (e as Error).message };
     }
   }

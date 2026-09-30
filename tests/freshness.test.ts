@@ -36,3 +36,12 @@ test('missing or invalid timestamps are never substituted with the refresh time'
 test('source-reported stale data overrides a recent timestamp', () => {
   assert.equal(dataFreshness(quote({ stale: true }), now).status, 'STALE');
 });
+
+test('ProjectX ticks and candles can be current; an older Yahoo proposal keeps its own basis', () => {
+  const q = quote({ source: 'ProjectX · NQZ26', barSource: 'ProjectX · NQZ26', updatedAt: now });
+  assert.equal(dataFreshness(q, now, now - 60_000).status, 'CURRENT');
+  assert.match(dataFreshness(q, now, now - 60_000).detail, /ProjectX · NQZ26 bars/);
+  assert.equal(dataFreshness(q, now, now - 60_000, 'Yahoo').status, 'DELAYED BARS');
+  assert.equal(dataFreshness(q, now + 130_000).quoteStatus, 'STALE');
+  assert.equal(dataFreshness(q, now, now - 4 * 60_000).barStatus, 'STALE');
+});

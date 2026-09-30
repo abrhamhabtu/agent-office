@@ -903,6 +903,10 @@ export async function startServer(cfg: Config) {
       case '/api/trading/tradepilot':
         return done(desk.setTradePilot(b.url ?? null, b.key));
       case '/api/trading/projectx':
+        if (b.action === 'market-data') {
+          if (typeof b.enabled !== 'boolean') return done('Choose whether to enable market data');
+          return done(await desk.projectx.setMarketData(b.enabled));
+        }
         if (b.action === 'disconnect') {
           desk.projectx.disconnect();
           return done(undefined);
