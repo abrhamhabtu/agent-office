@@ -1329,7 +1329,3 @@ a.when:hover { text-decoration: underline; }
   .loading-paw, .loading-shadow { animation: none; }
   #loading, .loading-fill { transition: none; }
 }
-
-.screen-page-tabs { display: flex; gap: 8px; margin-bottom: 14px; }
-.screen-page-tabs .btn { background: #f5ecdf; color: #20283a; }
-.screen-page-tabs .btn.on { background: #20283a; color: #f5ecdf; }

@@ -1,10 +1,9 @@
-import { createNewsView, createProposalView, type NewsPage } from './brief-views';
-import './brief.css';
-import type { FloorRole, TradingSnapshot } from '../../shared/trading';
+import type { FloorRole, Proposal, TradingSnapshot } from '../../shared/trading';
+import { dataFreshness } from '../../shared/freshness';
 import { DAILY_STOP, INSTRUMENTS, PLAYBOOK_BY_ID, PLAYBOOKS, PROP_ACCOUNTS, SYMBOLS } from '../../shared/trading';
 import { h, openModal } from '../ui/dom';
 import { trading } from './feed';
-import { accountLabel, fmt, money, pct } from './screens';
+import { accountLabel, fmt, money, pct, STAGE_COLOR, STAGE_LABEL } from './screens';
 
 export type PanelTab = 'proposals' | 'news' | 'playbook' | 'accounts' | 'paper' | 'backtest' | 'alerts' | 'connections';
 
@@ -24,7 +23,7 @@ const BAD = '#d63c55';
 const WARN = '#c98a00';
 
 /** The trading window: every board's detail in one place, with the buttons and settings the boards can't have. */
-export function openTrading(role: FloorRole, start?: PanelTab, initial?: { newsPage?: NewsPage }) {
+export function openTrading(role: FloorRole, start?: PanelTab) {
   let tab: PanelTab = start ?? (role === 'office' ? 'backtest' : 'proposals');
   let note = '';
   const body = h('div.body', { style: 'display:grid;gap:10px;max-height:72vh;overflow:auto' });
@@ -52,20 +51,54 @@ export function openTrading(role: FloorRole, start?: PanelTab, initial?: { newsP
   const dim = (t: string) => h('span', { style: 'opacity:.65' }, t);
   const heading = (t: string) => h('h3', { style: 'margin:6px 0 0' }, t);
   const tone = (v: number) => (v >= 0 ? GOOD : BAD);
+  const check = (c: { label: string; ok: boolean }) => h('span', { style: `color:${c.ok ? GOOD : BAD};font-weight:700;margin-right:12px` }, `${c.ok ? '✓' : '○'} ${c.label}`);
 
-  const newsView = createNewsView(initial?.newsPage);
-  const proposalView = createProposalView({
-    act: (id, action) => { void run(trading.act(id, action)); },
-    markets: (sym) => {
-      const s = trading.snap;
-      if (!s) return;
-      const markets = s.markets.includes(sym) ? s.markets.filter(m => m !== sym) : [...s.markets, sym];
-      void run(trading.post('/api/trading/markets', { markets }));
-    },
-  });
+  const proposalCard = (p: Proposal, s: TradingSnapshot) => {
+    const q = s.quotes.find((x) => x.symbol === p.symbol);
+    const book = PLAYBOOK_BY_ID[p.playbook];
+    const d = q?.decimals ?? 2;
+    const buttons: HTMLElement[] = [];
+    if (p.mark !== 'taken') buttons.push(h('button.btn', { onclick: () => run(trading.act(p.id, 'take')) }, '✋ I took it'));
+    if (p.mark !== 'skipped') buttons.push(h('button.btn', { onclick: () => run(trading.act(p.id, 'skip')) }, 'Skip'));
+    if (p.mark) buttons.push(h('button.btn', { onclick: () => run(trading.act(p.id, 'reset')) }, 'Undo'));
+    return card(
+      row(mono(p.symbol, INSTRUMENTS[p.symbol].ink), p.side ? mono(p.side.toUpperCase(), p.side === 'long' ? GOOD : BAD) : null, h('b', { style: `color:${book.color}` }, book.name), h('span.grow', {}), mono(STAGE_LABEL[p.stage] ?? p.stage, STAGE_COLOR[p.stage]), p.r != null ? mono(`${p.r}R`) : null),
+      h('b', {}, p.title),
+      dim(dataFreshness(q, Date.now(), p.dataAt ?? null, p.dataSource).detail),
+      p.entry != null ? row(mono(`entry ${fmt(p.entry, d)}`), mono(`stop ${fmt(p.stop, d)}`, BAD), mono(`target ${fmt(p.target, d)}`, GOOD), q ? dim(`last ${fmt(q.last, d)}${p.distance != null ? ` · ${fmt(Math.abs(p.distance), d)} pts away` : ''}`) : null) : null,
+      p.checks.length ? h('div', {}, ...p.checks.map(check)) : null,
+      p.sizing.length && p.entry != null ? h('div', { style: 'opacity:.8' }, 'Law of 10: ', ...p.sizing.map((z) => h('span', { style: 'margin-right:14px' }, `${accountLabel(z.accountId)} `, mono(`${z.micros} ${INSTRUMENTS[p.symbol].micro}`), dim(` ($${z.risk})`)))) : null,
+      p.note ? dim(p.note) : null,
+      row(p.mark ? mono(p.mark === 'taken' ? '✋ YOU TOOK IT' : 'SKIPPED', p.mark === 'taken' ? GOOD : WARN) : dim(book.rule), h('span.grow', {}), ...buttons),
+    );
+  };
+
   const views: Record<PanelTab, (s: TradingSnapshot) => (Node | null)[]> = {
-    proposals: (s) => { proposalView.update(s); return [proposalView.element]; },
-    news: (s) => { newsView.update(s); return [newsView.element]; },
+    proposals: (s) => {
+      const shown = s.proposals.filter((p) => p.stage !== 'off');
+      const off = s.proposals.filter((p) => p.stage === 'off');
+      const pick = (sym: (typeof SYMBOLS)[number]) => {
+        const next = s.markets.includes(sym) ? s.markets.filter((m) => m !== sym) : [...s.markets, sym];
+        return run(trading.post('/api/trading/markets', { markets: next }));
+      };
+      return [
+        row(dim('Markets:'), ...SYMBOLS.map((sym) => h('button.btn', { type: 'button', class: s.markets.includes(sym) ? 'on' : '', title: INSTRUMENTS[sym].name, onclick: () => pick(sym) }, sym)), h('span.grow', {}), dim('Every playbook replays today’s real 1-minute bars. Law-of-10 sizes per active account. Never an order.')),
+        ...shown.map((p) => proposalCard(p, s)),
+        off.length ? card(h('b', {}, 'Off hours'), dim(off.map((p) => `${p.symbol} ${PLAYBOOK_BY_ID[p.playbook].short}: ${p.title} · ${dataFreshness(s.quotes.find(q => q.symbol === p.symbol), Date.now(), p.dataAt ?? null, p.dataSource).detail}`).join(' • '))) : null,
+      ];
+    },
+    news: (s) => {
+      const cal = s.news.filter((n) => n.kind === 'calendar').sort((a, b) => a.at - b.at);
+      const heads = s.news.filter((n) => n.kind === 'headline');
+      return [
+        heading('Economic calendar (US, Pacific time)'),
+        ...cal.map((n) =>
+          card(row(mono(n.time), mono(n.impact.toUpperCase(), n.impact === 'high' ? BAD : WARN), h('b', {}, n.headline.split(' · ')[0]!), h('span.grow', {}), n.actual ? mono(`actual ${n.actual}`, GOOD) : null, n.forecast ? dim(`cons ${n.forecast}`) : null, n.previous ? dim(`prev ${n.previous}`) : null)),
+        ),
+        heading('Headlines'),
+        ...heads.map((n) => card(row(mono(n.time), mono(n.impact.toUpperCase(), n.impact === 'high' ? BAD : n.impact === 'med' ? WARN : undefined), n.link ? h('a', { href: n.link, target: '_blank', rel: 'noopener noreferrer', style: 'font-weight:700' }, n.headline) : h('b', {}, n.headline), h('span.grow', {}), dim(`${n.source} · ${n.symbols.join(' ')}`)))),
+      ];
+    },
     playbook: (s) => [
       heading('The morning checklist'),
       ...s.playbook.map((p) =>
@@ -216,14 +249,13 @@ export function openTrading(role: FloorRole, start?: PanelTab, initial?: { newsP
   };
 
   // The tabs only change when you pick one, so a click never lands on a button the next snapshot replaced.
-  const renderNav = () => nav.replaceChildren(...TABS.map((t) => h('button.btn', { type: 'button', class: t.id === tab ? 'on' : '', onclick: () => { tab = t.id; note = ''; renderNav(); render(); body.scrollTop = 0; } }, t.label)));
+  const renderNav = () => nav.replaceChildren(...TABS.map((t) => h('button.btn', { type: 'button', class: t.id === tab ? 'on' : '', onclick: () => ((tab = t.id), (note = ''), renderNav(), render()) }, t.label)));
   const render = () => {
     const s = trading.snap;
     const q = s?.quotes.map((x) => `${x.symbol} ${fmt(x.last, x.decimals)} ${pct(x.changePct)}`).join(' · ');
     foot.textContent = note || (s ? (s.ready ? `${q} · proposals only, never orders` : 'Connecting to the market…') : 'Loading…');
     if (!s) return body.replaceChildren(h('p', {}, 'Waiting for the market desk…'));
-    const nodes = views[tab](s).filter((x): x is Node => !!x);
-    if (nodes.length !== body.childNodes.length || nodes.some((n, i) => body.childNodes[i] !== n)) body.replaceChildren(...nodes);
+    body.replaceChildren(...views[tab](s).filter((x): x is Node => !!x));
   };
   off = trading.on(() => {
     // Redraw with the snapshot unless someone is midway through a click or typing.

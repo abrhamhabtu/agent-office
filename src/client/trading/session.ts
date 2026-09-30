@@ -2,9 +2,8 @@ import { dataFreshness } from '../../shared/freshness';
 import { PLAYBOOKS, SYMBOLS, type Symbol, type PlaybookId } from '../../shared/trading';
 import { h, openModal } from '../ui/dom';
 import { trading } from './feed';
-import { drawChart, fmt, money, INK } from './screens';
+import { drawChart, fmt, money, STAGE_LABEL, INK } from './screens';
 import { openTrading } from './panel';
-import { PROPOSAL_STATUS } from './brief';
 import './session.css';
 
 const MARKET_KEY = 'agent-office.session-market';
@@ -85,7 +84,7 @@ export function openSessionDesk() {
     const lv = s.levels[symbol];
     const keyLevels = [ ['VWAP', lv?.vwap], ['Overnight VWAP', lv?.onVwap], ['Overnight high', lv?.onHigh], ['Overnight low', lv?.onLow], ['Prior high', lv?.priorHigh], ['Prior low', lv?.priorLow], ['Opening range high', lv?.orHigh], ['Opening range low', lv?.orLow], ['Value area high', lv?.vah], ['Point of control', lv?.poc], ['Value area low', lv?.val] ] as const;
     levels.replaceChildren(...keyLevels.map(([label, value]) => h('div', {}, h('dt', {}, label), h('dd', {}, fmt(value, q?.decimals ?? 2)))));
-    plan.replaceChildren(h('strong', {}, p ? `${PROPOSAL_STATUS[p.stage]} · ${p.title}` : 'No proposal for this market'), p?.entry != null ? h('p', {}, `Entry ${fmt(p.entry, q?.decimals)} · Stop ${fmt(p.stop, q?.decimals)} · Target ${fmt(p.target, q?.decimals)}`) : h('p', {}, PLAYBOOKS.find(b => b.id === setup)!.rule));
+    plan.replaceChildren(h('strong', {}, p ? `${STAGE_LABEL[p.stage] ?? p.stage} · ${p.title}` : 'No proposal for this market'), p?.entry != null ? h('p', {}, `Entry ${fmt(p.entry, q?.decimals)} · Stop ${fmt(p.stop, q?.decimals)} · Target ${fmt(p.target, q?.decimals)}`) : h('p', {}, PLAYBOOKS.find(b => b.id === setup)!.rule));
     const pf = dataFreshness(q, now, p?.dataAt ?? null, p?.dataSource);
     text(basis, `Proposal basis · ${pf.detail}`);
     basis.dataset.tone = pf.tone;

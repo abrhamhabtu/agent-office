@@ -168,6 +168,8 @@ export class Laptop {
       const monitor = buildDeskMonitor(this.texture);
       this.root.add(monitor.group);
       this.owned.push(monitor.face.material as THREE.Material);
+      this.root.add(mesh(roundedBox(0.56, 0.018, 0.18, 0.015), toon('#293b4f'), 0.04, 0.01, 0.36, false));
+      this.root.add(mesh(roundedBox(0.07, 0.025, 0.1, 0.02), toon('#293b4f'), 0.4, 0.015, 0.36, false));
       this.openT = 1;
       paintScreen(this.ctx, this.canvas.width, this.canvas.height, undefined, 'Choose an agent');
       this.texture.needsUpdate = true;

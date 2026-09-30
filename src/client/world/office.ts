@@ -22,7 +22,6 @@ import { buildHoop, type HoopView } from './hoop';
 import { buildKitchen } from './kitchen';
 import { buildDeskSigns, type DeskSigns } from './desksigns';
 import { DESK_MONITOR } from './desk-monitor';
-import { buildDeskInput } from './desk-input';
 import { HOOP } from '../../shared/hoop';
 
 export interface Collider {
@@ -1153,9 +1152,6 @@ export function buildDesk(def: DeskDef, index: number, trimMat: THREE.Material):
     group.add(books);
   }
 
-  const input = buildDeskInput();
-  input.position.y = height;
-  group.add(input);
   const laptopAnchor = new THREE.Object3D();
   laptopAnchor.position.set(-DESK_MONITOR.x, height, DESK_MONITOR.z);
   group.add(laptopAnchor);
