@@ -1,8 +1,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { DESKS, FLOOR, HIREABLE_DESKS, WING_DESKS, beanbagsOut, nextFreeSeat } from '../src/shared/layout.js';
+import { BOARDS, DESKS, ELEVATOR, FLOOR, GONG, HIREABLE_DESKS, WING, WING_DESKS, beanbagsOut, nextFreeSeat } from '../src/shared/layout.js';
 import { BUILTIN_MAPS, planMap } from '../src/shared/maps/index.js';
 import { walkable, wayHome } from '../src/shared/nav.js';
+
+test('north-wall displays, elevator and opening bell stay clear of the expandable wing', () => {
+  const shaftLeft = ELEVATOR.x - ELEVATOR.width / 2;
+  const shaftRight = ELEVATOR.x + ELEVATOR.width / 2;
+  assert.ok(BOARDS.pulls.x + BOARDS.pulls.width / 2 + 0.4 < shaftLeft, 'proposals stay visible beside the shaft');
+  assert.ok(shaftRight + 0.4 < GONG.x - GONG.width / 2, 'the bell has space beside the shaft');
+  assert.ok(GONG.x + GONG.width / 2 + 0.4 < WING.minX, 'the bell and elevator leave the wing entrance open');
+});
 
 test('ordinary hires preserve resident desks and fill an expanded wing before overflow seats', () => {
   const occupied = new Set(HIREABLE_DESKS.map((d) => d.id));

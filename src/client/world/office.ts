@@ -1641,7 +1641,7 @@ export function buildOffice(): Office {
   const meeting = buildMeetingRoom(group, colliders, interactables, desks, doors, night);
   fixture('south', MEETING_BOARD.x, MEETING_BOARD.y, MEETING_BOARD.width + 0.4, MEETING_BOARD.height + 0.4);
 
-  // The elevator to the other floors, at the live market end of the north wall.
+  // The elevator to the other floors, in the upstream position west of the opening bell.
   const elevator = buildElevator();
   group.add(elevator.group);
   colliders.push(...elevator.colliders);
@@ -1655,7 +1655,7 @@ export function buildOffice(): Office {
   colliders.push(...garageLift.colliders);
   interactables.push(garageLift.interactable);
 
-  // The gong between the proposals board and the elevator.
+  // The opening bell beside the elevator, clear of the expandable wing.
   const gong = buildGong();
   group.add(gong.group);
   colliders.push(...gong.colliders);
@@ -1668,7 +1668,7 @@ export function buildOffice(): Office {
   colliders.push(...hoop.colliders);
   fixture('west', HOOP.z, (HOOP.board.bottom - 0.6 + HOOP.board.top + 0.1) / 2, HOOP.board.width + 0.2, HOOP.board.top - HOOP.board.bottom + 0.7);
 
-  // The whiteboard, out on the floor between the desks and the lounge.
+  // The whiteboard stays angled into the north-west corner.
   const whiteboard = buildWhiteboard();
   group.add(whiteboard.group);
   colliders.push(...whiteboard.colliders);

@@ -7,8 +7,13 @@ Its wider room and custom boss-office slide are preserved alongside the upstream
 The upstream sync includes the Blender kitchen, plants, lounge and dog models, interactive telescope,
 expandable office wing, drivable garage cars and scenic loop, rooftop darts and axe throwing, maps,
 updated settings, and worker/provider improvements. The expandable wing adds desks 17–20; ordinary
-hires and queued tasks keep the six resident-adviser desks reserved. The wing's desks sit left of
-the trading floor's elevator approach. The new expandable room is separate from the **Back Office** floor.
+hires and queued tasks keep the six resident-adviser desks reserved. The wing's desks are centered in
+the bay. The new expandable room is separate from the **Back Office** floor.
+
+The elevator uses the upstream position between the trading displays and opening bell, with the
+same shaft location on every office floor, the roof and the garage. The displays and their advisers
+sit slightly farther left to clear it; the corner whiteboard stays in place. The existing wider north
+wall fits this arrangement without extending the room, and the right-side wing entrance stays clear.
 
 The graphics controls still offer Battery saver and High quality. Battery saver preserves the world
 behind the first-person hands while disabling outlines and shadows. The upstream sky cycles through

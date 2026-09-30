@@ -3,7 +3,7 @@ import { ELEVATOR, ELEVATOR_CAR, ELEVATOR_FRONT, FLOOR, WALL_HEIGHT } from '../.
 import { mesh, roundedBox, textPlane, toon } from './toon';
 import type { Collider, Interactable } from './office';
 
-// The elevator: a graphite shaft at the live market corner, doors facing into the room. Every floor has
+// The elevator: a graphite shaft beside the opening bell, doors facing into the room. Every floor has
 // it in the same place; riding it swaps the floor around you while the doors are shut.
 
 const STEEL = '#8798a8';
@@ -71,7 +71,7 @@ export function buildElevator(height = WALL_HEIGHT): Elevator {
   for (const sx of [-1, 1]) {
     group.add(mesh(new THREE.BoxGeometry(0.035, WALL_HEIGHT - 0.7, 0.035), toon('#6a798c'), x + sx * (width / 2 - 0.12), WALL_HEIGHT / 2, front + 0.025, false));
   }
-  // Two chamfered cheeks and a floating canopy turn the square shaft into a slim corner portal.
+  // Two chamfered cheeks and a floating canopy frame the shaft's doorway.
   // They sit outside the moving doors, so the car and its shared floor geometry stay aligned.
   for (const side of [-1, 1]) {
     const cheek = mesh(roundedBox(0.38, 3.35, 0.08, 0.035), steelDark, x + side * (doorWidth / 2 + 0.3), 1.78, front + 0.12, false);

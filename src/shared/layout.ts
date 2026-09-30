@@ -103,8 +103,7 @@ export function wingRowZ(row: number): number {
  */
 export const WING_DESKS: DeskDef[] = Array.from({ length: WING.rows }, (_, i) => {
   const z = wingRowZ(i + 1);
-  // Keep the new desks left of the trading office’s elevator approach.
-  const x = WING.minX + 2.3;
+  const x = (WING.minX + WING.maxX) / 2;
   const n = DESKS.length + 2 * i + 1;
   return [
     { id: `desk-${n}`, x, z: z - DESK_DEPTH / 2, rotY: Math.PI, label: `Desk ${n}`, wing: i + 1 },
@@ -159,11 +158,11 @@ export type StationKind = 'issues' | 'pulls' | 'queue' | 'chief' | 'tape' | 'lev
  */
 export const STATIONS: DeskDef[] = [
   // Wire stands just to the left of the news display, beside the corner whiteboard.
-  { id: 'station-issues', station: 'issues', x: -14.6, z: FLOOR.minZ + 1.3, rotY: Math.PI, label: 'News board' },
+  { id: 'station-issues', station: 'issues', x: -15.8, z: FLOOR.minZ + 1.3, rotY: Math.PI, label: 'News board' },
   // Between the task queue and the PR board.
-  { id: 'station-pulls', station: 'pulls', x: 1, z: FLOOR.minZ + 1.3, rotY: Math.PI, label: 'Proposals board' },
+  { id: 'station-pulls', station: 'pulls', x: -0.2, z: FLOOR.minZ + 1.3, rotY: Math.PI, label: 'Proposals board' },
   // Between the Issues board and the task queue.
-  { id: 'station-queue', station: 'queue', x: -6.8, z: FLOOR.minZ + 1.3, rotY: Math.PI, label: 'Playbook board' },
+  { id: 'station-queue', station: 'queue', x: -8, z: FLOOR.minZ + 1.3, rotY: Math.PI, label: 'Playbook board' },
 ];
 /** A board agent's kiosk: its top, and how far behind its middle (toward the wall) the agent stands. */
 export const KIOSK = { width: 0.8, depth: 0.5, height: 0.55, stand: 0.55 } as const;
@@ -259,10 +258,10 @@ export function deskSeat(desk: DeskDef, offset = 0.85): { x: number; z: number }
 
 /** Wall boards. `rotY` is the way the board faces (0 = +z, like the north-wall boards). */
 export const BOARDS = {
-  // News stays flat on the north wall. The full display row shifts right to open the corner for the whiteboard.
-  issues: { x: -10.7, y: 2.1, z: FLOOR.minZ + 0.08, rotY: 0, width: 6, height: 3, label: '📰 News' },
-  queue: { x: -2.9, y: 2.1, z: FLOOR.minZ + 0.08, rotY: 0, width: 6, height: 3, label: '📋 Playbook' },
-  pulls: { x: 4.9, y: 2.1, z: FLOOR.minZ + 0.08, rotY: 0, width: 6, height: 3, label: '🎯 Trade proposals' },
+  // Leave the corner whiteboard in place and clear the upstream elevator shaft to the east.
+  issues: { x: -11.9, y: 2.1, z: FLOOR.minZ + 0.08, rotY: 0, width: 6, height: 3, label: '📰 News' },
+  queue: { x: -4.1, y: 2.1, z: FLOOR.minZ + 0.08, rotY: 0, width: 6, height: 3, label: '📋 Playbook' },
+  pulls: { x: 3.7, y: 2.1, z: FLOOR.minZ + 0.08, rotY: 0, width: 6, height: 3, label: '🎯 Trade proposals' },
   // East wall, north of the lounge TV.
   services: { x: FLOOR.maxX - 0.08, y: 2.1, z: -8.2, rotY: -Math.PI / 2, width: 6, height: 3, label: '🔌 Connectors' },
 } as const;
@@ -289,8 +288,8 @@ export const BOOKSHELF = { x: -6.5, z: FLOOR.maxZ - 0.21, width: 1.7, depth: 0.4
 
 export const SPAWN = { x: 5, z: 4.5 } as const;
 
-/** The gong: on the north wall between the proposals board and elevator. It rings when a PR merges. */
-export const GONG = { x: 11.3, z: FLOOR.minZ + 0.75, width: 1.9, height: 2.45 } as const;
+/** The opening bell: beside the elevator, between its shaft and the expandable wing. */
+export const GONG = { x: 11.8, z: FLOOR.minZ + 0.75, width: 1.9, height: 2.45 } as const;
 
 /** Potted plants around the room: where each stands, and how big it is. */
 export const PLANTS: readonly (readonly [x: number, z: number, scale: number])[] = [
@@ -537,10 +536,10 @@ export function seatHere(key: string, onRoof: boolean): SeatPlace | undefined {
 }
 
 /**
- * The elevator: a shaft against the north wall by the live market corner, with its
+ * The elevator: in the upstream position against the north wall, west of the opening bell, with its
  * doors facing into the room. Every floor has it in the same spot, so you step out where you got in.
  */
-export const ELEVATOR = { x: 18.8, width: 2.6, depth: 2.4, wall: 0.14, doorWidth: 1.4, doorHeight: 2.4 } as const;
+export const ELEVATOR = { x: 8.5, width: 2.6, depth: 2.4, wall: 0.14, doorWidth: 1.4, doorHeight: 2.4 } as const;
 /** Where the doors are: the front of the shaft. */
 export const ELEVATOR_FRONT = FLOOR.minZ + ELEVATOR.depth;
 /** The inside of the car, where you stand to ride. */
