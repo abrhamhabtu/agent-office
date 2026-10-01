@@ -6,8 +6,8 @@ import type { TradingSnapshot } from '../shared/trading.js';
 import { DAILY_STOP, INSTRUMENTS } from '../shared/trading.js';
 import { officePrompt, type PromptSource } from './prompts.js';
 
-export type TradingStationKind = Extract<StationKind, 'chief' | 'tape' | 'levels' | 'risk' | 'backtest' | 'paper'>;
-const TRADING_STATIONS = new Set<StationKind>(['chief', 'tape', 'levels', 'risk', 'backtest', 'paper']);
+export type TradingStationKind = Extract<StationKind, 'chief' | 'tape' | 'levels' | 'risk' | 'backtest' | 'paper' | 'pine'>;
+const TRADING_STATIONS = new Set<StationKind>(['chief', 'tape', 'levels', 'risk', 'backtest', 'paper', 'pine']);
 
 export function isTradingStation(kind: StationKind): kind is TradingStationKind {
   return TRADING_STATIONS.has(kind);
@@ -85,6 +85,12 @@ export function stationSnapshot(kind: StationKind, s: TradingSnapshot): string |
       best: s.backtest.best,
       note: s.backtest.note,
     } : null } : {}),
+    ...(kind === 'pine' ? {
+      vault: s.vault.scripts.map(({ id, name, summary, rules, versions }) => ({ id, name, summary, rules, versions: versions.map(({ version, date, status, parent, changelog, sha, intact, by, fresh, test }) => ({ version, date, status, parent, changelog, sha, intact, by, unseenByOwner: fresh, test: test ? { window: `${test.from} to ${test.to}`, sessions: test.days, markets: test.symbols, settings: test.params, all: test.all, earlierDays: test.inSample, laterDaysHeldBack: test.outSample, bySymbol: test.bySymbol, against: test.vs } : null })) })),
+      lab: s.vault.lab,
+      backtest: s.backtest ? { days: s.backtest.days, ranAt: s.backtest.ranAt, stats: s.backtest.stats.map(({ playbook, symbol, trades, wins, losses, winRate, avgR, totalR, maxDrawdownR }) => ({ playbook, symbol, trades, wins, losses, winRate, avgR, totalR, maxDrawdownR })), note: s.backtest.note } : null,
+      recentAlerts: s.alerts.slice(0, 10).map(({ at, symbol, side, setup, price, stop, target, ver }) => ({ at, symbol, side, setup, price, stop, target, ver })),
+    } : {}),
     ...(kind === 'paper' ? { paper: {
       todayR: s.paper.todayR,
       todayDollars: s.paper.todayDollars,

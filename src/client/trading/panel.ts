@@ -4,10 +4,11 @@ import { DAILY_STOP, INSTRUMENTS, PLAYBOOK_BY_ID, PLAYBOOKS, PROP_ACCOUNTS, SYMB
 import { h, openModal } from '../ui/dom';
 import { trading } from './feed';
 import { accountLabel, fmt, money, pct, STAGE_COLOR, STAGE_LABEL } from './screens';
+import { openStrategyDesk } from './strategy';
 import { openBacktestLab } from './backtestlab';
 import { openEvalSim } from './evalsim';
 
-export type PanelTab = 'proposals' | 'news' | 'playbook' | 'accounts' | 'paper' | 'backtest' | 'alerts' | 'connections';
+export type PanelTab = 'proposals' | 'news' | 'playbook' | 'accounts' | 'paper' | 'backtest' | 'vault' | 'alerts' | 'connections';
 
 const TABS: { id: PanelTab; label: string }[] = [
   { id: 'proposals', label: '🎯 Proposals' },
@@ -16,6 +17,7 @@ const TABS: { id: PanelTab; label: string }[] = [
   { id: 'accounts', label: '🛡️ Risk guard' },
   { id: 'paper', label: '📒 Paper' },
   { id: 'backtest', label: '🧪 Backtest' },
+  { id: 'vault', label: '🌲 Strategy' },
   { id: 'alerts', label: '🔔 Alerts & journal' },
   { id: 'connections', label: '🔌 Connections' },
 ];
@@ -208,6 +210,18 @@ export function openTrading(role: FloorRole, start?: PanelTab) {
         ? s.journal.today.map((t) => card(row(mono(new Date(t.exitAt).toLocaleTimeString()), mono(t.symbol), mono(t.side.toUpperCase(), t.side === 'long' ? GOOD : BAD), mono(`×${t.qty}`), dim(`${fmt(t.entry)} → ${fmt(t.exit)}`), h('span.grow', {}), mono(money(t.pnl), tone(t.pnl)))))
         : [dim(s.journal.connected ? 'No trades on your accounts in the last day.' : 'Connect ProjectX under 🔌 Connections to pull your real fills here. The Journal desk reviews them against the playbooks.')]),
     ],
+    vault: (s) => {
+      const script = s.vault.scripts[0];
+      const live = script?.versions.find((v) => v.status === 'live');
+      const fresh = script?.versions.filter((v) => v.fresh && v.test?.vs?.verdict === 'better') ?? [];
+      return [
+        heading('🌲 Strategy Desk'),
+        card(
+          dim('Your Pine scripts live at the Strategy Desk: every version dated and tested, one tap to copy to TradingView, and the lab’s new finds waiting for you.'),
+          row(live ? mono(`LIVE v${live.version}`, GOOD) : mono('NOTHING LIVE', WARN), fresh.length ? mono(`🆕 ${fresh.length} new version${fresh.length === 1 ? '' : 's'} tested better`, GOOD) : null, h('span.grow', {}), h('button.btn.primary', { onclick: () => { modal.close(); openStrategyDesk(); } }, 'Open the Strategy Desk')),
+        ),
+      ];
+    },
     connections: (s) => {
       const origin = location.origin;
       const hook = `${origin}${s.webhook.path}?key=${s.webhook.key}`;
@@ -216,6 +230,9 @@ export function openTrading(role: FloorRole, start?: PanelTab) {
       const base = h('input', { placeholder: 'https://api.topstepx.com/api', style: 'width:280px' });
       const tpUrl = h('input', { placeholder: 'http://localhost:4040', value: s.tradePilot.url ?? '', style: 'width:220px' });
       const tpKey = h('input', { placeholder: 'Trade Pilot signal key', type: 'password', autocomplete: 'off', style: 'width:240px' });
+      // Unquoted {{…}} numbers are what TradingView substitutes; the office accepts them either way.
+      const barTemplate = '{"type":"bar","symbol":"{{ticker}}","interval":"{{interval}}","time":"{{time}}","open":{{open}},"high":{{high}},"low":{{low}},"close":{{close}},"volume":{{volume}}}';
+      const pineScript = '//@version=6\nindicator("Agent Office feed", overlay = true)\n// Sends each CLOSED candle to the office. Add to a 1-minute chart, then create one alert:\n// Condition = this indicator -> "Any alert() function call", Webhook URL = the office\'s.\nsendCandles = input.bool(true, "Send candles to the office")\nf(x) => str.tostring(x, "#.########")\nif sendCandles and barstate.isconfirmed\n    alert(\'{"type":"bar","symbol":"\' + syminfo.ticker + \'","interval":"\' + timeframe.period + \'","time":\' + str.tostring(time) + \',"open":\' + f(open) + \',"high":\' + f(high) + \',"low":\' + f(low) + \',"close":\' + f(close) + \',"volume":\' + f(nz(volume)) + \'}\', alert.freq_once_per_bar_close)';
       const template = JSON.stringify({ symbol: '{{ticker}}', side: 'long', setup: 'VWAP Double Break', price: '{{close}}', message: '{{strategy.order.comment}}' });
       return [
         heading('Data connections'),
@@ -227,6 +244,21 @@ export function openTrading(role: FloorRole, start?: PanelTab) {
           dim('Alert message (JSON, TradingView fills the {{…}}): name the setup so it rings the right desk.'),
           h('code', { style: 'white-space:pre-wrap;font-size:12px' }, template),
           dim(/localhost|127\.0\.0\.1/.test(origin) ? 'TradingView’s servers can’t reach localhost: open a tunnel (for example `cloudflared tunnel --url http://localhost:4600`) and use its https address in place of this one.' : 'TradingView only posts to https on port 443.'),
+        ),
+        heading('TradingView → real-time candles'),
+        card(
+          dim('Turns your TradingView chart into the office’s real-time feed for NQ, ES, GC and Bitcoin: each closed one-minute candle is laid over Yahoo’s history, becomes the price, and drives the proposals. The labels switch to “TradingView” while it’s current, and back to “delayed” if it goes quiet. It’s only as real-time as your TradingView data (CME futures need their CME subscription), and alerts need a plan with webhooks.'),
+          h('ol', { style: 'margin:6px 0 6px 18px;line-height:1.5;font-size:13px' },
+            h('li', {}, 'In TradingView’s Pine Editor, paste the script below, save it, and ', h('b', {}, 'Add to chart'), ' on a ', h('b', {}, '1-minute'), ' chart of the contract (NQ1!, ES1!, GC1!, or BTCUSD / MBT1!). It sits beside your VWAP and draws nothing.'),
+            h('li', {}, 'Create an alert: Condition ', h('b', {}, 'Agent Office feed → Any alert() function call'), '. Notifications: tick ', h('b', {}, 'Webhook URL'), ' and paste the URL above. Leave the message as it is.'),
+            h('li', {}, 'Repeat on a chart for each market. The first candle lands within a minute.'),
+          ),
+          row(h('button.btn.primary', { onclick: () => void navigator.clipboard?.writeText(pineScript).then(() => ((note = 'Pine script copied'), render())) }, 'Copy Pine script')),
+          h('code', { style: 'white-space:pre-wrap;font-size:11px;display:block;max-height:180px;overflow:auto' }, pineScript),
+          dim('Already have your own script? Paste its alert() block into it instead. Or, without Pine, make an ordinary alert (condition “NQ1! · Greater Than · 0”, Once Per Bar Close) with this message:'),
+          h('code', { style: 'white-space:pre-wrap;font-size:12px' }, barTemplate),
+          row(h('button.btn', { onclick: () => void navigator.clipboard?.writeText(barTemplate).then(() => ((note = 'Candle message copied'), render())) }, 'Copy message')),
+          dim('TradingView’s servers need to reach the webhook URL (https on 443; a tunnel for localhost, see above). Bitcoin already has real-time candles from Coinbase, so it only needs this if you prefer TradingView’s.'),
         ),
         heading('ProjectX → accounts, journal and market data'),
         card(

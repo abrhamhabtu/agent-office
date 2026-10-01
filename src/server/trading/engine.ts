@@ -269,6 +269,9 @@ export interface ScanView {
   stop: number | null;
   target: number | null;
   note: string;
+  /** When the trade was entered, and when it resolved (for the board's timer). */
+  triggeredAt?: number;
+  endedAt?: number;
 }
 
 export interface DayResult {
@@ -1052,12 +1055,12 @@ export function replayDay(symbol: Symbol, bars: Bar[], prior: Bar[], opts: { liv
     const live = [...open.values()].find((o) => o.t.playbook === s.id)?.t;
     const done = [...trades].reverse().find((t) => t.playbook === s.id);
     if (live) {
-      views[s.id] = { stage: 'live', side: live.side, title: `In the trade: ${live.why}`, checks: [], entry: live.entry, stop: live.stop, target: live.target, note: `${live.r >= 0 ? '+' : ''}${live.r}R on paper` };
+      views[s.id] = { stage: 'live', side: live.side, title: `In the trade: ${live.why}`, checks: [], entry: live.entry, stop: live.stop, target: live.target, note: `${live.r >= 0 ? '+' : ''}${live.r}R on paper`, triggeredAt: live.entryAt };
     } else {
       const v = s.view(ctx);
       // A setup that just resolved shows how it went until the playbook has something new.
       if (done && (v.stage === 'done' || v.stage === 'off' || v.stage === 'watching') && ctx && ctx.b.ts - (done.exitAt ?? 0) < 20 * 60_000) {
-        views[s.id] = { stage: done.outcome === 'win' ? 'won' : done.outcome === 'loss' ? 'lost' : 'closed', side: done.side, title: `${done.outcome === 'win' ? 'Target hit' : done.outcome === 'loss' ? 'Stopped out' : 'Closed flat'}: ${done.why}`, checks: v.checks, entry: done.entry, stop: done.stop, target: done.target, note: `${done.r >= 0 ? '+' : ''}${done.r}R` };
+        views[s.id] = { stage: done.outcome === 'win' ? 'won' : done.outcome === 'loss' ? 'lost' : 'closed', side: done.side, title: `${done.outcome === 'win' ? 'Target hit' : done.outcome === 'loss' ? 'Stopped out' : 'Closed flat'}: ${done.why}`, checks: v.checks, entry: done.entry, stop: done.stop, target: done.target, note: `${done.r >= 0 ? '+' : ''}${done.r}R`, triggeredAt: done.entryAt, endedAt: done.exitAt ?? undefined };
       } else views[s.id] = v;
     }
   }

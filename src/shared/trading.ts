@@ -231,6 +231,12 @@ export interface Proposal {
   distance: number | null;
   /** Micros per account at its Law-of-10 risk, keyed by account id. */
   sizing: { accountId: string; micros: number; risk: number }[];
+  /** When it was triggered (the entry bar), while it's in a trade or after it resolved. */
+  triggeredAt?: number | null;
+  /** When it resolved (target, stop or closed flat). */
+  endedAt?: number | null;
+  /** When the office first saw it in this stage, for setups that have no trade yet (at the level, watching). */
+  stageSince?: number | null;
   /** The person's own call on it: took it, skipped it, or nothing yet. */
   mark: 'taken' | 'skipped' | null;
   note: string;
@@ -481,6 +487,12 @@ export interface TvAlert {
   message: string;
   /** Which playbook it rang for, when the setup names one. */
   playbook: PlaybookId | null;
+  /** The alert's own plan, when the script sends one (the VWAP Double Break suite does). */
+  stop?: number | null;
+  target?: number | null;
+  nyVwap?: number | null;
+  /** The Pine version that sent it, when the script says (the Vault's versions do). */
+  ver?: string | null;
 }
 
 export interface JournalTrade {
@@ -546,6 +558,133 @@ export interface FeedStatus {
   note: string;
 }
 
+// ---- The Pine Vault ------------------------------------------------------------------------------------
+
+/** Where a version of a Pine script stands. One is LIVE at a time; nothing goes live except when the owner says so. */
+export type PineStatus = 'live' | 'candidate' | 'experiment' | 'retired';
+
+/** The settings of the VWAP Double Break script that change its trades. */
+export interface PineParams {
+  /** Opening range, minutes from the 09:30 ET open. */
+  orMinutes: number;
+  /** Room past the far side of the range, in points. */
+  stopBuffer: number;
+  /** The most a micro may lose; the stop is pulled in to it. */
+  maxLoss: number;
+  /** The target as a multiple of the risk. */
+  rMultiple: number;
+  /** When a double break may fire, Eastern time, "HHMM-HHMM". */
+  window: string;
+  /** One re-entry after a stop (DB2). */
+  recovery: boolean;
+}
+
+export interface PineMetrics {
+  trades: number;
+  wins: number;
+  winRate: number;
+  totalR: number;
+  avgR: number;
+  maxDrawdownR: number;
+  /** How much one trade's result varies (standard deviation, in R): the noise any comparison has to beat. */
+  stdR: number;
+  profitFactor: number | null;
+  /** For one micro contract. */
+  dollars: number;
+}
+
+/** What replaying a version on real bars showed. Paper evidence, never a promise. */
+export interface PineTest {
+  ranAt: number;
+  from: string;
+  to: string;
+  days: number;
+  symbols: Symbol[];
+  all: PineMetrics;
+  /** The earlier two thirds of the days, then the later third the version wasn't chosen on. */
+  inSample: PineMetrics;
+  outSample: PineMetrics;
+  bySymbol: Partial<Record<Symbol, PineMetrics>>;
+  params: PineParams;
+  /** Against the version it was made from, when the lab made it. */
+  vs: { version: string; dAvgR: number; dTotalR: number; verdict: 'better' | 'same' | 'worse' | 'unproven'; reason: string; /** How sure: the gap against the noise in this many trades. */ confidence: 'low' | 'medium' | 'high' } | null;
+}
+
+export interface PineVersionInfo {
+  version: string;
+  /** The day it was saved, Pacific (YYYY-MM-DD). */
+  date: string;
+  status: PineStatus;
+  /** The version it was made from, so the history reads as a tree. */
+  parent: string | null;
+  changelog: string[];
+  /** A short fingerprint of the exact source, so a stored version can't quietly change. */
+  sha: string;
+  lines: number;
+  /** The stored file still matches its fingerprint. */
+  intact: boolean;
+  /** What replaying it on real bars showed, when that's been done. */
+  test: PineTest | null;
+  /** Made by the test lab and not looked at yet: the Strategy agent has news. */
+  fresh: boolean;
+  /** Who made it: the owner (saved or imported) or the test lab. */
+  by: 'owner' | 'lab';
+}
+
+export interface PineScriptInfo {
+  id: string;
+  name: string;
+  /** The office playbook this script is the TradingView version of, if it is one. */
+  playbook: PlaybookId | null;
+  summary: string;
+  /** The rules the script encodes, in a line each: what "locked" means for it. */
+  rules: string[];
+  /** Newest first. */
+  versions: PineVersionInfo[];
+}
+
+/** What one run of the test lab did, so there is never any doubt that it ran and what it tried. */
+export interface LabReport {
+  ranAt: number;
+  /** How long it took, in milliseconds. */
+  took: number;
+  script: string;
+  scriptName: string;
+  /** The live version that was replayed as the baseline. */
+  version: string;
+  days: number;
+  from: string;
+  to: string;
+  symbols: Symbol[];
+  /** Bars it loaded per market. */
+  bars: Partial<Record<Symbol, number>>;
+  baseline: { trades: number; avgR: number; totalR: number };
+  /** Every change it tried, with the verdict. */
+  tried: { change: string[]; trades: number; avgR: number; verdict: 'better' | 'same' | 'worse' | 'unproven'; confidence: 'low' | 'medium' | 'high'; reason: string }[];
+  /** The version it saved from this run, if one held up. */
+  saved: string | null;
+  /** A change that held up but was already saved from an earlier run, and as which version. */
+  existing: string | null;
+  /** The change that held up, in words, when one did. */
+  best: string[] | null;
+  /** The other saved versions it re-tested. */
+  retested: string[];
+}
+
+export interface VaultView {
+  scripts: PineScriptInfo[];
+  /** The test lab that replays the live version and tries changes to it. */
+  lab: {
+    ranAt: number | null;
+    running: boolean;
+    note: string;
+    /** What it's doing right now, while it runs. */
+    stage: string;
+    /** The last run, in full. */
+    report: LabReport | null;
+  };
+}
+
 export interface TradingSnapshot {
   at: number;
   feeds: FeedStatus[];
@@ -574,6 +713,8 @@ export interface TradingSnapshot {
   guard: RiskGuard;
   /** The markets the proposals cover (the rest still tick along on the market board). */
   markets: Symbol[];
+  /** The Pine scripts the office keeps, with their versions (never their source). */
+  vault: VaultView;
 }
 
 export type ProposalAction = 'take' | 'skip' | 'reset';

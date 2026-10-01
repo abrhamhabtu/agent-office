@@ -873,7 +873,7 @@ export async function startServer(cfg: Config) {
   };
 
   /** The trading floors' API: the snapshot every board draws, and the few things a person can change. */
-  const tradingRoute = async (p: string, req: http.IncomingMessage, res: http.ServerResponse) => {
+  const tradingRoute = async (p: string, url: URL, req: http.IncomingMessage, res: http.ServerResponse) => {
     const body = async () => {
       try {
         return JSON.parse((await readBody(req, 8192)) || '{}') as Record<string, unknown>;
@@ -885,6 +885,37 @@ export async function startServer(cfg: Config) {
     if (p === '/api/trading/snapshot' && req.method === 'GET') return send(res, 200, desk.snapshot(), { 'cache-control': 'no-store' });
     // The backtest trade by trade, for the Backtest Lab and the eval simulator (only fetched when one is open).
     if (p === '/api/trading/backtest/trades' && req.method === 'GET') return send(res, 200, desk.backtestDetail(), { 'cache-control': 'no-store' });
+    // The Pine Vault: a version's exact source to copy into TradingView, and the owner's changes to it.
+    if (p === '/api/trading/vault/source' && req.method === 'GET') {
+      const src = desk.vault.source(url.searchParams.get('script') ?? '', url.searchParams.get('version') ?? '');
+      return src === null ? send(res, 404, { error: 'No such version' }) : send(res, 200, { source: src }, { 'cache-control': 'no-store' });
+    }
+    if (p === '/api/trading/vault' && req.method === 'POST') {
+      let v: Record<string, unknown>;
+      try {
+        v = JSON.parse((await readBody(req, 260_000)) || '{}') as Record<string, unknown>;
+      } catch {
+        return send(res, 400, { error: 'That didn’t read as JSON' });
+      }
+      const script = String(v.script ?? '');
+      if (v.action === 'status') return done(desk.vault.setStatus(script, String(v.version ?? ''), v.status));
+      if (v.action === 'seen') return done(desk.vault.markSeen(script, String(v.version ?? '')));
+      if (v.action === 'lab') {
+        // "Run tests now" runs both: the Pine lab, and the office's backtest of every playbook.
+        void desk.runStrategyLab();
+        void desk.runBacktest();
+        return done(undefined);
+      }
+      if (v.action === 'add') {
+        const r = desk.vault.addVersion(script, { source: v.source, changelog: v.changelog, bump: v.bump, parent: v.parent, status: v.status });
+        return 'error' in r ? send(res, 400, { error: r.error }) : send(res, 200, desk.snapshot());
+      }
+      if (v.action === 'script') {
+        const r = desk.vault.addScript({ name: v.name, summary: v.summary, source: v.source, changelog: v.changelog, playbook: v.playbook });
+        return 'error' in r ? send(res, 400, { error: r.error }) : send(res, 200, desk.snapshot());
+      }
+      return send(res, 400, { error: 'Unknown vault action' });
+    }
     if (req.method !== 'POST') return send(res, 404, { error: 'Not found' });
     const b = await body();
     switch (p) {
@@ -988,8 +1019,9 @@ export async function startServer(cfg: Config) {
           }
         }
         if (!desk.checkKey(key)) return send(res, 401, { error: 'Missing or wrong key' });
-        const a = desk.alert(raw.replace(/"key"\s*:\s*"[^"]*",?/, ''));
-        return send(res, 200, { ok: true, id: a.id });
+        const r = desk.tradingView(raw.replace(/"key"\s*:\s*"[^"]*",?/, ''));
+        if ('error' in r) return send(res, 400, { error: r.error });
+        return send(res, 200, r.kind === 'bar' ? { ok: true, bar: r.symbol } : { ok: true, id: r.alert.id });
       }
 
       if (p.startsWith('/assets/')) {
@@ -1011,7 +1043,7 @@ export async function startServer(cfg: Config) {
         return;
       }
       if (p === '/api/whoami') return send(res, 200, { ok: true, me: meOf(session.account?.id) });
-      if (p.startsWith('/api/trading/')) return await tradingRoute(p, req, res);
+      if (p.startsWith('/api/trading/')) return await tradingRoute(p, url, req, res);
       if (p === '/api/agents/opencode/models' && req.method === 'GET') {
         try {
           return send(res, 200, { models: await openCodeModels.get() });

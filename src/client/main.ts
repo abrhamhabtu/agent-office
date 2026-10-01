@@ -75,9 +75,10 @@ import { floorRole, PLAYBOOK_BY_ID, PODS, podOf, seatJob, SYMBOLS, type FloorRol
 import { trading } from './trading/feed';
 import { openTrading, type PanelTab } from './trading/panel';
 import { openSessionDesk } from './trading/session';
-import { BossScreen, MarketMap, NewsBoard, PlaybookBoard, ProposalsBoard, TickerStrip, bellText, type Screen as TradingScreen } from './trading/screens';
+import { BossScreen, MarketMap, NewsBoard, PlaybookBoard, ProposalsBoard, TAPE_SPEED, TAPE_WIDTH, TickerStrip, bellText, paintTickerBadge, type Screen as TradingScreen } from './trading/screens';
 import { buildTradingDesks, deskDetailsTab } from './trading/desks';
 import { openScreenPreview } from './trading/preview';
+import { openStrategyDesk } from './trading/strategy';
 import { BacktestBoard, EvalBoard, LiveEvalBoard, PaperBoard } from './trading/backoffice-boards';
 import { openBacktestLab } from './trading/backtestlab';
 import { openEvalSim } from './trading/evalsim';
@@ -204,6 +205,7 @@ const STATION_INFO: Record<StationKind, { icon: string; offer: string; does: str
   risk: { icon: '🛡️', offer: 'Ask for a risk check', does: 'I size from your stop and enforce configured guardrails', example: 'On the active account, size one MNQ with a 20-tick stop' },
   backtest: { icon: '🧪', offer: 'Ask about strategy evidence', does: 'I read backtest sample size, expectancy and drawdown', example: 'What does the latest backtest actually prove, and what does it not?' },
   paper: { icon: '📒', offer: 'Ask for a paper review', does: 'I track the simulator and grade process, never profit', example: 'Review today’s paper trades and give me a process grade' },
+  pine: { icon: '🌲', offer: 'Ask about your strategies', does: 'I keep every version of your Pine scripts, test them, and tell you when one gets better', example: 'What changed between v1.0.0 and the newest version, and did it test better?' },
 };
 /** A board agent waiting by its board before anyone has asked it anything (see buildKiosk), and where. */
 interface IdleAgent {
@@ -315,7 +317,13 @@ const sessionStation = buildSessionStation();
 office.group.add(sessionStation.group);
 office.colliders.push(sessionStation.collider);
 office.interactables.push(sessionStation.interact);
+/** The Strategy Desk, with a way to ask the Strategy agent a question from inside it. */
+function showStrategyDesk() {
+  const deskId = DESKS.find((d) => d.station === 'pine')?.id;
+  openStrategyDesk({ onAsk: deskId ? () => askStation(deskId) : undefined });
+}
 function previewDeskMonitor(deskId: string) {
+  if (DESK_BY_ID.get(deskId)?.station === 'pine') return showStrategyDesk();
   const role = tradingRole();
   const screen = tradingDesks.screenFor(deskId, role, trading.snap);
   if (!screen) return;
@@ -378,14 +386,59 @@ function laptopChart(deskId: string): { symbol: (typeof SYMBOLS)[number]; view: 
   if (tradingRole() === 'office') return { symbol, view: 'vwap' };
   return { symbol, view: pod === 1 ? 'zones' : pod === 2 ? 'profile' : 'vwap' };
 }
-// The tape runs the length of the north wall, above the boards.
+// The tape runs along the north wall, above the boards. It stops short of the elevator shaft (which
+// stands proud of the wall) and of the wall that comes down for the back office, and picks up again in
+// the clear stretches between: one strip, so it reads as one tape passing behind them. The strip is
+// painted about once a second; moving it is just sliding each piece's texture offset (see scrollTape).
+const tapeSegments: { tex: THREE.Texture; start: number }[] = [];
+const TAPE_PX_PER_UNIT = 4096 / (FLOOR.maxX - FLOOR.minX - 2);
+const tapeBadge = document.createElement('canvas');
+tapeBadge.width = 480;
+tapeBadge.height = 64;
+const tapeBadgeTex = new THREE.CanvasTexture(tapeBadge);
+tapeBadgeTex.colorSpace = THREE.SRGBColorSpace;
 {
   const len = FLOOR.maxX - FLOOR.minX - 2;
-  const strip = new THREE.Mesh(new THREE.PlaneGeometry(len, len * (64 / 4096)), new THREE.MeshBasicMaterial({ map: tape.texture, toneMapped: false }));
-  strip.position.set((FLOOR.minX + FLOOR.maxX) / 2, 4.88, FLOOR.minZ + 0.07);
-  strip.userData.interact = { kind: 'ticker', x: strip.position.x, z: FLOOR.minZ + 1.6, radius: 3 };
-  office.group.add(strip);
+  const left = (FLOOR.minX + FLOOR.maxX) / 2 - len / 2;
+  const h = len * (64 / 4096);
+  const shaft = ELEVATOR.width / 2 + 0.25;
+  const segments: [number, number][] = [
+    [left, ELEVATOR.x - shaft],
+    [ELEVATOR.x + shaft, WING.minX - 0.25],
+  ];
+  tape.texture.wrapS = THREE.RepeatWrapping;
+  const cap = new THREE.MeshBasicMaterial({ color: '#2dd4bf', toneMapped: false });
+  for (const [x0, x1] of segments) {
+    const tex = tape.texture.clone();
+    tex.wrapS = THREE.RepeatWrapping;
+    tex.repeat.set(((x1 - x0) * TAPE_PX_PER_UNIT) / TAPE_WIDTH, 1);
+    tex.needsUpdate = true;
+    tapeSegments.push({ tex, start: (x0 - left) * TAPE_PX_PER_UNIT });
+    const cx = (x0 + x1) / 2;
+    const strip = new THREE.Mesh(new THREE.PlaneGeometry(x1 - x0, h), new THREE.MeshBasicMaterial({ map: tex, toneMapped: false }));
+    strip.position.set(cx, 4.88, FLOOR.minZ + 0.07);
+    strip.userData.interact = { kind: 'ticker', x: cx, z: FLOOR.minZ + 1.6, radius: 3 };
+    office.group.add(strip);
+    // A slim teal end cap on the cut ends, so the tape looks finished rather than chopped.
+    for (const ex of [x0, x1]) {
+      if (ex === left) continue;
+      const c = new THREE.Mesh(new THREE.BoxGeometry(0.04, h + 0.04, 0.03), cap);
+      c.position.set(ex, 4.88, FLOOR.minZ + 0.075);
+      office.group.add(c);
+    }
+  }
+  // The market-state badge, pinned over the first piece's left end.
+  const bw = (tapeBadge.width / 4096) * len;
+  const badge = new THREE.Mesh(new THREE.PlaneGeometry(bw, h), new THREE.MeshBasicMaterial({ map: tapeBadgeTex, toneMapped: false }));
+  badge.position.set(left + bw / 2, 4.88, FLOOR.minZ + 0.072);
+  office.group.add(badge);
 }
+/** Slides the tape along: pure texture-offset math, no drawing. */
+function scrollTape(secs: number) {
+  const period = tape.period;
+  for (const seg of tapeSegments) seg.tex.offset.x = ((seg.start + TAPE_SPEED * secs) % period) / TAPE_WIDTH;
+}
+let tapePaintedAt = 0;
 trading.on(paintTrading);
 // The bells: 06:30 PT opens the New York session, 13:00 PT closes it. Everyone in the office hears it.
 trading.onBell((kind) => {
@@ -397,10 +450,18 @@ trading.onBell((kind) => {
   toast(kind === 'open' ? '🔔 The opening bell: New York is open. Opening range sets at 06:45.' : '🔔 The closing bell: flat for the day. Back Office is grading it.');
 });
 // A TradingView alert: a ding, a toast, and the desk that trades that playbook jumps up.
+// The test lab found a version that tested better: a ding, a toast, and the Strategy agent jumps for joy.
+trading.onStrategy((n) => {
+  sound.alertDing();
+  toast(`🌲 ${n.name}: v${n.version} tested better than ${n.against}${n.dAvgR ? ` (${n.dAvgR >= 0 ? '+' : '−'}${Math.abs(n.dAvgR).toFixed(2)} R a trade)` : ''}. Open the Strategy Desk to copy it`);
+  tradingDesks.cheer('pine', 6);
+});
+/** While a new version is waiting unseen, the Strategy agent keeps jumping now and then. */
+let strategyCheerAt = 0;
 trading.onAlert((a) => {
   sound.alertDing();
   const book = a.playbook ? PLAYBOOK_BY_ID[a.playbook] : null;
-  toast(`🔔 TradingView · ${a.setup}${a.symbol ? ` ${a.symbol}` : ''}${a.side ? ` ${a.side.toUpperCase()}` : ''}${a.price ? ` @ ${a.price}` : ''}`);
+  toast(`🔔 TradingView · ${a.setup}${a.symbol ? ` ${a.symbol}` : ''}${a.side ? ` ${a.side.toUpperCase()}` : ''}${a.price ? ` @ ${a.price}` : ''}${a.stop && a.target ? ` · SL ${a.stop} · TP ${a.target}` : ''}`);
   const pod = !book ? 3 : book.id === 'supply-demand' || book.id === 'support-resistance' ? 1 : book.id === 'failed-auction' ? 2 : 0;
   for (const [, v] of workerViews) if (podOf(v.deskId) === pod) v.model.cheer(4);
   idleAgents[STATIONS.findIndex((d) => d.station === 'pulls')]?.model.cheer(4);
@@ -2904,6 +2965,11 @@ function at(kind: InteractKind, what: string, entry: Omit<PaletteEntry, 'walk'>)
 function paletteEntries(): PaletteEntry[] {
   const out: PaletteEntry[] = [];
   if (inOffice()) out.push(at('session-desk', 'the Session Desk kiosk beside the lounge', { icon: '📊', kind: 'Action', title: 'Session Desk', detail: 'Lounge kiosk · J to open · Shift+Enter to walk over', keywords: ['trading', 'active chart', 'kiosk'], open: openSessionDesk }));
+  if (inOffice()) {
+    const pineDeskId = DESKS.find((d) => d.station === 'pine')?.id;
+    const pineSpot = pineDeskId ? office.interactables.find((it) => it.deskId === pineDeskId && it.kind === 'station') : undefined;
+    out.push({ icon: '🌲', kind: 'Action', title: 'Strategy Desk', detail: 'Your Pine scripts, every version tested · Shift+Enter to walk over', keywords: ['pine', 'tradingview', 'strategy', 'versions', 'script', 'backtest'], open: showStrategyDesk, walk: pineSpot ? () => walkThen(pineSpot, 'the Strategy agent', showStrategyDesk) : undefined });
+  }
   for (const w of store.workers.values()) {
     const desk = DESK_BY_ID.get(w.deskId);
     const spot = desk && deskSpot(desk);
@@ -3127,6 +3193,8 @@ function interact(target: Interactable | null, key: DeskKey, note = aimedNote) {
   }
   if (target.kind === 'station' && target.deskId) {
     const w = store.workerAtDesk(target.deskId);
+    // The Strategy agent's desk opens the Strategy Desk; P still asks it a question.
+    if (plan().byId.get(target.deskId)?.station === 'pine' && key === 'E') return showStrategyDesk();
     if (key === 'E' || key === 'P') return askStation(target.deskId);
     if (key === 'O' && w) return openWorkerTerminal(w.id);
     if (key === 'X' && w) return killWorker(w.id);
@@ -4139,6 +4207,18 @@ function stationHint(deskId: string): Hint {
   if (!kind) return { k: '', parts: [] };
   const w = store.workerAtDesk(deskId);
   const info = STATION_INFO[kind];
+  if (kind === 'pine') {
+    const news = trading.freshStrategies();
+    return {
+      k: `pine|${news.map((n) => n.version).join()}|${w?.status ?? ''}`,
+      parts: [
+        h('span.title', {}, `${info.icon} ${STATION_AGENT[kind].name}`),
+        news.length ? h('span.cost', {}, `🆕 ${news[0]!.name} v${news[0]!.version} tested better than ${news[0]!.against}`) : aside(info.offer.replace(/^Ask me /, '')),
+        key('E', 'Open the Strategy Desk'),
+        key('P', 'Ask a question'),
+      ],
+    };
+  }
   if (!w) {
     const m = store.machine;
     const full = officeFull(m);
@@ -4743,6 +4823,7 @@ const noMedia = () => (window.isSecureContext ? undefined : 'Voice and screen sh
 const hud = mountHud(
   [
     { id: 'session-desk', icon: '📊', label: 'Session Desk', section: 'Open', key: 'J', shown: () => inOffice(), status: () => inOffice(), chip: () => 'Session Desk', title: () => 'Active chart, levels, checklist, event and accounts (J)', run: openSessionDesk },
+    { id: 'strategy-desk', icon: '🌲', label: 'Strategy', section: 'Open', shown: () => inOffice(), status: () => inOffice(), count: () => trading.freshStrategies().length, chip: () => 'Strategy', title: () => 'Your Pine scripts: every version tested, one tap to copy to TradingView', run: showStrategyDesk },
     { id: 'issues', icon: '🎯', label: 'Proposals', section: 'Open', count: () => trading.snap?.proposals.filter((p) => p.stage === 'ready' || p.stage === 'live').length ?? 0, title: () => 'Live setups from the playbooks', run: () => openTrading(tradingRole(), 'proposals') },
     { id: 'pulls', icon: '📰', label: 'News', section: 'Open', count: () => trading.snap?.news.filter((n) => n.kind === 'calendar' && n.impact === 'high' && n.at > Date.now()).length ?? 0, title: () => 'The calendar and the wire', run: () => openTrading(tradingRole(), 'news') },
     { id: 'queue', icon: '🛡️', label: 'Prop accounts', section: 'Open', title: () => 'Prop accounts and Law-of-10 risk', run: () => openTrading(tradingRole(), 'accounts') },
@@ -4929,12 +5010,32 @@ const slowFrames = new SlowFrames();
 /** When a car last shoved you out of its way. */
 let shovedAt = 0;
 
-let frameCount = 0;
+/**
+ * How hard the office draws. Full rate while you're doing something (keys, mouse, walking, driving);
+ * a relaxed rate once you've been still a few seconds; barely ticking when the window isn't the one
+ * you're looking at. A mostly-still room doesn't need 60 frames a second, and the GPU heat adds up.
+ */
+let lastActiveAt = performance.now();
+const markActive = () => {
+  lastActiveAt = performance.now();
+};
+for (const ev of ['keydown', 'pointerdown', 'pointermove', 'wheel', 'touchstart'] as const) window.addEventListener(ev, markActive, { passive: true });
+const lastPos = new THREE.Vector3();
+const IDLE_AFTER_MS = 4000;
+function frameInterval(now: number): number {
+  if (modalOpen()) return 1000 / 10;
+  // The window is open but not the one you're in (another app in front): just enough to stay current.
+  if (!document.hasFocus()) return 1000 / 6;
+  if (player.pos.distanceToSquared(lastPos) > 1e-6) lastActiveAt = now;
+  lastPos.copy(player.pos);
+  const idle = now - lastActiveAt > IDLE_AFTER_MS && !driver.active;
+  return 1000 / (idle ? (settings.lowPower ? 15 : 24) : settings.lowPower ? 30 : 60);
+}
 function frame(ts: number) {
   frameRequest = undefined;
   if (document.hidden) return;
   scheduleFrame();
-  const interval = 1000 / (modalOpen() ? 10 : settings.lowPower ? 30 : 60);
+  const interval = frameInterval(performance.now());
   const elapsed = ts - lastFrameAt;
   if (elapsed < interval - 0.5) return;
   lastFrameAt = ts - (Math.max(0, elapsed - interval) % interval);
@@ -4943,7 +5044,8 @@ function frame(ts: number) {
   const dt = Math.min(delta, 0.1);
   const t = timer.getElapsed();
   const now = performance.now();
-  if (slowFrames.frame(now, delta * 1000)) offer2d('slow');
+  // Only frames drawn at full rate say anything about speed: the relaxed idle rate is on purpose.
+  if (interval < 40 && slowFrames.frame(now, delta * 1000)) offer2d('slow');
 
   // Coffee: quicker feet, higher jumps, a mug in hand, and maybe the jitters.
   const secs = now / 1000;
@@ -4959,7 +5061,14 @@ function frame(ts: number) {
   // Drinks from the rooftop bar: a glass in hand, and the world swaying.
   const drunk = drinking(now);
 
-  if (trading.snap && (frameCount++ & 1) === 0) tape.render(trading.snap, tradingRole());
+  if (trading.snap && now - tapePaintedAt > 1000) {
+    tapePaintedAt = now;
+    tape.render(trading.snap, tradingRole());
+    paintTickerBadge(tapeBadge.getContext('2d')!, tapeBadge.width, tapeBadge.height, trading.snap, now);
+    tapeBadgeTex.needsUpdate = true;
+    for (const seg of tapeSegments) seg.tex.needsUpdate = true;
+  }
+  scrollTape(secs);
   walkTick(now);
   // The cars first, so whoever's riding in one sits in it where it's got to.
   office.cars.update(dt, store.cars, store.carsAt, now, driver.active ? { car: driver.car!, driving: driver.driving } : null, camera.position);
@@ -5118,6 +5227,10 @@ function frame(ts: number) {
   }
   for (const a of idleAgents) if (a.view.vacancy.visible) a.model.update(dt, t);
   if (!upTop && inOffice()) tradingDesks.update(dt, t, camPos, tradingRole(), trading.snap, trading.tick);
+  if (now - strategyCheerAt > 25_000) {
+    strategyCheerAt = now;
+    if (trading.freshStrategies().length) tradingDesks.cheer('pine', 3);
+  }
   departures.update(dt, t);
   if (!upTop) {
     sendoffs.update(dt, t);

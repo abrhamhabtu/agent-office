@@ -1,13 +1,29 @@
 import type { BacktestDetail, ProposalAction, TradingSnapshot, TvAlert } from '../../shared/trading';
 
+/** A version the test lab made that tested better than the live one, which the owner hasn't looked at. */
+export interface StrategyNews {
+  script: string;
+  /** Which strategy it is: the script's name. */
+  name: string;
+  version: string;
+  /** What changed, in a line. */
+  summary: string;
+  /** Against which version, and by how much. */
+  against: string;
+  dAvgR: number;
+}
+
 /** The market desk as the browser sees it: one snapshot, refreshed every second or so, and who wants to hear. */
 export class TradingFeed {
   snap: TradingSnapshot | null = null;
   private listeners = new Set<() => void>();
   private alertListeners = new Set<(a: TvAlert) => void>();
   private bellListeners = new Set<(kind: 'open' | 'close') => void>();
+  private strategyListeners = new Set<(n: StrategyNews) => void>();
+  private seenStrategy = new Set<string>();
   private timer = 0;
   private busy = false;
+  private pulledAt = 0;
   private seenAlerts: Set<string> | null = null;
   private rungBell: number | null | undefined;
   /** Bumps on every snapshot, so a screen can tell whether it has anything new to draw. */
@@ -28,17 +44,33 @@ export class TradingFeed {
     this.bellListeners.add(fn);
   }
 
+  /** The test lab found a version that tested better (once per page load for each, including ones waiting when it opened). */
+  onStrategy(fn: (n: StrategyNews) => void) {
+    this.strategyListeners.add(fn);
+  }
+
+  /** New versions from the test lab that nobody has looked at yet. */
+  freshStrategies(): StrategyNews[] {
+    return (this.snap?.vault.scripts ?? []).flatMap((sc) =>
+      sc.versions.filter((v) => v.fresh && v.test?.vs?.verdict === 'better').map((v) => ({ script: sc.id, name: sc.name, version: v.version, summary: v.changelog[0] ?? `v${v.version}`, against: `v${v.test!.vs!.version}`, dAvgR: v.test!.vs!.dAvgR })),
+    );
+  }
+
   start() {
     if (this.timer) return;
     void this.pull();
     this.timer = window.setInterval(() => {
-      if (!document.hidden) void this.pull();
+      if (document.hidden) return;
+      // Another window in front: keep up, but a few times slower.
+      if (!document.hasFocus() && Date.now() - this.pulledAt < 5000) return;
+      void this.pull();
     }, 1200);
   }
 
   private async pull() {
     if (this.busy) return;
     this.busy = true;
+    this.pulledAt = Date.now();
     let received = false;
     try {
       const res = await fetch('/api/trading/snapshot', { credentials: 'same-origin' });
@@ -75,6 +107,12 @@ export class TradingFeed {
       this.rungBell = bell.at;
       if (s.at - bell.at < 90_000) for (const fn of this.bellListeners) fn(bell.kind);
     }
+    for (const n of this.freshStrategies()) {
+      const key = `${n.script}@${n.version}`;
+      if (this.seenStrategy.has(key)) continue;
+      this.seenStrategy.add(key);
+      for (const fn of this.strategyListeners) fn(n);
+    }
     for (const fn of this.listeners) fn();
   }
 
@@ -88,6 +126,16 @@ export class TradingFeed {
       return "Couldn't reach the office";
     }
     return undefined;
+  }
+
+  /** One Pine version's exact source, for copying into TradingView or comparing. */
+  async vaultSource(script: string, version: string): Promise<string | null> {
+    try {
+      const res = await fetch(`/api/trading/vault/source?script=${encodeURIComponent(script)}&version=${encodeURIComponent(version)}`, { credentials: 'same-origin' });
+      return res.ok ? ((await res.json()) as { source: string }).source : null;
+    } catch {
+      return null;
+    }
   }
 
   private detail: BacktestDetail | null = null;

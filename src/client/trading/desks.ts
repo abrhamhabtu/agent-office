@@ -3,7 +3,7 @@ import { dataFreshness } from '../../shared/freshness';
 import { DESK_SIZE, DESKS, WING_DESKS } from '../../shared/layout';
 import type { FloorRole, PlaybookId, Symbol, TradingSnapshot } from '../../shared/trading';
 import { INSTRUMENTS, PLAYBOOK_BY_ID, PLAYBOOKS, PODS, PROP_ACCOUNTS, seatJob } from '../../shared/trading';
-import { DESK_BY_ID, STATION_AGENT } from '../../shared/layout';
+import { DESK_BY_ID, STATION_AGENT, type StationKind } from '../../shared/layout';
 import { Worker } from '../world/character';
 import { Laptop } from '../world/laptop';
 import type { DeskView } from '../world/office';
@@ -21,7 +21,7 @@ const MONO = 'ui-monospace, Menlo, Consolas, monospace';
 
 type Job =
   | { kind: 'chart'; playbook: PlaybookId | null; symbol: number; view: ChartOpts; fives?: boolean }
-  | { kind: 'quotes' | 'news' | 'accounts' | 'journal' | 'paperToday' | 'proposals' | 'eval' | 'paperStats' | 'paperRecent' }
+  | { kind: 'quotes' | 'news' | 'accounts' | 'journal' | 'paperToday' | 'proposals' | 'eval' | 'paperStats' | 'paperRecent' | 'vault' }
   | { kind: 'equity'; playbook: PlaybookId }
   | { kind: 'paperMarket'; symbol: number };
 
@@ -40,7 +40,7 @@ const JOBS: Record<FloorRole, Job[]> = {
     { kind: 'chart', playbook: 'failed-auction', symbol: 0, view: { value: true, profile: true } },
     { kind: 'chart', playbook: 'failed-auction', symbol: 1, view: { value: true, profile: true } },
     { kind: 'chart', playbook: 'vwap-pullback', symbol: 2, view: vwapView },
-    { kind: 'chart', playbook: 'failed-auction', symbol: 2, view: { value: true, profile: true } },
+    { kind: 'vault' },
     { kind: 'accounts' },
     { kind: 'journal' },
     { kind: 'paperToday' },
@@ -58,7 +58,7 @@ const JOBS: Record<FloorRole, Job[]> = {
     { kind: 'paperMarket', symbol: 0 },
     { kind: 'paperMarket', symbol: 1 },
     { kind: 'paperMarket', symbol: 2 },
-    { kind: 'paperMarket', symbol: 3 },
+    { kind: 'vault' },
     { kind: 'paperStats' },
     { kind: 'eval' },
     { kind: 'paperToday' },
@@ -67,9 +67,9 @@ const JOBS: Record<FloorRole, Job[]> = {
 };
 
 /** The seats that already have a trader working at them when nobody's been hired there. */
-const TRADERS: Record<FloorRole, number[]> = { bell: [1, 3, 6, 13, 14, 16], office: [1, 3, 6, 13, 14, 16] };
+const TRADERS: Record<FloorRole, number[]> = { bell: [1, 3, 6, 13, 14, 16, 12], office: [1, 3, 6, 13, 14, 16, 12] };
 const RESIDENT_TITLES = {
-  chief: 'SESSION CHIEF', tape: 'TAPE BRIEF', levels: 'LEVELS', risk: 'RISK', backtest: 'BACKTEST', paper: 'PAPER + GRADE',
+  chief: 'SESSION CHIEF', tape: 'TAPE BRIEF', levels: 'LEVELS', risk: 'RISK', backtest: 'BACKTEST', paper: 'PAPER + GRADE', pine: 'STRATEGY',
 } as const;
 
 const marketAt = (s: TradingSnapshot, i: number): Symbol => s.markets[i % Math.max(1, s.markets.length)] ?? 'NQ';
@@ -81,6 +81,7 @@ export function deskDetailsTab(deskId: string, role: FloorRole): PanelTab {
     case 'news': return 'news';
     case 'accounts': return 'accounts';
     case 'journal': return 'alerts';
+    case 'vault': return 'vault';
     case 'paperToday':
     case 'paperRecent':
     case 'paperStats': return 'paper';
@@ -132,6 +133,69 @@ class DeskMonitor extends Screen {
           g.fillText(dataFreshness(q, now, plan.dataAt ?? null, plan.dataSource).detail, 16, 79, this.W - 32);
         }
         if (q) drawChart(g, 8, 80, this.W - 16, this.H - 88, job.fives ? fives(s.bars[sym]).slice(-36) : s.bars[sym].slice(-70), q, s.levels[sym], { ...job.view, grid: true, tag: true, plan: plan && ['ready', 'live', 'watching'].includes(plan.stage) ? plan : null });
+        return;
+      }
+      case 'vault': {
+        const live = s.vault.scripts.map((x) => x.versions.find((v) => v.status === 'live')).find(Boolean);
+        const fresh = s.vault.scripts.flatMap((x) => x.versions).find((v) => v.fresh && v.test?.vs?.verdict === 'better');
+        this.title('Strategy', '#f4a261', live ? `LIVE v${live.version}` : 'NO LIVE');
+        const script = s.vault.scripts[0];
+        if (!script) {
+          g.fillStyle = INK.dim;
+          g.font = `800 20px ${SANS}`;
+          g.fillText('No Pine scripts saved yet', 24, 120);
+          return;
+        }
+        let y0 = 58;
+        if (fresh) {
+          const pulse = 0.5 + 0.5 * Math.sin(now / 300);
+          g.fillStyle = `rgba(46,230,166,${0.16 + pulse * 0.14})`;
+          g.beginPath();
+          g.roundRect(8, y0, this.W - 16, 44, 10);
+          g.fill();
+          g.strokeStyle = INK.up;
+          g.lineWidth = 2;
+          g.stroke();
+          g.fillStyle = INK.up;
+          g.font = `900 20px ${SANS}`;
+          g.fillText(clip(g, `🆕 ${s.vault.scripts.find((x) => x.versions.includes(fresh))?.name ?? 'Strategy'} v${fresh.version} tested better`, this.W - 40), 20, y0 + 29);
+          y0 += 52;
+        } else {
+          g.fillStyle = INK.dim;
+          g.font = `800 15px ${SANS}`;
+          g.fillText(clip(g, `${script.name} · ${s.vault.lab.running ? 'testing…' : s.vault.lab.note || 'waiting for the first test'}`, this.W - 32), 16, y0 + 14);
+          y0 += 26;
+        }
+        const rows = Math.floor((this.H - y0 - 8) / 50);
+        script.versions.slice(0, rows).forEach((v, i) => {
+          const y = y0 + i * 50;
+          const ink = v.status === 'live' ? INK.up : v.status === 'candidate' ? INK.warn : v.status === 'experiment' ? INK.violet : INK.dim;
+          g.fillStyle = v.status === 'live' ? 'rgba(46,230,166,.10)' : INK.panel;
+          g.beginPath();
+          g.roundRect(8, y, this.W - 16, 44, 10);
+          g.fill();
+          g.fillStyle = ink;
+          g.font = `900 19px ${MONO}`;
+          g.fillText(`v${v.version}`, 20, y + 29);
+          g.font = `900 11px ${SANS}`;
+          const tag = v.status.toUpperCase();
+          const tw = g.measureText(tag).width + 16;
+          g.fillStyle = ink + '33';
+          g.beginPath();
+          g.roundRect(96, y + 12, tw, 20, 10);
+          g.fill();
+          g.fillStyle = ink;
+          g.fillText(tag, 104, y + 26);
+          g.textAlign = 'right';
+          g.font = `900 15px ${MONO}`;
+          const t = v.test;
+          g.fillStyle = t ? (t.all.avgR >= 0 ? INK.up : INK.down) : INK.dim;
+          g.fillText(t ? `${t.all.avgR >= 0 ? '+' : '−'}${Math.abs(t.all.avgR).toFixed(2)}R · ${t.all.trades}` : v.date, this.W - 18, y + 28);
+          g.textAlign = 'left';
+          g.fillStyle = INK.text;
+          g.font = `700 13px ${SANS}`;
+          g.fillText(clip(g, v.changelog[0] ?? '', this.W - 130 - tw - 120), 104 + tw + 10, y + 28);
+        });
         return;
       }
       case 'quotes': {
@@ -330,6 +394,8 @@ export interface TradingDesks {
   /** Redraws what's due and animates the traders; cheap enough to call every frame. */
   update(dt: number, t: number, cam: THREE.Vector3, role: FloorRole, snap: TradingSnapshot | null, tick: number): void;
   screenFor(deskId: string, role: FloorRole, snap: TradingSnapshot | null): Screen | null;
+  /** Makes a resident jump for joy, wherever it's sitting (the Strategy agent, when the lab has news). */
+  cheer(kind: StationKind, seconds?: number): void;
 }
 
 export function buildTradingDesks(desks: Map<string, DeskView>): TradingDesks {
@@ -373,7 +439,7 @@ export function buildTradingDesks(desks: Map<string, DeskView>): TradingDesks {
       laptop.setIdentity('RESIDENT ADVISER', job);
       laptop.setPlaceholder('Ask me at this desk');
       const i = TRADERS[role].indexOf(n);
-      laptop.chartFor = () => ({ symbol: (['NQ', 'GC', 'BTC', 'NQ'] as Symbol[])[i]!, view: role === 'bell' && i === 1 ? 'zones' : role === 'bell' && i === 2 ? 'profile' : 'vwap' });
+      laptop.chartFor = () => ({ symbol: (['NQ', 'GC', 'BTC', 'NQ'] as Symbol[])[i % 4]!, view: role === 'bell' && i === 1 ? 'zones' : role === 'bell' && i === 2 ? 'profile' : 'vwap' });
       view.laptopAnchor.add(laptop.root);
       model.root.visible = false;
       laptop.root.visible = false;
@@ -384,6 +450,9 @@ export function buildTradingDesks(desks: Map<string, DeskView>): TradingDesks {
   let cursor = 0;
 
   return {
+    cheer(kind, seconds = 4) {
+      for (const tr of traders) if (DESK_BY_ID.get(`desk-${tr.n}`)?.station === kind) tr.model.cheer(seconds);
+    },
     screenFor(deskId, role, snap) {
       const monitor = monitors.find((m) => `desk-${m.n}` === deskId);
       if (!monitor) return null;
@@ -427,7 +496,10 @@ export function buildTradingDesks(desks: Map<string, DeskView>): TradingDesks {
         const job = JOBS[role][tr.n - 1];
         const book = job && (job.kind === 'chart' || job.kind === 'equity') ? job.playbook : null;
         const p = book ? snap?.proposals.find((x) => x.playbook === book) : undefined;
-        const card = p ? `${p.symbol} ${PLAYBOOK_BY_ID[p.playbook].short}: ${STAGE_LABEL[p.stage] ?? p.stage}` : tr.job.split(' · ')[1] ?? '';
+        const newsScript = job?.kind === 'vault' ? snap?.vault.scripts.find((sc) => sc.versions.some((v) => v.fresh && v.test?.vs?.verdict === 'better')) : undefined;
+        const news = newsScript?.versions.find((v) => v.fresh && v.test?.vs?.verdict === 'better');
+        const liveVer = job?.kind === 'vault' ? snap?.vault.scripts[0]?.versions.find((v) => v.status === 'live')?.version : undefined;
+        const card = news ? `🆕 ${newsScript!.name.replace(/ Suite$/, '')} v${news.version} tested better` : liveVer ? `Live: v${liveVer}` : p ? `${p.symbol} ${PLAYBOOK_BY_ID[p.playbook].short}: ${STAGE_LABEL[p.stage] ?? p.stage}` : tr.job.split(' · ')[1] ?? '';
         if (card !== tr.card) {
           tr.card = card;
           tr.model.setTask({ name: tr.job.split(' · ')[1] ?? tr.job, summary: card });

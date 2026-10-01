@@ -26,7 +26,7 @@ test('ordinary hires preserve resident desks and fill an expanded wing before ov
 
 test('resident desk roles remain the same when the building changes maps', () => {
   const residents = DESKS.filter((d) => d.station);
-  assert.equal(residents.length, 6);
+  assert.equal(residents.length, 7, 'Chief, Tape, Levels, Risk, Backtest, Paper and the Pine Keeper');
   for (const map of BUILTIN_MAPS) {
     const plan = planMap(map);
     for (const d of residents) assert.equal(plan.byId.get(d.id)?.station, d.station);

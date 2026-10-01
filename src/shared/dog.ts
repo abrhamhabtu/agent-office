@@ -33,6 +33,13 @@ export const DOG_NAME_MAX = 24;
 /** A new floor's dog is called one of these until someone names it in ⚙️ Settings (none is a worker's name). */
 export const DOG_NAMES = ['Biscuit', 'Pancake', 'Peanut', 'Pepper', 'Cookie', 'Bagel', 'Ziggy', 'Pretzel', 'Maple', 'Scout'];
 
+/** Floors whose dog has a name of its own to start with, by the floor's name (still renamed in ⚙️ Settings like any other). */
+const FLOOR_DOG_NAMES: [RegExp, string][] = [[/^\s*opening bell\s*$/i, 'Malu']];
+
+function floorDogName(floorName: string | undefined): string | undefined {
+  return floorName === undefined ? undefined : FLOOR_DOG_NAMES.find(([rx]) => rx.test(floorName))?.[1];
+}
+
 /** A floor's dog is one of these, each its own model (dog-<breed>.glb) with the same rig and clips. */
 export const DOG_BREEDS = ['pup', 'corgi', 'dachshund', 'pug', 'shiba'] as const;
 export type DogBreed = (typeof DOG_BREEDS)[number];
@@ -63,11 +70,11 @@ export const BARK_FOR_S = 120;
  * same hash stirred once more, so it doesn't follow the name, and floors called much alike (a repo and its
  * "-2", which differ only in the hash's low bits) don't all get the same one.
  */
-export function dogDefaults(floorId: string): { name: string; coat: number; breed: DogBreed } {
+export function dogDefaults(floorId: string, floorName?: string): { name: string; coat: number; breed: DogBreed } {
   let h = 0;
   for (const ch of floorId) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
   const stirred = Math.imul(h ^ (h >>> 16), 0x45d9f3b) >>> 0;
-  return { name: DOG_NAMES[h % DOG_NAMES.length], coat: (h >>> 8) % DOG_COATS.length, breed: DOG_BREEDS[(stirred >>> 16) % DOG_BREEDS.length] };
+  return { name: floorDogName(floorName) ?? DOG_NAMES[h % DOG_NAMES.length], coat: (h >>> 8) % DOG_COATS.length, breed: DOG_BREEDS[(stirred >>> 16) % DOG_BREEDS.length] };
 }
 
 /** Takes control characters out and trims to DOG_NAME_MAX; '' when nothing's left. */

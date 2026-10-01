@@ -75,8 +75,9 @@ export class Dog {
     readonly floorId: string,
     dataDir: string,
     private env: DogEnv,
+    floorName?: string,
   ) {
-    const d = dogDefaults(floorId);
+    const d = dogDefaults(floorId, floorName);
     this.fallbackName = d.name;
     this.coat = d.coat;
     this.breed = d.breed;
