@@ -75,9 +75,10 @@ import { floorRole, PLAYBOOK_BY_ID, PODS, podOf, seatJob, SYMBOLS, type FloorRol
 import { trading } from './trading/feed';
 import { openTrading, type PanelTab } from './trading/panel';
 import { openSessionDesk } from './trading/session';
-import { BacktestBoard, BossScreen, EvalBoard, MarketMap, NewsBoard, PaperBoard, PlaybookBoard, ProposalsBoard, TickerStrip, bellText, type Screen as TradingScreen } from './trading/screens';
+import { BossScreen, MarketMap, NewsBoard, PlaybookBoard, ProposalsBoard, TickerStrip, bellText, type Screen as TradingScreen } from './trading/screens';
 import { buildTradingDesks, deskDetailsTab } from './trading/desks';
 import { openScreenPreview } from './trading/preview';
+import { BacktestBoard, EvalBoard, LiveEvalBoard, PaperBoard } from './trading/backoffice-boards';
 import { openBacktestLab } from './trading/backtestlab';
 import { openEvalSim } from './trading/evalsim';
 import { openQueue } from './ui/queue';
@@ -302,7 +303,8 @@ const BOARD_SET: Record<FloorRole, Record<'issues' | 'queue' | 'pulls' | 'servic
       issues: { screen: new BacktestBoard(), label: '🧪 Backtest lab', tab: 'backtest', open: () => openBacktestLab() },
       queue: { screen: new EvalBoard(), label: '🏦 Prop eval simulator', tab: 'backtest', open: () => openEvalSim() },
       pulls: { screen: new PaperBoard(), label: '📒 Paper book', tab: 'paper' },
-      services: market,
+      // The market is on every desk's monitor and the tape: this wall has the eval that's being run forward instead.
+      services: { screen: new LiveEvalBoard(), label: '🏁 Live eval', tab: 'backtest', open: () => openEvalSim({ live: true }) },
     },
   };
 })();
@@ -326,9 +328,10 @@ function previewDeskMonitor(deskId: string) {
     onDetails: () => openTrading(role, deskDetailsTab(deskId, role)),
   });
 }
-function previewWallScreen(kind: 'issues' | 'queue' | 'pulls' | 'services') {
+function previewWallScreen(kind: 'issues' | 'queue' | 'pulls' | 'services', tape = false) {
   const role = tradingRole();
-  const board = BOARD_SET[role][kind];
+  // The tape is the market on every floor, whatever hangs on that floor's fourth wall.
+  const board = tape ? BOARD_SET.bell.services : BOARD_SET[role][kind];
   if (board.open) return board.open();
   board.screen.render(trading.snap, role);
   openScreenPreview({
@@ -3119,7 +3122,7 @@ function interact(target: Interactable | null, key: DeskKey, note = aimedNote) {
     return;
   }
   if (target.kind === 'ticker') {
-    if (key === 'E') previewWallScreen('services');
+    if (key === 'E') previewWallScreen('services', true);
     return;
   }
   if (target.kind === 'station' && target.deskId) {
@@ -4622,7 +4625,7 @@ player.onClick = (ndc) => {
   }
   if (aim?.near && aim.it.kind === 'ticker') {
     reach();
-    previewWallScreen('services');
+    previewWallScreen('services', true);
     return;
   }
   if (aim?.near && (aim.it.kind === 'issues' || aim.it.kind === 'queue' || aim.it.kind === 'pulls' || aim.it.kind === 'services') && aim.hit.object === office.boardMeshes[aim.it.kind]) {

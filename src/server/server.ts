@@ -899,6 +899,12 @@ export async function startServer(cfg: Config) {
       case '/api/trading/backtest':
         void desk.runBacktest();
         return done(undefined);
+      case '/api/trading/live-eval':
+        return done(desk.setLiveEval(b));
+      case '/api/trading/tuner':
+        // The owner's call on a playbook version: make it live, retire it, or mark it looked at.
+        if (b.action === 'seen') return done(desk.tuner.markSeen(String(b.playbook) as never, Number(b.version)));
+        return done(desk.setVersion(b.playbook, b.version, b.status));
       case '/api/trading/webhook-key':
         desk.rotateKey();
         return done(undefined);

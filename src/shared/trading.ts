@@ -5,6 +5,9 @@
 // the prop accounts, the journal), and 🗄️ Back Office, where every setup is proved first: a backtest pod
 // and a paper pod. Prices are real (CME futures and Bitcoin); nothing here can place an order.
 
+import type { ManagedR } from './manage.js';
+import type { TunerView } from './tuning.js';
+
 export const SYMBOLS = ['NQ', 'ES', 'GC', 'BTC'] as const;
 export type Symbol = (typeof SYMBOLS)[number];
 
@@ -277,6 +280,8 @@ export interface PaperTrade {
   taken?: boolean;
   /** The indicators on the entry bar (trades from before the lab kept them have none). */
   ind?: TradeInd;
+  /** How it would have come out managed other ways (stop to breakeven, half off, trailed, added to), in R. */
+  alt?: ManagedR;
 }
 
 export interface PlaybookStats {
@@ -314,6 +319,55 @@ export interface BacktestSummary {
   /** The best playbook and market by expectancy, with enough trades to mean something. */
   best: { playbook: PlaybookId; symbol: Symbol; avgR: number; trades: number } | null;
   note: string;
+  /** The playbook tuner: every version of the tuned playbooks, and what its last run tried. */
+  tuner?: TunerView;
+  /** Ways of mixing the tuned playbooks in a day (one first and another as the fallback, one for trending and one for ranging), best per trade first. */
+  mixes?: PlanResult[];
+}
+
+/** The live eval as the boards show it (see server/trading/live-eval.ts). */
+export interface LiveEvalView {
+  accountId: string;
+  firm: string;
+  program: string;
+  kind: 'eval' | 'funded';
+  /** What it trades, in a line. */
+  label: string;
+  startDay: string;
+  /** Every weekday since it started, oldest first. */
+  days: string[];
+  office: {
+    result: 'passed' | 'busted' | 'running';
+    days: number;
+    pnl: number;
+    target: number;
+    cushion: number;
+    drawdown: number;
+    taken: number;
+    today: number;
+    todayTrades: number;
+    /** Paper trades it's in right now (they count once they close). */
+    openNow: number;
+    why: string;
+    /** Profit after each day (null: a day it hasn't reached yet). */
+    series: (number | null)[];
+  };
+  /** The owner's own account over the same days: what it has made since the office started keeping count. */
+  you: { accountId: string; name: string; pnl: number | null; today: number; since: string | null; series: (number | null)[] } | null;
+}
+
+/** How one game plan did over the backtest (see shared/dayplan.ts). */
+export interface PlanResult {
+  label: string;
+  mode: 'every' | 'fallback' | 'by-day';
+  order: PlaybookId[];
+  trades: number;
+  winRate: number;
+  avgR: number;
+  totalR: number;
+  maxDrawdownR: number;
+  /** On the later third of the days. */
+  laterAvgR: number;
 }
 
 /** Every trade the last backtest took, for the Backtest Lab and the eval simulator to work through in the browser. */
@@ -322,6 +376,8 @@ export interface BacktestDetail {
   /** Trading days replayed, oldest first (a day a playbook took nothing on is still a day). */
   days: string[];
   trades: PaperTrade[];
+  /** The same days traded by each candidate version of a tuned playbook (`trades` has the live versions'). */
+  versions?: { playbook: PlaybookId; version: number; trades: PaperTrade[] }[];
 }
 
 export interface PaperBook {
@@ -503,6 +559,8 @@ export interface TradingSnapshot {
   proposals: Proposal[];
   paper: PaperBook;
   backtest: BacktestSummary | null;
+  /** The eval being run forward day by day on the paper book, beside the owner's own result (null: none running). */
+  liveEval?: LiveEvalView | null;
   playbook: PlaybookItem[];
   bias: Bias[];
   accounts: AccountState[];

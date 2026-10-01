@@ -88,7 +88,7 @@
 .tl-seg button:hover { color: var(--text); }
 .tl-seg button[aria-pressed=true] { background: var(--a); color: #150a1d; }
 .tl-input { font: 800 13px var(--mono); color: var(--text); background: var(--bg); border: 1px solid var(--line-2); border-radius: 8px; padding: 6px 8px; width: 92px; }
-select.tl-input { width: auto; max-width: 100%; font-family: var(--font); }
+select.tl-input { width: auto; max-width: 100%; font-family: var(--font); background-color: var(--bg); color: var(--text); color-scheme: dark; cursor: pointer; }
 .tl label.tl-inline { display: flex; align-items: center; gap: 8px; font-weight: 800; font-size: 13px; margin: 0; }
 
 /* Panels */
@@ -306,3 +306,53 @@ select.tl-input { width: auto; max-width: 100%; font-family: var(--font); }
   .tl-checks { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 @media (prefers-reduced-motion: reduce) { .tl *, .tl *::before, .tl *::after { animation: none !important; transition: none !important; } }
+
+/* The account picker: the kind first, then the firm and the size */
+.tl-kind { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+.tl-kind button { display: grid; gap: 2px; text-align: left; font: inherit; color: var(--dim); background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 10px; cursor: pointer; transition: all .12s; }
+.tl-kind button b { font-size: 13px; color: var(--text); line-height: 1.15; }
+.tl-kind button small { font-size: 10px; }
+.tl-kind button:hover { border-color: var(--line-2); }
+.tl-kind button[aria-pressed=true] { border-color: var(--a); background: color-mix(in srgb, var(--a) 20%, var(--panel)); box-shadow: 0 0 0 1px var(--a); }
+.tl-kind button[data-kind=funded][aria-pressed=true] { border-color: var(--warn); background: color-mix(in srgb, var(--warn) 16%, var(--panel)); box-shadow: 0 0 0 1px var(--warn); }
+.tl-pick { display: grid; gap: 6px; }
+.tl-pick select.tl-input { width: 100%; }
+.tl-pick .tl-chip { padding: 6px 10px; font-size: 11px; }
+.tl-acct-firm { font: 800 11px var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--dim); }
+.tl-acct-top .tl-tag { margin-left: auto; }
+.tl-tag[data-kind=own] { background: color-mix(in srgb, var(--info) 18%, transparent); color: var(--info); }
+.tl-acct[data-kind=funded] .tl-acct-top b { color: var(--warn); }
+
+/* The game plan */
+.tl-field.wide { flex: 1 1 100%; }
+.tl-plan { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; }
+.tl-toggle.inline { padding: 0; }
+.tl-plan .tl-inline { font-size: 12px; color: var(--dim); }
+
+/* A playbook's versions */
+.tl-versions { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 10px; }
+.tl-version { display: grid; gap: 8px; align-content: start; background: var(--bg); border: 1px solid var(--line); border-left: 4px solid var(--warn); border-radius: 12px; padding: 12px 14px; }
+.tl-version[data-status=live] { border-left-color: var(--up); }
+.tl-version[data-status=retired] { border-left-color: var(--faint); opacity: .7; }
+.tl-version[data-open] { box-shadow: 0 0 0 1px var(--a); border-color: var(--a); border-left-color: var(--a); }
+.tl-version-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.tl-version-head b { font: 900 22px var(--mono); }
+.tl-version-head small { margin-left: auto; }
+.tl-version ul { margin: 0; padding-left: 18px; font-size: 13px; line-height: 1.5; color: #c9d3ea; }
+.tl-version-nums { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+.tl-version-nums .tl-stat b { font-size: 15px; }
+.tl-version-acts { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.tl-spin.small { display: inline-block; width: 12px; height: 12px; border-width: 2px; vertical-align: -2px; margin-right: 6px; }
+.tl-table th.wrap { white-space: normal; min-width: 240px; }
+.tl-rank-row.wide { grid-template-columns: auto minmax(0, 1fr) minmax(0, 2.4fr) auto; }
+.tl-rank-row.wide .tl-fine { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tl-seg { flex-wrap: wrap; }
+.tl-seg button em { font: 800 10px var(--mono); font-style: normal; margin-left: 6px; opacity: .9; }
+.tl-seg button[aria-pressed=true] em { color: inherit; }
+
+/* The live eval */
+.tl-live { border-color: color-mix(in srgb, var(--info) 35%, var(--line)); }
+.tl-live[data-on] { background: linear-gradient(135deg, color-mix(in srgb, var(--info) 10%, var(--panel)), var(--panel)); }
+.tl-live-row { display: grid; grid-template-columns: repeat(3, minmax(0, auto)) minmax(0, 1.6fr); gap: 12px 26px; align-items: start; }
+.tl-live-what { display: grid; gap: 4px; }
+.tl-live-what p { font-size: 13px; font-weight: 800; }

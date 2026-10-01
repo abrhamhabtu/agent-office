@@ -8,6 +8,10 @@ import type {
 import { DAILY_STOP, INSTRUMENTS, lawOf10, microsFor, PLAYBOOK_BY_ID, PLAYBOOKS, PROP_ACCOUNTS, SYMBOLS } from '../../shared/trading.js';
 import { byTradingDay, pacific, replayDay, RTH_CLOSE, RTH_OPEN, sessionMinute, tradingDay, type DayResult } from './engine.js';
 import { runEval, weekdays } from '../../shared/evalsim.js';
+import { TUNED_PLAYBOOKS } from '../../shared/tuning.js';
+import { rankPlans } from '../../shared/dayplan.js';
+import { Tuner, type History } from './tuner.js';
+import { liveEvalView, readLiveEval, type LiveEvalConfig } from './live-eval.js';
 import { Market } from './market.js';
 import { NewsDesk } from './news.js';
 import { ProjectX } from './projectx.js';
@@ -26,6 +30,8 @@ interface Saved {
   alerts: TvAlert[];
   /** The markets the proposals cover. */
   markets: Symbol[];
+  /** The eval being run forward live, when there is one (see live-eval.ts). */
+  liveEval?: LiveEvalConfig | null;
 }
 
 const DEFAULT_ACTIVE = new Set(['lucidflex-50k', 'lucidflex-100k', 'topstep-50k', 'tof-50k', 'apex-50k']);
@@ -140,6 +146,8 @@ export function sessionAt(now: number): SessionInfo {
 export class TradingDesk {
   readonly market: Market;
   readonly news: NewsDesk;
+  /** The tuned playbooks' versions, and the runs that look for better ones. */
+  readonly tuner: Tuner;
   readonly projectx: ProjectX;
   private file: string;
   private paperFile: string;
@@ -163,6 +171,7 @@ export class TradingDesk {
     this.paperFile = path.join(dir, 'paper.json');
     this.market = new Market(dataDir);
     this.news = new NewsDesk(dataDir);
+    this.tuner = new Tuner(path.join(dir, 'playbook-versions.json'));
     // The desk agents read the tape from this file (their terminals can't sign in to the office's API).
     this.liveFile = path.join(dir, 'live.json');
     process.env.TRADING_OFFICE_SNAPSHOT = this.liveFile;
@@ -181,6 +190,7 @@ export class TradingDesk {
       tradePilot: s.tradePilot ?? { url: null, key: null },
       alerts: Array.isArray(s.alerts) ? s.alerts.slice(-30) : [],
       markets: Array.isArray(s.markets) && s.markets.every((m) => (SYMBOLS as readonly string[]).includes(m)) && s.markets.length ? s.markets : ['NQ', 'GC', 'BTC'],
+      liveEval: s.liveEval && typeof s.liveEval === 'object' && s.liveEval.rules && Array.isArray(s.liveEval.playbooks) ? s.liveEval : null,
     };
     for (const a of PROP_ACCOUNTS) this.saved.accounts[a.id] ??= { active: DEFAULT_ACTIVE.has(a.id), balance: a.size, peak: a.size };
     try {
@@ -209,6 +219,7 @@ export class TradingDesk {
     );
     this.timers.push(setInterval(() => SYMBOLS.forEach((s) => this.replay(s)), LIVE_EVERY));
     this.timers.push(setInterval(() => this.writeLive(), 15_000));
+    this.timers.push(setInterval(() => this.noteMine(), 20_000));
     // The month's backtest: once the bars are in, then again after every close.
     setTimeout(() => void this.runBacktest(), 8000);
     this.timers.push(
@@ -247,7 +258,8 @@ export class TradingDesk {
     const { today, prior } = this.days(sym);
     if (!today.length && !prior.length) return;
     // Nothing traded yet today (a weekend, or before Globex): show where yesterday finished.
-    const res = today.length ? replayDay(sym, today, prior, { live: true }) : replayDay(sym, prior, [], { live: false });
+    const tuning = this.tuner.liveTuning();
+    const res = today.length ? replayDay(sym, today, prior, { live: true, tuning }) : replayDay(sym, prior, [], { live: false, tuning });
     this.liveSource.set(sym, this.market.barSource(sym));
     this.liveAt.set(sym, (today.length ? today : prior).at(-1)?.ts ?? 0);
     this.live.set(sym, res);
@@ -255,7 +267,8 @@ export class TradingDesk {
     let changed = false;
     for (const t of res.trades) {
       const had = this.paperHistory.get(t.id);
-      if (!had || (had.outcome === 'open' && t.outcome !== 'open') || (had.outcome === 'open' && t.outcome === 'open' && had.r !== t.r)) {
+      // (A trade managed another way can still be running after the playbook's own has closed: its endings are kept up too.)
+      if (!had || (had.outcome === 'open' && t.outcome !== 'open') || (had.outcome === 'open' && t.outcome === 'open' && had.r !== t.r) || JSON.stringify(had.alt) !== JSON.stringify(t.alt)) {
         this.paperHistory.set(t.id, { ...t, taken: this.saved.marks[`${sym}:${t.playbook}:${t.day}`] === 'taken' });
         changed = true;
         if (!had) void this.forward(t);
@@ -281,6 +294,8 @@ export class TradingDesk {
     const all: PaperTrade[] = [];
     const days = new Set<string>();
     const today = tradingDay(Date.now());
+    const history: History = {};
+    const tuning = this.tuner.liveTuning();
     try {
       for (const sym of SYMBOLS) {
         const byDay = [...byTradingDay(await this.market.history(sym))];
@@ -288,7 +303,8 @@ export class TradingDesk {
           const [day, bars] = byDay[i]!;
           if (day >= today || bars.length < 300) continue;
           days.add(day);
-          all.push(...replayDay(sym, bars, byDay[i - 1]![1]).trades);
+          (history[sym] ??= []).push({ day, bars, prior: byDay[i - 1]![1] });
+          all.push(...replayDay(sym, bars, byDay[i - 1]![1], { tuning }).trades);
         }
         // Let the office breathe between markets.
         await new Promise((r) => setTimeout(r, 50));
@@ -316,8 +332,12 @@ export class TradingDesk {
         stats: statsList,
         evals,
         best: top && top.avgR > 0 ? { playbook: top.playbook, symbol: top.symbol as Symbol, avgR: top.avgR, trades: top.trades } : null,
+        // The owner's three playbooks mixed in a day, on the markets a prop account trades.
+        mixes: rankPlans(all.filter((t) => t.symbol !== 'BTC'), TUNED_PLAYBOOKS, sortedDays).slice(0, 8).map((m) => ({ label: m.label, mode: m.plan.mode, order: m.plan.order, trades: m.stats.trades, winRate: m.stats.winRate, avgR: m.stats.avgR, totalR: m.stats.totalR, maxDrawdownR: m.stats.maxDrawdownR, laterAvgR: m.laterAvgR })),
         note: `${days.size} trading days of real 1-minute bars (Yahoo keeps a month). Entries on the signal bar's close, stop before target when one bar tags both, flat at 13:00 PT. No fees or slippage.`,
       };
+      // The tuner follows every backtest, in the background: the boards don't wait for it.
+      void this.tuner.run(history, all, [...days].sort()).catch(() => {});
     } catch (e) {
       this.backtest = { ...this.backtest!, running: false, note: `Backtest failed: ${(e as Error).message}` };
     }
@@ -325,7 +345,20 @@ export class TradingDesk {
 
   /** The last backtest trade by trade (the snapshot only carries its totals). */
   backtestDetail(): BacktestDetail {
-    return { ranAt: this.backtest?.ranAt ?? 0, days: this.backtest?.days ?? [], trades: this.backtestTrades };
+    return { ranAt: this.backtest?.ranAt ?? 0, days: this.backtest?.days ?? [], trades: this.backtestTrades, versions: this.tuner.versionTrades() };
+  }
+
+  /** The owner's call on a playbook version. Making one live changes what trades from here on, so everything is replayed. */
+  setVersion(playbook: unknown, version: unknown, status: unknown): string | undefined {
+    if (!TUNED_PLAYBOOKS.includes(playbook as PlaybookId)) return 'That playbook has no versions';
+    if (this.tuner.busy || this.backtest?.running) return 'The tuner is still running: try again in a moment';
+    const why = this.tuner.setStatus(playbook as PlaybookId, Number(version), status);
+    if (why) return why;
+    if (status === 'live') {
+      for (const sym of SYMBOLS) this.replay(sym);
+      void this.runBacktest();
+    }
+    return undefined;
   }
 
   // ---- Accounts ----------------------------------------------------------------------------------------
@@ -482,6 +515,35 @@ export class TradingDesk {
     // What's live and ready first, then what's being watched.
     const order: Record<string, number> = { live: 0, ready: 1, won: 2, lost: 2, closed: 2, watching: 3, done: 4, failed: 4, off: 5 };
     return out.sort((a, b) => (order[a.stage] ?? 9) - (order[b.stage] ?? 9));
+  }
+
+  /** Starts a live eval from what the simulator has on screen, or stops the one that's running. */
+  setLiveEval(b: Record<string, unknown>): string | undefined {
+    if (b.action === 'stop') this.saved.liveEval = null;
+    else {
+      const today = tradingDay(Date.now());
+      const firstPaper = [...this.paperHistory.values()].reduce<string | null>((a, t) => (a == null || t.day < a ? t.day : a), null);
+      const cfg = readLiveEval(b, today, firstPaper, PROP_ACCOUNTS.find((a) => this.saved.accounts[a.id]?.active)?.id ?? null);
+      if (typeof cfg === 'string') return cfg;
+      this.saved.liveEval = cfg;
+      this.noteMine();
+    }
+    this.save();
+    return undefined;
+  }
+
+  /** Keeps what the owner's own account has made today, for the live eval to be measured against. */
+  private noteMine() {
+    const cfg = this.saved.liveEval;
+    if (!cfg?.mineAccount) return;
+    const mine = this.accounts().find((a) => a.rules.id === cfg.mineAccount);
+    if (!mine) return;
+    const day = tradingDay(Date.now());
+    const pnl = Math.round(mine.todayPnl);
+    // A day with nothing on it yet isn't written down, so the owner's line only starts when they trade.
+    if (cfg.mine[day] === pnl || (cfg.mine[day] == null && pnl === 0 && !mine.tradesToday)) return;
+    cfg.mine[day] = pnl;
+    this.save();
   }
 
   /** Which markets the proposals cover: at least one. */
@@ -671,7 +733,8 @@ export class TradingDesk {
       proposals: this.proposals(accounts, risky, guard),
       guard,
       paper: this.paperBook(),
-      backtest: this.backtest,
+      backtest: this.backtest ? { ...this.backtest, tuner: this.tuner.view() } : null,
+      liveEval: this.saved.liveEval ? liveEvalView(this.saved.liveEval, [...this.paperHistory.values()], tradingDay(now)) : null,
       playbook: this.checklist(),
       bias: this.bias(),
       accounts,

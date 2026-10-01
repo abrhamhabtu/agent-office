@@ -1,7 +1,11 @@
 import type { BacktestDetail, PaperTrade, PlaybookId, Symbol } from '../../shared/trading';
 import { INSTRUMENTS, PLAYBOOK_BY_ID, PLAYBOOKS, SYMBOLS } from '../../shared/trading';
 import { applyFilters, envOf, FILTER_BY_ID, FILTERS, groupStats, labStats, OPPOSITES, suggestFilters, type FilterGroup, type FilterId, type LabStats, type Suggestion } from '../../shared/backtest-lab';
+import type { PlaybookVersion, TunerBook, TunerView } from '../../shared/tuning';
+import { KNOBS } from '../../shared/tuning';
+import { MANAGE, MANAGE_BY_ID, managed, type ManageId } from '../../shared/manage';
 import { h, openModal } from '../ui/dom';
+import { confirmDialog } from '../ui/prompt';
 import { openEvalSim } from './evalsim';
 import { trading } from './feed';
 import { bars, chart, chip, dayLabel, fmtR, howSheet, panel, pct, shortDay, signedMoney, spark, stat, stored, TONE, toneOf } from './labkit';
@@ -24,12 +28,15 @@ const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const clock = (m: number) => `${Math.floor(m / 60)}:${String(m % 60).padStart(2, '0')}`;
 
 interface Saved {
+  /** How a trade is managed once it's working. */
+  manage: ManageId;
   playbook: PlaybookId | 'all';
   market: Symbol | 'ALL';
   filters: FilterId[];
 }
 
 export interface BacktestLabInit {
+  manage?: ManageId;
   playbook?: PlaybookId | 'all';
   market?: Symbol | 'ALL';
   filters?: FilterId[];
@@ -37,14 +44,19 @@ export interface BacktestLabInit {
 
 export function openBacktestLab(init: BacktestLabInit = {}) {
   const save = stored<Partial<Saved>>('agent-office.backtest-lab', {});
-  const st: Saved = { playbook: 'all', market: 'ALL', filters: [], ...save.get(), ...init };
+  const st: Saved = { manage: 'written', playbook: 'all', market: 'ALL', filters: [], ...save.get(), ...init };
+  if (!(st.manage in MANAGE_BY_ID)) st.manage = 'written';
   if (st.playbook !== 'all' && !(st.playbook in PLAYBOOK_BY_ID)) st.playbook = 'all';
   st.filters = st.filters.filter((f) => f in FILTER_BY_ID);
   let detail: BacktestDetail | null = null;
-  let loadedFor = -1;
+  let loadedFor = '';
   let how = false;
   let tradesOpen = false;
   let focus: FilterId | null = null;
+  /** The version of the open playbook being looked at, when it isn't the live one. */
+  let version: number | null = null;
+  let triedOpen = false;
+  let note = '';
   const persist = () => save.set(st);
 
   const rail = h('aside.tl-rail');
@@ -56,7 +68,7 @@ export function openBacktestLab(init: BacktestLabInit = {}) {
   const close = h('button.btn.close', { type: 'button', 'aria-label': 'Close the Backtest Lab', title: 'Close (Esc)' }, '✕');
   const toSim = () => {
     modal.close();
-    openEvalSim({ playbooks: st.playbook === 'all' ? PLAYBOOKS.map((p) => p.id) : [st.playbook], markets: st.market === 'ALL' ? undefined : [st.market], filters: st.filters });
+    openEvalSim({ playbooks: st.playbook === 'all' ? PLAYBOOKS.map((p) => p.id) : [st.playbook], markets: st.market === 'ALL' ? undefined : [st.market], filters: st.filters, candidates: version != null, manage: st.manage });
   };
   const el = h('div.modal.tl.tl-lab', { role: 'dialog', 'aria-label': 'Backtest Lab', style: `--tl-accent:${ACCENT}` },
     h('header.tl-header', {},
@@ -118,7 +130,7 @@ export function openBacktestLab(init: BacktestLabInit = {}) {
   function drawRail(all: PaperTrade[], env: ReturnType<typeof envOf>) {
     const card = (id: PlaybookId | 'all', name: string, color: string, sub: string) => {
       const s = labStats(applyFilters(scopeOf(all, id, st.market), st.filters, env));
-      return h('button.tl-book', { type: 'button', style: `--c:${color}`, 'aria-pressed': String(st.playbook === id), onclick: () => { st.playbook = id; persist(); render(); } },
+      return h('button.tl-book', { type: 'button', style: `--c:${color}`, 'aria-pressed': String(st.playbook === id), onclick: () => { st.playbook = id; version = null; persist(); render(); } },
         h('span.tl-book-name', {}, name),
         h('span.tl-book-row', {}, h('b', { 'data-tone': s.trades ? toneOf(s.avgR) : 'flat' }, s.trades ? fmtR(s.avgR) : '—'), spark(s.curve, color, 96, 28) as unknown as Node),
         h('small', {}, s.trades ? `${s.trades} trades · ${pct(s.winRate)} win · ${sub}` : 'no trades'));
@@ -142,9 +154,16 @@ export function openBacktestLab(init: BacktestLabInit = {}) {
       main.replaceChildren(h('div.tl-waiting', {}, h('span.tl-spin'), h('b', {}, bt?.running || !bt ? 'Replaying the month on real bars…' : 'No backtest trades yet'), h('p', {}, 'Every playbook is replayed on about a month of real one-minute bars. It takes a few seconds after the office starts.')));
       return;
     }
-    const all = detail.trades;
+    const tuner = bt?.tuner;
+    const book = st.playbook === 'all' ? undefined : tuner?.books.find((b) => b.playbook === st.playbook);
+    const viewed = version != null ? detail.versions?.find((v) => v.playbook === st.playbook && v.version === version) : undefined;
+    if (version != null && !viewed) version = null;
+    // Looking at a candidate version swaps that playbook's trades for the candidate's, everywhere on the page.
+    const all = managed(viewed ? [...detail.trades.filter((t) => t.playbook !== st.playbook), ...viewed.trades] : detail.trades, st.manage);
     const env = envOf(all);
     const scope = scopeOf(all, st.playbook, st.market).filter((t) => t.outcome !== 'open').sort((a, b) => a.entryAt - b.entryAt);
+    /** The same trades as the playbook wrote them, to compare the ways of managing them. */
+    const rawScope = scopeOf(viewed ? [...detail.trades.filter((t) => t.playbook !== st.playbook), ...viewed.trades] : detail.trades, st.playbook, st.market).filter((t) => t.outcome !== 'open');
     const kept = applyFilters(scope, st.filters, env);
     const keptIds = new Set(kept.map((t) => t.id));
     const base = labStats(scope);
@@ -159,7 +178,7 @@ export function openBacktestLab(init: BacktestLabInit = {}) {
     const delta = (a: number, b: number, fmt: (v: number) => string) => (filtered && a !== b ? { delta: `${fmt(a - b)} with filters`, deltaTone: toneOf(a - b) } : {});
     const answer = h('div.tl-hero', { 'data-result': verdict.tone === 'up' ? 'passed' : verdict.tone === 'down' ? 'busted' : 'running' },
       h('div.tl-verdict', {},
-        h('span.tl-kicker', {}, scopeName().toUpperCase()),
+        h('span.tl-kicker', {}, `${scopeName()}${viewed ? ` · v${viewed.version} candidate, not live` : ''}`.toUpperCase()),
         h('div.tl-verdict-word', { 'data-tone': verdict.tone, 'data-size': 'm' }, verdict.label),
         h('p', {}, now.trades
           ? `Over ${days.length} trading days it took ${now.trades} trade${now.trades === 1 ? '' : 's'}${filtered ? ` (of ${base.trades} before your filters)` : ''}, won ${pct(now.winRate)} of them and made ${fmtR(now.avgR)} a trade. Risk $100 a trade and that is ${signedMoney(now.totalR * 100)}.`
@@ -178,6 +197,12 @@ export function openBacktestLab(init: BacktestLabInit = {}) {
     const keptCurve = [0, ...scope.map((t) => (keptIds.has(t.id) ? (run = Math.round((run + t.r) * 100) / 100) : run))];
     const color = st.playbook === 'all' ? TONE.text : PLAYBOOK_BY_ID[st.playbook].color;
     const curve = panel('The equity curve', 'Every trade added up, in the order it was taken. Run the pointer along it.',
+      h('div.tl-field', {}, h('span.tl-label', {}, 'Once a trade is working'),
+        h('div.tl-seg', { role: 'group' }, ...MANAGE.map((m) => {
+          const alt = labStats(applyFilters(managed(rawScope, m.id), st.filters, env));
+          return h('button', { type: 'button', title: m.what, 'aria-pressed': String(st.manage === m.id), onclick: () => { st.manage = m.id; persist(); render(); } }, m.short, h('em', { 'data-tone': toneOf(alt.avgR) }, alt.trades ? fmtR(alt.avgR) : '—'));
+        })),
+        h('small', {}, `${MANAGE_BY_ID[st.manage].what} The number on each is what a trade makes on average managed that way.`)),
       h('div.tl-chart-tools', {},
         h('div.tl-chips', {}, chip('All markets', st.market === 'ALL', () => { st.market = 'ALL'; persist(); render(); }), ...SYMBOLS.map((m) => chip(m, st.market === m, () => { st.market = m; persist(); render(); }, { color: INSTRUMENTS[m].ink, title: INSTRUMENTS[m].name }))),
         h('div.tl-legend', {}, h('span', { style: `--c:${color}` }, filtered ? 'With your filters' : 'Result in R'), filtered ? h('span', { style: `--c:${TONE.faint}` }, 'Without them') : null)),
@@ -235,13 +260,74 @@ export function openBacktestLab(init: BacktestLabInit = {}) {
         explain),
       filtered ? h('div.tl-active', {}, h('span.tl-label', {}, `On now (${st.filters.length})`), h('div.tl-chips', {}, ...st.filters.map((f) => chip(`${FILTER_BY_ID[f].name} ✕`, true, () => toggleFilter(f), { kind: 'filter' }))), h('button.tl-btn', { type: 'button', onclick: () => { st.filters = []; focus = null; persist(); render(); } }, 'Clear them all')) : null);
 
+
+    // ---- Versions: what the tuner tried on this playbook, and the ones it kept ----
+    const act = async (body: object, ok: string) => {
+      note = (await trading.post('/api/trading/tuner', body)) ?? ok;
+      render();
+    };
+    const tunerLine = !tuner ? 'The tuner runs after the backtest.' : tuner.running ? `Tuning now: ${tuner.stage || 'starting'}…` : tuner.ranAt ? `Last tuned ${new Date(tuner.ranAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })} · ${tuner.replays} replays of the month in ${(tuner.took / 1000).toFixed(0)}s · ${tuner.note}` : 'The tuner hasn’t run yet.';
+    const verdictPill = (v: PlaybookVersion) => (v.status === 'live' ? h('span.tl-pill', { 'data-tone': 'up' }, 'Live') : v.status === 'retired' ? h('span.tl-pill', {}, 'Retired') : h('span.tl-pill', { 'data-tone': v.vs?.verdict === 'better' ? 'up' : v.vs?.verdict === 'worse' ? 'down' : 'warn' }, v.vs?.verdict === 'better' ? `Tested better · ${v.vs.confidence}` : v.vs?.verdict === 'worse' ? 'Tested worse' : 'Not proven yet'));
+    const versionCard = (b: TunerBook, v: PlaybookVersion) => {
+      const live = b.versions.find((x) => x.status === 'live')!;
+      const open = v.status === 'live' ? version == null : version === v.version;
+      const has = !!detail!.versions?.some((x) => x.playbook === b.playbook && x.version === v.version);
+      return h('div.tl-version', { 'data-status': v.status, 'data-open': open ? '1' : undefined },
+        h('div.tl-version-head', {}, h('b', {}, `v${v.version}`), verdictPill(v), v.fresh ? h('span.tl-pill', { 'data-tone': 'up' }, 'New') : null, h('small', {}, v.version === 1 ? 'as written' : `${v.date} · from v${v.parent}`)),
+        h('ul', {}, ...v.change.map((c) => h('li', {}, c))),
+        v.test ? h('div.tl-version-nums', {}, stat('A trade makes', fmtR(v.test.avgR), { tone: toneOf(v.test.avgR), ...(v.vs ? { delta: `${fmtR(v.vs.dAvgR)} vs v${v.vs.version}`, deltaTone: toneOf(v.vs.dAvgR) } : {}) }), stat('Total', fmtR(v.test.totalR, 1), { tone: toneOf(v.test.totalR) }), stat('Later days', fmtR(v.test.laterAvgR), { tone: toneOf(v.test.laterAvgR), sub: `${v.test.laterTrades} trades` }), stat('Trades', String(v.test.trades), { sub: `${pct(v.test.winRate)} win` })) : null,
+        v.vs ? h('p.tl-fine', {}, v.vs.reason, '.') : null,
+        h('div.tl-version-acts', {},
+          v.status === 'live' ? (version != null ? h('button.tl-btn', { type: 'button', onclick: () => { version = null; render(); } }, 'Back to the live version') : h('span.tl-fine', {}, 'This is what the proposals, the paper book and the numbers above use.')) : null,
+          v.status === 'candidate' && has ? h('button.tl-btn', { type: 'button', onclick: () => { version = open ? null : v.version; if (v.fresh) void trading.post('/api/trading/tuner', { action: 'seen', playbook: b.playbook, version: v.version }); render(); } }, open ? 'Looking at it now' : 'Look at its trades') : null,
+          v.status !== 'live' && v.status !== 'retired' ? h('button.tl-btn.primary', { type: 'button', onclick: () => confirmDialog(`Make ${PLAYBOOK_BY_ID[b.playbook].name} v${v.version} live?`, `The office will call ${PLAYBOOK_BY_ID[b.playbook].name} by v${v.version}’s rules from now on: the proposals, the paper book and the backtest all follow it, and v${live.version} is retired (you can bring it back). ${v.vs?.verdict === 'better' ? '' : 'The tuner hasn’t proven this one better yet. '}Nothing on your TradingView chart changes.`, 'Make it live', () => void act({ playbook: b.playbook, version: v.version, status: 'live' }, `v${v.version} is live: replaying the month with it`)) }, 'Make it live') : null,
+          v.status === 'candidate' ? h('button.tl-btn', { type: 'button', onclick: () => { if (version === v.version) version = null; void act({ playbook: b.playbook, version: v.version, status: 'retired' }, `v${v.version} retired`); } }, 'Retire') : null,
+          v.status === 'retired' ? h('button.tl-btn', { type: 'button', onclick: () => confirmDialog(`Bring back ${PLAYBOOK_BY_ID[b.playbook].name} v${v.version}?`, `It becomes the live version again and v${live.version} is retired.`, 'Make it live', () => void act({ playbook: b.playbook, version: v.version, status: 'live' }, `v${v.version} is live again`)) }, 'Roll back to this') : null));
+    };
+    const versions = book
+      ? panel(`Versions of ${PLAYBOOK_BY_ID[book.playbook].name}`, 'The tuner changes one rule at a time, replays the month, and keeps what holds up',
+          h('p.tl-fine', {}, tuner?.running ? h('span.tl-spin.small') : null, tunerLine, note ? ` · ${note}` : ''),
+          h('div.tl-versions', {}, ...book.versions.filter((v) => v.status !== 'retired' || v.version !== 1 || book.versions.length > 1).map((v) => versionCard(book, v))),
+          book.tried.length
+            ? h('div', {},
+                h('button.tl-btn', { type: 'button', onclick: () => { triedOpen = !triedOpen; render(); } }, triedOpen ? 'Hide what it tried' : `See all ${book.tried.length} changes it tried`),
+                triedOpen ? h('div.tl-scroll', {}, h('table.tl-table', {},
+                  h('thead', {}, h('tr', {}, ...['Change', 'Trades', 'Per trade', 'Against live', 'Later days', 'Verdict'].map((c) => h('th', {}, c)))),
+                  h('tbody', {}, ...book.tried.map((t) => h('tr', { title: t.reason }, h('th', { scope: 'row', class: 'wrap' }, t.change.join(' + ')), h('td', {}, String(t.test.trades)), h('td', { 'data-tone': toneOf(t.test.avgR) }, fmtR(t.test.avgR)), h('td', { 'data-tone': toneOf(t.dAvgR) }, fmtR(t.dAvgR)), h('td', { 'data-tone': toneOf(t.test.laterAvgR) }, fmtR(t.test.laterAvgR)), h('td', { 'data-tone': t.verdict === 'better' ? 'up' : t.verdict === 'worse' ? 'down' : 'flat' }, t.verdict === 'better' ? `better · ${t.confidence}` : t.verdict === 'unproven' ? 'not proven' : t.verdict === 'same' ? 'no real difference' : 'worse')))))) : null)
+            : null,
+          h('p.tl-fine', {}, `It can change: ${(KNOBS[book.playbook] ?? []).map((k) => k.name.toLowerCase()).join(', ')}. A change is only called better when it makes more per trade and in total, keeps most of the trades, doesn’t deepen the dip, and still wins on the later third of the days. On a month of history most changes can’t clear that, and the tuner says so rather than guess.`))
+      : st.playbook === 'all' && tuner
+        ? panel('The tuner', 'Looks for better versions of your three playbooks after every backtest',
+            h('p.tl-fine', {}, tuner.running ? h('span.tl-spin.small') : null, tunerLine),
+            h('div.tl-rank', {}, ...tuner.books.map((b) => {
+              const def = PLAYBOOK_BY_ID[b.playbook];
+              const live = b.versions.find((v) => v.status === 'live')!;
+              const cand = b.versions.find((v) => v.status === 'candidate');
+              return h('button.tl-rank-row.wide', { type: 'button', style: `--c:${def.color}`, onclick: () => { st.playbook = b.playbook; version = null; persist(); render(); } },
+                h('i.tl-chip-dot'), h('span.tl-rank-name', {}, def.name), h('span.tl-fine', {}, `v${live.version} live${cand ? ` · v${cand.version} ${cand.vs?.verdict === 'better' ? 'tested better' : 'to watch'}: ${cand.change.join('; ')}` : ' · no candidate yet'}`), h('b', {}, 'Open →'));
+            })))
+        : null;
+
+    // ---- Mixes: the three playbooks traded together in a day ----
+    const mixes = st.playbook === 'all' && bt?.mixes?.length
+      ? panel('Mixing playbooks in a day', 'One first and another as the fallback, or one for trending and one for ranging markets (NQ, ES, GC)',
+          h('div.tl-scroll', {}, h('table.tl-table', {},
+            h('thead', {}, h('tr', {}, ...['The plan', 'Trades', 'Wins', 'Per trade', 'Total', 'Worst dip', 'Later days', ''].map((c) => h('th', {}, c)))),
+            h('tbody', {}, ...bt.mixes.map((m) => h('tr', {},
+              h('th', { scope: 'row', class: 'wrap' }, m.label),
+              h('td', {}, String(m.trades)), h('td', {}, pct(m.winRate)),
+              h('td', { 'data-tone': toneOf(m.avgR) }, fmtR(m.avgR)), h('td', { 'data-tone': toneOf(m.totalR) }, fmtR(m.totalR, 1)), h('td', {}, `−${m.maxDrawdownR.toFixed(1)}R`), h('td', { 'data-tone': toneOf(m.laterAvgR) }, fmtR(m.laterAvgR)),
+              h('td', {}, h('button.tl-btn', { type: 'button', onclick: () => { modal.close(); openEvalSim({ playbooks: m.order, plan: m.mode, filters: st.filters, manage: st.manage }); } }, 'Simulate →'))))))),
+          h('p.tl-fine', {}, 'A fallback only gets its turn once the first playbook has lost today, or hasn’t set up by 8:00 PT. Trending means ADX at 20 or more on the entry bar. Best per trade first; anything under 20 trades is at the bottom.'))
+      : null;
+
     // ---- Where the edge is: every playbook on every market ----
     const cols: (Symbol | 'ALL')[] = ['ALL', ...SYMBOLS];
     const cell = (playbook: PlaybookId, market: Symbol | 'ALL') => {
       const cs = labStats(applyFilters(scopeOf(all, playbook, market), st.filters, env));
       const strength = Math.min(1, Math.abs(cs.avgR) / 0.6);
       const bg = !cs.trades ? 'transparent' : cs.avgR >= 0 ? `rgba(46,230,166,${0.06 + strength * 0.36})` : `rgba(255,93,115,${0.06 + strength * 0.36})`;
-      return h('td', {}, h('button.tl-cell', { type: 'button', style: `background:${bg}`, 'data-thin': cs.trades < 8 ? '1' : undefined, 'aria-pressed': String(st.playbook === playbook && st.market === market), title: cs.trades ? `${cs.trades} trades · ${pct(cs.winRate)} win · total ${fmtR(cs.totalR, 1)}` : 'No trades', onclick: () => { st.playbook = playbook; st.market = market; persist(); render(); } },
+      return h('td', {}, h('button.tl-cell', { type: 'button', style: `background:${bg}`, 'data-thin': cs.trades < 8 ? '1' : undefined, 'aria-pressed': String(st.playbook === playbook && st.market === market), title: cs.trades ? `${cs.trades} trades · ${pct(cs.winRate)} win · total ${fmtR(cs.totalR, 1)}` : 'No trades', onclick: () => { st.playbook = playbook; st.market = market; version = null; persist(); render(); } },
         h('b', {}, cs.trades ? fmtR(cs.avgR) : '—'), h('small', {}, cs.trades ? `${cs.trades} trades` : '')));
     };
     const map = panel('Where the edge is', 'What a trade makes on average, playbook by market. Greener pays more; faded cells have under 8 trades. Click one to open it.',
@@ -285,7 +371,7 @@ export function openBacktestLab(init: BacktestLabInit = {}) {
           h('td', { class: 'l why' }, t.why)))))),
       scope.length > 10 ? h('button.tl-btn', { type: 'button', onclick: () => { tradesOpen = !tradesOpen; render(); } }, tradesOpen ? 'Show fewer' : `Show ${Math.min(300, scope.length)} trades`) : null);
 
-    main.replaceChildren(answer, curve, bench, map, when, list);
+    main.replaceChildren(...[answer, curve, versions, mixes, bench, map, when, list].filter((x): x is HTMLElement => !!x));
 
     if (how) {
       const outcomes = { win: all.filter((t) => t.outcome === 'win').length, loss: all.filter((t) => t.outcome === 'loss').length, time: all.filter((t) => t.outcome === 'time').length };
@@ -307,16 +393,20 @@ export function openBacktestLab(init: BacktestLabInit = {}) {
 
   const load = async () => {
     const bt = trading.snap?.backtest;
-    if (!bt || bt.running || bt.ranAt === loadedFor) return;
-    loadedFor = bt.ranAt;
+    // The tuner finishes after the backtest and brings its versions' trades with it.
+    const key = `${bt?.ranAt}:${bt?.tuner?.ranAt}:${bt?.tuner?.running}`;
+    if (!bt || bt.running || key === loadedFor) return;
+    loadedFor = key;
     detail = await trading.backtestDetail();
     render();
   };
-  let wasRunning = false;
+  // Prices tick every second; the page only redraws when the backtest or the tuner moves on.
+  let was = '';
   off = trading.on(() => {
-    const running = !!trading.snap?.backtest?.running;
-    if (running !== wasRunning) {
-      wasRunning = running;
+    const bt = trading.snap?.backtest;
+    const now = `${!!bt?.running}:${!!bt?.tuner?.running}:${bt?.tuner?.stage ?? ''}`;
+    if (now !== was) {
+      was = now;
       render();
     }
     void load();

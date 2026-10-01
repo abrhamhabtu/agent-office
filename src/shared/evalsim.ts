@@ -167,7 +167,8 @@ function play(dayTrades: T[][], rules: PropRules, o: EvalOptions, onDay?: (d: Ev
     if (busted) return core('busted', i + 1, `Balance fell to the drawdown floor on day ${i + 1}`);
     if (profit >= rules.profitTarget) {
       const s = share(rules, bestDay, profit);
-      const steady = !o.consistency || s == null || s <= rules.consistencyPercent / 100 + 1e-9;
+      // A rule of 100% is no rule: with losing days in the run, the best day can be more than all the profit.
+      const steady = !o.consistency || rules.consistencyPercent >= 100 || s == null || s <= rules.consistencyPercent / 100 + 1e-9;
       if (tradingDays >= rules.minTradingDays && steady) return core('passed', i + 1, `${rules.kind === 'funded' ? 'Reached the payout target' : 'Hit the profit target'} on day ${i + 1} with every rule met`);
     }
   }
