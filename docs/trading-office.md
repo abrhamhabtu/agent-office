@@ -19,6 +19,48 @@ The graphics controls still offer Battery saver and High quality. Battery saver 
 behind the first-person hands while disabling outlines and shadows. The upstream sky cycles through
 a day and night every hour, so compare lighting at the same sky time, weather and graphics quality.
 
+## Backtest Lab and prop eval simulator
+
+On the **Back Office** floor, click the **🧪 Backtest lab** or **🏦 Prop eval simulator** wall display
+(or press **E** at it, or find either in the ☰ menu and the command palette). Each opens its own
+console, and each has a **How it works** button that walks through its steps with the real numbers
+from the last run. Close with ✕ or Esc to resume looking around.
+
+**Backtest Lab.** Pick a playbook on the left and a market above the chart. The headline says in one
+sentence what it did on the real month of one-minute bars; the six numbers beside it are what a trade
+makes on average (in R, where 1R is what the trade risked), the win rate, the total, the worst dip,
+won ÷ lost and the trade count. Run the pointer along the equity curve to see each trade and why it
+was taken. **Where the edge is** shows every playbook on every market; click a cell to open it.
+
+**Add an indicator** tries extra rules on those trades. The backtest keeps what each indicator read on
+every entry bar (9/21 and 50 EMA, MACD, RSI, ADX, the 5-minute ATR, NY and overnight VWAP, relative
+volume, the time), so a filter simply skips the trades where that reading was against you. Each chip
+shows what it would change per trade before you click it; point at one to read what the indicator is.
+A filter is **recommended** only when the trades it keeps do better per trade, it keeps enough of them
+(12 or more, and at least 35% of the trades), and it still helps on the later third of the days, which
+the choice was not made on. Longs-only and shorts-only are never recommended: one month's direction is
+the market's. Stacking filters on a month of history fits the past, so treat every result as paper evidence.
+
+**Prop eval simulator.** Pick an account on the left (LucidFlex 50K and 100K, Topstep Combine 50K,
+Top One Ignite 50K straight to funded, Apex 4.0 50K), then what to trade on it: one playbook or
+several together, on NQ, ES and GC. **Test this on a prop account →** in the Backtest Lab carries the
+playbook and its filters across. The backtest's trades are played through the account's rules in order:
+each trade is sized off the drawdown left (the risk dial; a tenth is the Law of 10, or set a fixed
+dollar risk), the floor trails the way that firm trails it, and the run ends when the account passes or
+busts. A pass needs the profit target, the minimum trading days and the consistency rule; the daily stop
+(three losses or two risks down) and the consistency rule can be switched off to see what they cost.
+The chart shows the balance against the target and the floor day by day, and the ledger lists each day.
+
+**The odds** redraw the same real days at random, with repeats, into 500 imagined stretches of 30, 60
+or 90 trading days and play each through the account: the share that pass, bust, or are still going.
+The bar on each account and each playbook is those odds, so the easier account and the better-fitting
+playbook are visible at a glance, and **What the simulator suggests** says them in words. Any rule on the
+account's sheet can be edited to try another size or a rule change (kept in this browser only);
+**Start from my real account** begins from the balance in the Risk guard. The wall board now applies
+the same rules, so a playbook shows **PASSED** only once consistency and the minimum days are met.
+Rules are the ones Trade Pilot keeps: firms change them, so check before buying an account. No fees
+or slippage are taken off, and an intraday-trailing floor is checked when a trade closes, not tick by tick.
+
 ## Session Desk and cleaner desks
 
 Press **J**, click **Session Desk** in the top bar, or search for it in the command palette.

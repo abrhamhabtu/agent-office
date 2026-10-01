@@ -236,6 +236,27 @@ export interface Proposal {
   dataSource?: string;
 }
 
+/** What the indicators read on the bar a trade was entered on: what the Backtest Lab's filters ask of it. */
+export interface TradeInd {
+  /** Minutes since midnight Pacific. */
+  m: number;
+  /** The 9, 21 and 50 EMA on the 5-minute chart. */
+  ema9: number | null;
+  ema21: number | null;
+  ema50: number | null;
+  /** RSI(14), ADX(14) and the MACD histogram (12, 26, 9), all on the 5-minute chart. */
+  rsi: number | null;
+  adx: number | null;
+  macd: number | null;
+  /** The 5-minute ATR(14), in points. */
+  atr: number | null;
+  /** NY VWAP and the overnight VWAP. */
+  vwap: number | null;
+  onVwap: number | null;
+  /** The signal bar's volume against the 20 one-minute bars before it (1 is average). */
+  relVol: number | null;
+}
+
 export interface PaperTrade {
   id: string;
   day: string;
@@ -254,6 +275,8 @@ export interface PaperTrade {
   dollars: number;
   why: string;
   taken?: boolean;
+  /** The indicators on the entry bar (trades from before the lab kept them have none). */
+  ind?: TradeInd;
 }
 
 export interface PlaybookStats {
@@ -291,6 +314,14 @@ export interface BacktestSummary {
   /** The best playbook and market by expectancy, with enough trades to mean something. */
   best: { playbook: PlaybookId; symbol: Symbol; avgR: number; trades: number } | null;
   note: string;
+}
+
+/** Every trade the last backtest took, for the Backtest Lab and the eval simulator to work through in the browser. */
+export interface BacktestDetail {
+  ranAt: number;
+  /** Trading days replayed, oldest first (a day a playbook took nothing on is still a day). */
+  days: string[];
+  trades: PaperTrade[];
 }
 
 export interface PaperBook {

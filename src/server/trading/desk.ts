@@ -3,10 +3,11 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import type {
   AccountGuard, GuardLevel, RiskGuard,
-  AccountState, BacktestSummary, Bar, Bias, EvalRun, Levels, PaperBook, PaperTrade, PlaybookId, PlaybookItem, PlaybookStats, Proposal, ProposalAction, PropRules, SessionInfo, Symbol, TradingSnapshot, TvAlert,
+  AccountState, BacktestDetail, BacktestSummary, Bar, Bias, EvalRun, Levels, PaperBook, PaperTrade, PlaybookId, PlaybookItem, PlaybookStats, Proposal, ProposalAction, PropRules, SessionInfo, Symbol, TradingSnapshot, TvAlert,
 } from '../../shared/trading.js';
 import { DAILY_STOP, INSTRUMENTS, lawOf10, microsFor, PLAYBOOK_BY_ID, PLAYBOOKS, PROP_ACCOUNTS, SYMBOLS } from '../../shared/trading.js';
 import { byTradingDay, pacific, replayDay, RTH_CLOSE, RTH_OPEN, sessionMinute, tradingDay, type DayResult } from './engine.js';
+import { runEval, weekdays } from '../../shared/evalsim.js';
 import { Market } from './market.js';
 import { NewsDesk } from './news.js';
 import { ProjectX } from './projectx.js';
@@ -101,28 +102,10 @@ function stats(trades: PaperTrade[], playbook: PlaybookId, symbol: Symbol | 'ALL
   };
 }
 
-/** Plays a playbook's trades through one account's rules, sized by the Law of 10 after every trade. */
-export function simulateEval(trades: PaperTrade[], rules: PropRules): Omit<EvalRun, 'playbook' | 'accountId'> {
-  let balance = rules.size;
-  let peak = rules.size;
-  let peakCushion = rules.drawdown;
-  const threshold = () => Math.min(peak - rules.drawdown, rules.lockProfit == null ? Infinity : rules.size + rules.lockProfit);
-  const days = [...new Set(trades.map((t) => t.day))].sort();
-  let n = 0;
-  for (const day of days) {
-    n++;
-    for (const t of trades.filter((x) => x.day === day && x.outcome !== 'open').sort((a, b) => a.entryAt - b.entryAt)) {
-      const cushion = balance - threshold();
-      const micros = microsFor(t.symbol, lawOf10(cushion), Math.abs(t.entry - t.stop), rules.maxMicros);
-      balance += micros * t.dollars;
-      if (rules.drawdownType === 'trailing-intraday') peak = Math.max(peak, balance);
-      if (balance <= threshold()) return { result: 'busted', days: n, pnl: Math.round(balance - rules.size), peakCushion: Math.round(peakCushion) };
-    }
-    if (rules.drawdownType === 'trailing-eod') peak = Math.max(peak, balance);
-    peakCushion = Math.max(peakCushion, balance - threshold());
-    if (balance - rules.size >= rules.profitTarget && n >= rules.minTradingDays) return { result: 'passed', days: n, pnl: Math.round(balance - rules.size), peakCushion: Math.round(peakCushion) };
-  }
-  return { result: 'running', days: n, pnl: Math.round(balance - rules.size), peakCushion: Math.round(peakCushion) };
+/** Plays a playbook's trades through one account's rules, sized by the Law of 10 after every trade (see shared/evalsim.ts). */
+export function simulateEval(trades: PaperTrade[], rules: PropRules, days?: string[]): Omit<EvalRun, 'playbook' | 'accountId'> {
+  const e = runEval(trades, rules, {}, days);
+  return { result: e.result, days: e.days, pnl: e.pnl, peakCushion: e.peakCushion };
 }
 
 /** The session clock: which part of the day it is, and when the next bell rings (weekdays only). */
@@ -166,6 +149,8 @@ export class TradingDesk {
   private liveAt = new Map<Symbol, number>();
   private paperHistory = new Map<string, PaperTrade>();
   private backtest: BacktestSummary | null = null;
+  /** Every trade the last backtest took, for the Backtest Lab and the eval simulator. */
+  private backtestTrades: PaperTrade[] = [];
   private timers: NodeJS.Timeout[] = [];
   private forwarded = new Set<string>();
   private dirty = new Set<Symbol>();
@@ -313,12 +298,14 @@ export class TradingDesk {
         statsList.push(stats(all, p.id, 'ALL'));
         for (const s of SYMBOLS) statsList.push(stats(all, p.id, s));
       }
+      const sortedDays = weekdays([...days].sort());
+      this.backtestTrades = all;
       const evals: EvalRun[] = [];
       for (const p of PLAYBOOKS)
         for (const a of PROP_ACCOUNTS) {
           // An eval is traded on the index futures a prop firm allows: NQ and ES (and gold where offered).
           const trades = all.filter((t) => t.playbook === p.id && t.symbol !== 'BTC');
-          evals.push({ playbook: p.id, accountId: a.id, ...simulateEval(trades, a) });
+          evals.push({ playbook: p.id, accountId: a.id, ...simulateEval(trades, a, sortedDays) });
         }
       const ranked = statsList.filter((s) => s.symbol !== 'ALL' && s.trades >= 8).sort((a, b) => b.avgR - a.avgR);
       const top = ranked[0];
@@ -334,6 +321,11 @@ export class TradingDesk {
     } catch (e) {
       this.backtest = { ...this.backtest!, running: false, note: `Backtest failed: ${(e as Error).message}` };
     }
+  }
+
+  /** The last backtest trade by trade (the snapshot only carries its totals). */
+  backtestDetail(): BacktestDetail {
+    return { ranAt: this.backtest?.ranAt ?? 0, days: this.backtest?.days ?? [], trades: this.backtestTrades };
   }
 
   // ---- Accounts ----------------------------------------------------------------------------------------

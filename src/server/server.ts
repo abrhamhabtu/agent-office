@@ -883,6 +883,8 @@ export async function startServer(cfg: Config) {
     };
     const done = (why: string | undefined) => (why ? send(res, 400, { error: why }) : send(res, 200, desk.snapshot()));
     if (p === '/api/trading/snapshot' && req.method === 'GET') return send(res, 200, desk.snapshot(), { 'cache-control': 'no-store' });
+    // The backtest trade by trade, for the Backtest Lab and the eval simulator (only fetched when one is open).
+    if (p === '/api/trading/backtest/trades' && req.method === 'GET') return send(res, 200, desk.backtestDetail(), { 'cache-control': 'no-store' });
     if (req.method !== 'POST') return send(res, 404, { error: 'Not found' });
     const b = await body();
     switch (p) {

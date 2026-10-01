@@ -76,6 +76,73 @@ class Atr {
     } else this.value = (this.value! * (this.n - 1) + tr) / this.n;
   }
 }
+/** Wilder's RSI. */
+class Rsi {
+  value: number | null = null;
+  private prev: number | null = null;
+  private up = 0;
+  private down = 0;
+  private seen = 0;
+  constructor(private n: number) {}
+  push(v: number) {
+    if (this.prev != null) {
+      const d = v - this.prev;
+      const u = Math.max(0, d);
+      const dn = Math.max(0, -d);
+      if (this.seen < this.n) {
+        this.up += u / this.n;
+        this.down += dn / this.n;
+      } else {
+        this.up = (this.up * (this.n - 1) + u) / this.n;
+        this.down = (this.down * (this.n - 1) + dn) / this.n;
+      }
+      this.seen++;
+      if (this.seen >= this.n) this.value = this.down === 0 ? 100 : 100 - 100 / (1 + this.up / this.down);
+    }
+    this.prev = v;
+  }
+}
+/** Wilder's ADX: how strongly the market is trending, whichever way. */
+class Adx {
+  value: number | null = null;
+  private prev: Bar | null = null;
+  private tr = 0;
+  private plus = 0;
+  private minus = 0;
+  private dxSum = 0;
+  private seen = 0;
+  constructor(private n: number) {}
+  push(b: Bar) {
+    const p = this.prev;
+    this.prev = b;
+    if (!p) return;
+    const tr = Math.max(b.high - b.low, Math.abs(b.high - p.close), Math.abs(b.low - p.close));
+    const upMove = b.high - p.high;
+    const downMove = p.low - b.low;
+    const plus = upMove > downMove && upMove > 0 ? upMove : 0;
+    const minus = downMove > upMove && downMove > 0 ? downMove : 0;
+    this.seen++;
+    if (this.seen <= this.n) {
+      this.tr += tr;
+      this.plus += plus;
+      this.minus += minus;
+      if (this.seen < this.n) return;
+    } else {
+      this.tr += tr - this.tr / this.n;
+      this.plus += plus - this.plus / this.n;
+      this.minus += minus - this.minus / this.n;
+    }
+    if (!(this.tr > 0)) return;
+    const pdi = (100 * this.plus) / this.tr;
+    const mdi = (100 * this.minus) / this.tr;
+    const dx = pdi + mdi > 0 ? (100 * Math.abs(pdi - mdi)) / (pdi + mdi) : 0;
+    const k = this.seen - this.n;
+    if (k < this.n) {
+      this.dxSum += dx;
+      if (k === this.n - 1) this.value = this.dxSum / this.n;
+    } else this.value = (this.value! * (this.n - 1) + dx) / this.n;
+  }
+}
 class Vwap {
   private pv = 0;
   private pv2 = 0;
@@ -687,6 +754,16 @@ export function replayDay(symbol: Symbol, bars: Bar[], prior: Bar[], opts: { liv
   const atr5 = new Atr(14);
   const ema9 = new Ema(9);
   const ema21 = new Ema(21);
+  // Not used by any playbook: kept on each trade for the Backtest Lab's filters (see TradeInd).
+  const ema50 = new Ema(50);
+  const rsi = new Rsi(14);
+  const adx = new Adx(14);
+  const macdFast = new Ema(12);
+  const macdSlow = new Ema(26);
+  const macdSignal = new Ema(9);
+  let macdHist: number | null = null;
+  let fiveCount = 0;
+  const lastVols: number[] = [];
   const zones: Zone[] = [];
   const fives: Bar[] = [];
   let five: Bar | null = null;
@@ -697,6 +774,17 @@ export function replayDay(symbol: Symbol, bars: Bar[], prior: Bar[], opts: { liv
       atr5.push(five);
       ema9.push(five.close);
       ema21.push(five.close);
+      ema50.push(five.close);
+      rsi.push(five.close);
+      adx.push(five);
+      macdFast.push(five.close);
+      macdSlow.push(five.close);
+      // The signal line only means something once the slow average has had its run-up.
+      if (++fiveCount >= 26) {
+        const line = macdFast.value! - macdSlow.value!;
+        macdSignal.push(line);
+        macdHist = line - macdSignal.value!;
+      }
       spotZone(fives, atr5.value, zones);
       five = null;
     }
@@ -717,6 +805,8 @@ export function replayDay(symbol: Symbol, bars: Bar[], prior: Bar[], opts: { liv
     }
     pushFive(b);
     atr1.push(b);
+    lastVols.push(b.volume);
+    if (lastVols.length > 20) lastVols.shift();
   }
   let orHigh: number | null = null;
   let orLow: number | null = null;
@@ -812,6 +902,7 @@ export function replayDay(symbol: Symbol, bars: Bar[], prior: Bar[], opts: { liv
       sr: levelsNow(m, b.close),
       avgVol: volSum / (i + 1),
     };
+    const avg20 = lastVols.length ? lastVols.reduce((a, v) => a + v, 0) / lastVols.length : 0;
     for (const s of scanners) {
       const sig = s.step(ctx, open.has(s.id));
       if (sig && !open.has(s.id)) {
@@ -831,11 +922,26 @@ export function replayDay(symbol: Symbol, bars: Bar[], prior: Bar[], opts: { liv
           r: 0,
           dollars: 0,
           why: sig.why,
+          ind: {
+            m: m < 0 ? m + 1440 : m,
+            ema9: ema9.value,
+            ema21: ema21.value,
+            ema50: ema50.value,
+            rsi: rsi.value == null ? null : Math.round(rsi.value * 10) / 10,
+            adx: adx.value == null ? null : Math.round(adx.value * 10) / 10,
+            macd: macdHist,
+            atr: atr5.value,
+            vwap: vw,
+            onVwap: onVwap.value,
+            relVol: avg20 > 0 ? Math.round((b.volume / avg20) * 100) / 100 : null,
+          },
         };
         trades.push(t);
         open.set(s.id, { t, idx: i });
       }
     }
+    lastVols.push(b.volume);
+    if (lastVols.length > 20) lastVols.shift();
   }
   // Past the close with nothing left to trade: whatever's still open went flat at the last price.
   const last = bars[bars.length - 1];

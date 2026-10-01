@@ -1,4 +1,4 @@
-import type { ProposalAction, TradingSnapshot, TvAlert } from '../../shared/trading';
+import type { BacktestDetail, ProposalAction, TradingSnapshot, TvAlert } from '../../shared/trading';
 
 /** The market desk as the browser sees it: one snapshot, refreshed every second or so, and who wants to hear. */
 export class TradingFeed {
@@ -88,6 +88,21 @@ export class TradingFeed {
       return "Couldn't reach the office";
     }
     return undefined;
+  }
+
+  private detail: BacktestDetail | null = null;
+
+  /** The last backtest trade by trade, fetched once per run (the Backtest Lab and the eval simulator work on it). */
+  async backtestDetail(): Promise<BacktestDetail | null> {
+    const ranAt = this.snap?.backtest?.ranAt;
+    if (this.detail && this.detail.ranAt === ranAt && !this.snap?.backtest?.running) return this.detail;
+    try {
+      const res = await fetch('/api/trading/backtest/trades', { credentials: 'same-origin' });
+      if (res.ok) this.detail = (await res.json()) as BacktestDetail;
+    } catch {
+      // The office is restarting; whatever was fetched before stays.
+    }
+    return this.detail;
   }
 
   toggleChecklist(id: string) {
