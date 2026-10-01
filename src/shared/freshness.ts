@@ -9,7 +9,7 @@ export function marketTime(at: number | null | undefined): string {
 export function dataFreshness(q: Quote | undefined, now: number, barAt?: number | null, barSource = q?.barSource ?? 'Yahoo') {
   const valid = (at: number | null | undefined) => !!at && Number.isFinite(at) && at > 0 && at <= now + 60_000;
   const delayed = !!q?.source.includes('Yahoo');
-  const limit = q?.source.startsWith('ProjectX') || q?.symbol === 'BTC' && !delayed ? 120_000 : 15 * 60_000;
+  const limit = q?.source.startsWith('ProjectX') || q?.symbol === 'BTC' && !delayed ? 120_000 : q?.source === 'TradingView' ? 150_000 : 15 * 60_000;
   const delayedBars = barSource.includes('Yahoo');
   const oldQuote = q && valid(q.updatedAt) && (q.stale || now - q.updatedAt > limit);
   const oldBars = barAt !== undefined && valid(barAt) && now - barAt! > (delayedBars ? 15 * 60_000 : 3 * 60_000);

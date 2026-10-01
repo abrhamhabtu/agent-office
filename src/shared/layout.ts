@@ -59,6 +59,7 @@ function buildDesks(): DeskDef[] {
     'desk-6': 'levels',
     'desk-13': 'risk',
     'desk-14': 'paper',
+    'desk-12': 'pine',
     'desk-16': 'chief',
   };
   for (const desk of desks) desk.station = residentByDesk[desk.id];
@@ -149,7 +150,7 @@ export const HIREABLE_DESKS: DeskDef[] = DESKS.filter((d) => !d.station);
 export const SEATS: DeskDef[] = [...HIREABLE_DESKS, ...WING_DESKS, ...BEANBAGS];
 
 /** A resident the owner can ask at a desk or kiosk. */
-export type StationKind = 'issues' | 'pulls' | 'queue' | 'chief' | 'tape' | 'levels' | 'risk' | 'backtest' | 'paper';
+export type StationKind = 'issues' | 'pulls' | 'queue' | 'chief' | 'tape' | 'levels' | 'risk' | 'backtest' | 'paper' | 'pine';
 
 /**
  * The board agents: a worker standing behind a little kiosk just west of each of those boards (see
@@ -177,6 +178,7 @@ export const STATION_AGENT: Record<StationKind, { name: string; color: string }>
   risk: { name: 'Risk', color: '#d6a956' },
   backtest: { name: 'Backtest', color: '#68b394' },
   paper: { name: 'Paper + Grade', color: '#b37acc' },
+  pine: { name: 'Strategy', color: '#f4a261' },
 };
 
 /** The upstairs office: a glass-walled loft on posts in the south-east corner, looking down on the desks. */

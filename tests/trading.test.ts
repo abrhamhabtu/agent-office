@@ -7,7 +7,7 @@ import { parseAlert, playbookFor, sessionAt, simulateEval, TradingDesk } from '.
 import { mkdtempSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { parseChart } from '../src/server/trading/market.ts';
+import { Market, parseChart, parseCoinbaseCandles, parseTradingViewBar, tvSymbol } from '../src/server/trading/market.ts';
 import { parseRss } from '../src/server/trading/news.ts';
 import { gatewayUrl, tradesFromFills } from '../src/server/trading/projectx.ts';
 
@@ -145,6 +145,25 @@ test('TradingView alerts parse from JSON or plain text, and name their playbook'
   assert.equal(playbookFor('pullback to vwap'), 'vwap-pullback');
 });
 
+test('the VWAP Double Break Suite’s own alert message rings the double-break desk with its plan', () => {
+  const first = parseAlert('{"ticker":"NQ1!","price":30512.25,"ny_vwap":30498.4,"stop":30480.5,"target":30575.75,"event_type":"NY_VWAP_SECOND_BREAK","side":"LONG"}');
+  assert.equal(first.symbol, 'NQ1!');
+  assert.equal(first.side, 'long');
+  assert.equal(first.setup, 'VWAP Double Break');
+  assert.equal(first.playbook, 'double-break', 'NY_VWAP must not ring the VWAP pullback desk');
+  assert.equal(first.price, 30512.25);
+  assert.equal(first.stop, 30480.5);
+  assert.equal(first.target, 30575.75);
+  assert.equal(first.message, 'Stop 30480.5 · Target 30575.75 · NY VWAP 30498.4');
+  const again = parseAlert('{"ticker":"GC1!","price":4330.1,"ny_vwap":4331.2,"stop":4335.6,"target":4319.1,"event_type":"NY_VWAP_RECOVERY","side":"SHORT"}');
+  assert.equal(again.side, 'short');
+  assert.match(again.setup, /re-entry \(DB2\)/);
+  assert.equal(again.playbook, 'double-break');
+  // A script with no plan in it still works, and an explicit message wins.
+  assert.equal(parseAlert('{"symbol":"NQ1!","side":"long","setup":"x","message":"hello"}').message, 'hello');
+  assert.equal(parseAlert('{"ticker":"NQ1!","side":"long","price":1,"stop":0,"target":"","event_type":"NY_VWAP_SECOND_BREAK"}').stop, null);
+});
+
 test('the session clock rings the bells on weekdays only', () => {
   const tueOpen = sessionAt(OPEN + 5_000);
   assert.equal(tueOpen.phase, 'ORB');
@@ -214,4 +233,167 @@ test('the risk guard stops an account after three losses, and a logged trade mov
   // Another account is untouched (whatever the clock says about the market).
   assert.ok(!s.guard.accounts.find((a) => a.accountId === 'lucidflex-50k')!.reasons.some((r) => /daily stop hit/.test(r.label)));
   assert.match(desk.setAccount('topstep-50k', { log: 1e9 }) ?? '', /doesn’t look right/);
+});
+
+test('Coinbase candles: sorted oldest first, malformed and future rows dropped', () => {
+  const now = Date.UTC(2026, 8, 30, 20, 0);
+  const t = now / 1000;
+  const rows = [
+    [t, 83_000, 83_100, 83_010, 83_050, 1.5],
+    [t - 60, 82_900, 83_020, 82_950, 83_010, 2.25],
+    [t - 120, 'x', 1, 1, 1, 1],
+    [t + 3_600, 1, 2, 1, 2, 1],
+    [t - 180, 82_800, 82_700, 82_750, 82_760, 1],
+    [t - 240],
+  ];
+  const bars = parseCoinbaseCandles(rows, now);
+  assert.deepEqual(bars.map((b) => b.ts), [(t - 180) * 1000, (t - 60) * 1000, t * 1000]);
+  assert.equal(bars[2]!.open, 83_010);
+  assert.equal(bars[2]!.close, 83_050);
+  assert.equal(bars[2]!.volume, 1.5);
+  // A row whose high dips below its own open/close is repaired, never trusted.
+  assert.equal(bars[0]!.high, 82_760);
+  assert.deepEqual(parseCoinbaseCandles('nope'), []);
+});
+
+test('TradingView tickers map to the four markets', () => {
+  assert.equal(tvSymbol('NQ1!'), 'NQ');
+  assert.equal(tvSymbol('CME_MINI:MNQ1!'), 'NQ');
+  assert.equal(tvSymbol('ESZ2026'), 'ES');
+  assert.equal(tvSymbol('COMEX:GC1!'), 'GC');
+  assert.equal(tvSymbol('BTCUSD'), 'BTC');
+  assert.equal(tvSymbol('CME:MBT1!'), 'BTC');
+  assert.equal(tvSymbol('AAPL'), null);
+  assert.equal(tvSymbol(42), null);
+});
+
+test('a TradingView bar-close message becomes a candle, or is refused with a reason', () => {
+  const now = Date.UTC(2026, 8, 30, 20, 5, 30);
+  const ok = parseTradingViewBar({ type: 'bar', symbol: 'NQ1!', interval: '1', time: '2026-09-30T20:04:00Z', open: '20000.5', high: 20003, low: '19999.25', close: 20002, volume: '118' }, now);
+  assert.ok(!('error' in ok));
+  if ('error' in ok) return;
+  assert.equal(ok.symbol, 'NQ');
+  assert.deepEqual(ok.bar, { ts: Date.UTC(2026, 8, 30, 20, 4), open: 20000.5, high: 20003, low: 19999.25, close: 20002, volume: 118 });
+  // The candle's time is floored to its minute; seconds-since-epoch work too.
+  const sec = parseTradingViewBar({ symbol: 'GC1!', time: Date.UTC(2026, 8, 30, 20, 4, 40) / 1000, open: 1, high: 2, low: 1, close: 2 }, now);
+  assert.ok(!('error' in sec) && sec.bar.ts === Date.UTC(2026, 8, 30, 20, 4) && sec.bar.volume === 0);
+  const refused = (b: object) => {
+    const r = parseTradingViewBar({ symbol: 'NQ1!', time: '2026-09-30T20:04:00Z', open: 10, high: 12, low: 9, close: 11, ...b }, now);
+    return 'error' in r ? r.error : null;
+  };
+  assert.match(refused({ symbol: 'AAPL' })!, /NQ, ES, GC and BTC/);
+  assert.match(refused({ interval: '5' })!, /1-minute/);
+  assert.match(refused({ high: 10.5 })!, /high and low/);
+  assert.match(refused({ close: 'NaN' })!, /numbers/);
+  assert.match(refused({ open: 0 })!, /numbers/);
+  assert.match(refused({ time: '2026-09-30T20:30:00Z' })!, /future/);
+  assert.match(refused({ time: '2026-09-28T20:00:00Z' })!, /day old/);
+  assert.match(refused({ time: undefined })!, /time/);
+  assert.match(refused({ volume: -1 })!, /Volume/);
+});
+
+test('a current TradingView candle becomes the desk’s price, candle source and feed, and lapses when it goes quiet', () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'tv-'));
+  try {
+    const m = new Market(dir);
+    const minute = Math.floor(Date.now() / 60_000) * 60_000;
+    m.setTradingViewBar('NQ', { ts: minute - 60_000, open: 20_000, high: 20_010, low: 19_995, close: 20_005, volume: 50 });
+    const q = m.quotes().find((x) => x.symbol === 'NQ')!;
+    assert.equal(q.last, 20_005);
+    assert.equal(q.source, 'TradingView');
+    assert.equal(q.barSource, 'TradingView');
+    assert.equal(q.stale, false);
+    assert.equal(m.closedBars('NQ').at(-1)!.close, 20_005);
+    const feed = m.feeds().find((f) => f.id === 'tradingview')!;
+    assert.equal(feed.ok, true);
+    // An older candle re-sent later doesn't drag the price back.
+    m.setTradingViewBar('NQ', { ts: minute - 120_000, open: 1, high: 30_000, low: 1, close: 19_000, volume: 1 });
+    assert.equal(m.quotes().find((x) => x.symbol === 'NQ')!.last, 20_005);
+    // Quiet for a while: back to whatever else there is, and labelled so.
+    m.setTradingViewBar('ES', { ts: minute - 10 * 60_000, open: 5_000, high: 5_001, low: 4_999, close: 5_000.5, volume: 10 });
+    assert.equal(m.barSource('ES'), 'Yahoo');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('the TradingView webhook sends candles to the market feed and everything else to the alert log', (t) => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'desk-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const desk = new TradingDesk(dir);
+  const minute = Math.floor(Date.now() / 60_000) * 60_000 - 60_000;
+  const bar = JSON.stringify({ type: 'bar', symbol: 'NQ1!', interval: '1', time: new Date(minute).toISOString(), open: 20_000, high: 20_004, low: 19_998, close: 20_002, volume: 40 });
+  const r = desk.tradingView(bar);
+  assert.deepEqual(r, { kind: 'bar', symbol: 'NQ' });
+  const s = desk.snapshot();
+  assert.equal(s.alerts.length, 0, 'a candle is not an alert');
+  const nq = s.quotes.find((q) => q.symbol === 'NQ')!;
+  assert.equal(nq.source, 'TradingView');
+  assert.equal(nq.barSource, 'TradingView');
+  assert.ok(s.feeds.some((f) => f.id === 'tradingview' && f.ok));
+  // A refused candle says why, and changes nothing.
+  assert.match((desk.tradingView(JSON.stringify({ type: 'bar', symbol: 'NQ1!', interval: '15', time: new Date(minute).toISOString(), open: 1, high: 2, low: 1, close: 2 })) as { error: string }).error, /1-minute/);
+  // Anything else is an alert, as before.
+  const a = desk.tradingView(JSON.stringify({ symbol: 'NQ1!', side: 'long', setup: 'VWAP Double Break', price: 20_002 }));
+  assert.ok('kind' in a && a.kind === 'alert');
+  assert.equal(desk.snapshot().alerts.length, 1);
+});
+
+test('the message the Pine script sends (time in milliseconds, numbers unquoted) is accepted', () => {
+  const t = Math.floor(Date.now() / 60_000) * 60_000 - 60_000;
+  const msg = `{"type":"bar","symbol":"NQ1!","interval":"1","time":${t},"open":20000.25,"high":20004,"low":19998.5,"close":20002.75,"volume":312}`;
+  const r = parseTradingViewBar(JSON.parse(msg));
+  assert.ok(!('error' in r));
+  if ('error' in r) return;
+  assert.equal(r.symbol, 'NQ');
+  assert.equal(r.bar.ts, t);
+  assert.equal(r.bar.close, 20002.75);
+  assert.equal(r.bar.volume, 312);
+});
+
+test('a setup in a trade carries when it was triggered, for the board’s stopwatch', async () => {
+  const { today, prior } = trendDay();
+  let seen: { stage: string; triggeredAt?: number } | null = null;
+  let last = 0;
+  for (let n = 80; n <= today.length && !seen; n++) {
+    const res = replayDay('NQ', today.slice(0, n), prior, { live: true });
+    last = today[n - 1]!.ts;
+    const live = Object.values(res.views).find((v) => v.stage === 'live');
+    if (live) seen = live;
+  }
+  assert.ok(seen, 'the trend day has a trade open at some point');
+  assert.ok(seen!.triggeredAt && seen!.triggeredAt >= OPEN - 3_600_000 && seen!.triggeredAt <= last, 'the trigger is a bar from this day, no later than now');
+});
+
+test('the stopwatch on a proposal: in the trade, at the level, or how long ago it resolved', async () => {
+  const { stageClock, stopwatch } = await import('../src/client/trading/screens.ts');
+  assert.equal(stopwatch(7_000), '7s');
+  assert.equal(stopwatch(14 * 60_000 + 7_000), '14m 07s');
+  assert.equal(stopwatch(65 * 60_000), '1h 05m');
+  assert.equal(stopwatch(-5), '0s');
+  const now = Date.UTC(2026, 8, 30, 20, 0);
+  const base = { id: 'x', symbol: 'BTC', playbook: 'failed-auction', agent: 'a', side: 'long', title: '', checks: [], entry: 1, stop: 0, target: 2, r: 2, distance: 0, sizing: [], mark: null, note: '' } as never;
+  const live = stageClock({ ...(base as object), stage: 'live', triggeredAt: now - 14 * 60_000 - 7_000 } as never, now, true)!;
+  assert.match(live.text, /^IN TRADE 14m 07s · since \d\d:\d\d$/);
+  assert.equal(live.live, true);
+  assert.equal(stageClock({ ...(base as object), stage: 'live', triggeredAt: now - 60_000 } as never, now, false)!.text, 'IN TRADE 1m 00s');
+  assert.equal(stageClock({ ...(base as object), stage: 'won', triggeredAt: now - 31 * 60_000, endedAt: now - 6 * 60_000 } as never, now, true)!.text, 'TARGET 6m 00s ago · ran 25m 00s');
+  assert.equal(stageClock({ ...(base as object), stage: 'lost', endedAt: now - 90_000 } as never, now, false)!.text, 'STOPPED 1m 30s ago');
+  assert.equal(stageClock({ ...(base as object), stage: 'ready', stageSince: now - 200_000 } as never, now)!.text, 'AT THE LEVEL 3m 20s');
+  assert.equal(stageClock({ ...(base as object), stage: 'watching', stageSince: now } as never, now), null);
+  assert.equal(stageClock({ ...(base as object), stage: 'live' } as never, now), null, 'no trigger time, no guess');
+});
+
+test('the proposal timer steps down to shorter wording so it never has to overlap anything', async () => {
+  const { stageClock } = await import('../src/client/trading/screens.ts');
+  const now = Date.UTC(2026, 8, 30, 20, 0);
+  const live = { id: 'x', symbol: 'NQ', playbook: 'failed-auction', stage: 'live', triggeredAt: now - 46 * 60_000 } as never;
+  const texts = ([0, 1, 2] as const).map((l) => stageClock(live, now, l)!.text);
+  assert.match(texts[0]!, /^IN TRADE 46m 00s · since \d\d:\d\d$/);
+  assert.equal(texts[1], 'IN TRADE 46m 00s');
+  assert.equal(texts[2], '46m 00s');
+  assert.ok(texts[0]!.length > texts[1]!.length && texts[1]!.length > texts[2]!.length, 'each step is shorter than the last');
+  const won = { id: 'x', symbol: 'GC', playbook: 'failed-auction', stage: 'won', triggeredAt: now - 31 * 60_000, endedAt: now - 6 * 60_000 } as never;
+  assert.deepEqual(([0, 1, 2] as const).map((l) => stageClock(won, now, l)!.text), ['TARGET 6m 00s ago · ran 25m 00s', 'TARGET 6m 00s ago', '6m 00s ago']);
+  assert.equal(stageClock({ id: 'x', symbol: 'GC', playbook: 'failed-auction', stage: 'ready', stageSince: now - 200_000 } as never, now, 2)!.text, '3m 20s');
 });

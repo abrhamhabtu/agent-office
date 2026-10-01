@@ -7,7 +7,9 @@ import type {
 } from '../../shared/trading.js';
 import { DAILY_STOP, INSTRUMENTS, lawOf10, microsFor, PLAYBOOK_BY_ID, PLAYBOOKS, PROP_ACCOUNTS, SYMBOLS } from '../../shared/trading.js';
 import { byTradingDay, pacific, replayDay, RTH_CLOSE, RTH_OPEN, sessionMinute, tradingDay, type DayResult } from './engine.js';
-import { Market } from './market.js';
+import { Market, parseTradingViewBar } from './market.js';
+import { readParams, reportOf, runLab, testVersions } from './lab.js';
+import { Vault } from './vault.js';
 import { NewsDesk } from './news.js';
 import { ProjectX } from './projectx.js';
 
@@ -51,6 +53,12 @@ export function playbookFor(text: string): PlaybookId | null {
   return null;
 }
 
+/** The events the VWAP Double Break Suite sends as `event_type`: the first DB, and the re-entry after a stop (DB2). */
+const SUITE_EVENTS: Record<string, { setup: string; playbook: PlaybookId }> = {
+  NY_VWAP_SECOND_BREAK: { setup: 'VWAP Double Break', playbook: 'double-break' },
+  NY_VWAP_RECOVERY: { setup: 'VWAP Double Break · re-entry (DB2)', playbook: 'double-break' },
+};
+
 /** A TradingView alert, from its JSON message (any of the usual field names) or its plain text. */
 export function parseAlert(raw: string): Omit<TvAlert, 'id' | 'at'> {
   let body: Record<string, unknown> = {};
@@ -64,13 +72,28 @@ export function parseAlert(raw: string): Omit<TvAlert, 'id' | 'at'> {
     for (const k of keys) if (typeof body[k] === 'string' && (body[k] as string).trim()) return (body[k] as string).trim().slice(0, 160);
     return '';
   };
+  const num = (...keys: string[]) => {
+    for (const k of keys) {
+      const n = typeof body[k] === 'number' || (typeof body[k] === 'string' && (body[k] as string).trim() !== '') ? Number(body[k]) : NaN;
+      if (Number.isFinite(n) && n > 0) return n;
+    }
+    return null;
+  };
   const text = raw.slice(0, 500);
   const sideText = `${str('side', 'action', 'direction', 'order_action')} ${text}`;
   const side = /\b(buy|long|bull)/i.test(sideText) ? 'long' : /\b(sell|short|bear)/i.test(sideText) ? 'short' : null;
-  const price = Number(body.price ?? body.close ?? body.entry);
-  const setup = str('setup', 'strategy', 'name', 'alert', 'title') || (Object.keys(body).length ? '' : text.split(/[\n.]/)[0]!.slice(0, 80));
+  const price = num('price', 'close', 'entry');
+  const stop = num('stop', 'sl', 'stop_loss');
+  const target = num('target', 'tp', 'take_profit');
+  const nyVwap = num('ny_vwap', 'vwap');
+  const known = SUITE_EVENTS[str('event_type', 'event').toUpperCase()];
+  const ver = /^\d+\.\d+\.\d+$/.test(str('ver', 'version')) ? str('ver', 'version') : null;
+  const setup = known?.setup ?? (str('setup', 'strategy', 'name', 'alert', 'title') || (Object.keys(body).length ? '' : text.split(/[\n.]/)[0]!.slice(0, 80)));
   const symbol = (str('symbol', 'ticker', 'instrument') || /\b(M?NQ|M?ES|M?GC|MBT|BTC\w*)\b/i.exec(text)?.[1] || '').toUpperCase();
-  return { symbol, side, setup: setup || 'TradingView alert', price: Number.isFinite(price) && price > 0 ? price : null, message: str('message', 'msg', 'comment', 'text') || (Object.keys(body).length ? '' : text), playbook: playbookFor(`${setup} ${text}`) };
+  // What the alert itself says about the trade, when it has a plan: the office shows it beside its own.
+  const plan = stop || target || nyVwap ? [stop ? `Stop ${stop}` : '', target ? `Target ${target}` : '', nyVwap ? `NY VWAP ${Math.round(nyVwap * 100) / 100}` : ''].filter(Boolean).join(' · ') : '';
+  const message = str('message', 'msg', 'comment', 'text') || plan || (Object.keys(body).length ? '' : text);
+  return { symbol, side, setup: setup || 'TradingView alert', price, message, playbook: known?.playbook ?? playbookFor(`${setup} ${text}`), stop, target, nyVwap, ver };
 }
 
 function stats(trades: PaperTrade[], playbook: PlaybookId, symbol: Symbol | 'ALL'): PlaybookStats {
@@ -156,6 +179,8 @@ export function sessionAt(now: number): SessionInfo {
 
 export class TradingDesk {
   readonly market: Market;
+  /** The owner's Pine scripts, every version kept. */
+  readonly vault: Vault;
   readonly news: NewsDesk;
   readonly projectx: ProjectX;
   private file: string;
@@ -177,10 +202,13 @@ export class TradingDesk {
     this.file = path.join(dir, 'desk.json');
     this.paperFile = path.join(dir, 'paper.json');
     this.market = new Market(dataDir);
+    this.vault = new Vault(path.join(dataDir, 'trading', 'pine'));
     this.news = new NewsDesk(dataDir);
     // The desk agents read the tape from this file (their terminals can't sign in to the office's API).
     this.liveFile = path.join(dir, 'live.json');
     process.env.TRADING_OFFICE_SNAPSHOT = this.liveFile;
+    // The Pine Keeper reads the stored scripts from here (read-only as far as any agent is told).
+    process.env.TRADING_OFFICE_PINE_DIR = this.vault.directory;
     this.projectx = new ProjectX(dataDir, this.market);
     let s: Partial<Saved> = {};
     try {
@@ -226,10 +254,13 @@ export class TradingDesk {
     this.timers.push(setInterval(() => this.writeLive(), 15_000));
     // The month's backtest: once the bars are in, then again after every close.
     setTimeout(() => void this.runBacktest(), 8000);
+    // The Strategy lab after the backtest has fetched the history, then again after every close.
+    setTimeout(() => void this.runStrategyLab(), 20_000);
     this.timers.push(
       setInterval(() => {
         const s = sessionAt(Date.now());
         if (s.minutes === RTH_CLOSE + 10 && !this.backtest?.running) void this.runBacktest();
+        if (s.minutes === RTH_CLOSE + 15) void this.runStrategyLab();
       }, 60_000),
     );
   }
@@ -447,6 +478,16 @@ export class TradingDesk {
   }
 
   // ---- Proposals ----------------------------------------------------------------------------------------
+  /** When each proposal was first seen in its current stage (this run of the office), for the board's timer. */
+  private stages = new Map<string, { stage: string; at: number }>();
+  private stageSince(id: string, stage: string): number {
+    const hit = this.stages.get(id);
+    if (hit && hit.stage === stage) return hit.at;
+    const at = Date.now();
+    this.stages.set(id, { stage, at });
+    return at;
+  }
+
   private proposals(accounts: AccountState[], risky: boolean, guard: RiskGuard): Proposal[] {
     const out: Proposal[] = [];
     const day = tradingDay(Date.now());
@@ -482,6 +523,9 @@ export class TradingDesk {
             const risk = g ? g.maxRisk : a.riskPerTrade;
             return { accountId: a.rules.id, micros: stopPts && risk ? microsFor(sym, risk, stopPts, a.rules.maxMicros) : 0, risk };
           }),
+          triggeredAt: v.triggeredAt ?? null,
+          endedAt: v.endedAt ?? null,
+          stageSince: this.stageSince(id, v.stage),
           mark: this.saved.marks[id] ?? null,
           note: guard.level === 'stop' && (v.stage === 'ready' || v.stage === 'watching') ? `🛡️ ${guard.headline}` : risky && v.stage === 'ready' ? 'High-impact news is close: stand aside until it prints.' : v.note,
         });
@@ -590,6 +634,88 @@ export class TradingDesk {
     return a;
   }
 
+  /**
+   * What TradingView posted: a bar-close candle (`"type":"bar"`) goes to the market feed, anything else is
+   * an alert for the desk as before. A refused candle says why, so the alert's own log shows it.
+   */
+  tradingView(raw: string): { kind: 'bar'; symbol: Symbol } | { kind: 'alert'; alert: TvAlert } | { error: string } {
+    let body: unknown = null;
+    try {
+      body = JSON.parse(raw);
+    } catch {
+      // Plain text: an alert.
+    }
+    if (body && typeof body === 'object' && (body as { type?: unknown }).type === 'bar') {
+      const r = parseTradingViewBar(body);
+      if ('error' in r) return r;
+      this.market.setTradingViewBar(r.symbol, r.bar);
+      return { kind: 'bar', symbol: r.symbol };
+    }
+    return { kind: 'alert', alert: this.alert(raw) };
+  }
+
+  private labRunning = false;
+
+  /**
+   * The Strategy lab: replays the live Pine version on the real history, tests the saved versions and
+   * every single-setting change to it, and saves a new candidate (marked new) when one genuinely holds up.
+   * Nothing goes live from here; the owner decides.
+   */
+  async runStrategyLab(): Promise<void> {
+    if (this.labRunning) return;
+    this.labRunning = true;
+    const started = Date.now();
+    const id = 'vwap-double-break';
+    const stage = (text: string) => this.vault.setLab({ running: true, stage: text });
+    stage('Starting: reading the live version');
+    let note = '';
+    try {
+      const live = this.vault.live(id);
+      const src = live ? this.vault.source(id, live) : null;
+      const params = src ? readParams(src) : null;
+      if (!live || !src) note = 'Nothing is live in the Vault, so there is nothing to test against';
+      else if (!params) note = `v${live} doesn’t look like the VWAP Double Break script, so the lab can’t read its settings`;
+      else {
+        const histories: Partial<Record<Symbol, Bar[]>> = {};
+        for (const sym of ['NQ', 'GC', 'ES'] as Symbol[]) {
+          stage(`Loading a month of 1-minute ${sym} history`);
+          histories[sym] = await this.market.history(sym).catch(() => []);
+        }
+        stage(`Replaying v${live} on 5-minute bars, then trying each change to its settings`);
+        const res = runLab(histories, params, live);
+        if ('error' in res) note = res.error;
+        else {
+          this.vault.setTest(id, live, res.baseline);
+          stage('Re-testing the other saved versions against the live one');
+          // The versions already saved, each against the live one.
+          const others = (this.vault.view().scripts.find((x) => x.id === id)?.versions ?? []).filter((v) => v.version !== live && v.status !== 'retired').flatMap((v) => {
+            const p = readParams(this.vault.source(id, v.version) ?? '');
+            return p ? [{ version: v.version, params: p }] : [];
+          });
+          for (const [version, test] of testVersions(histories, params, live, others)) this.vault.setTest(id, version, test);
+          note = res.note;
+          let saved: string | null = null;
+          const existing = res.best ? this.vault.versionWithParams(id, res.best.params) : null;
+          if (existing) note = `${res.note}. Already saved as v${existing}`;
+          if (res.best && !existing) {
+            const r = this.vault.addFromLab(id, { from: live, params: res.best.params, change: res.best.change, test: res.best.test });
+            if ('version' in r) {
+              saved = r.version;
+              note = `${res.note}. Saved as v${r.version}, waiting for you`;
+            } else note = `${res.note}, but couldn’t save it: ${r.error}`;
+          }
+          const name = this.vault.view().scripts.find((x) => x.id === id)?.name ?? id;
+          this.vault.setLab({ report: reportOf(res, { script: id, scriptName: name, version: live, bars: Object.fromEntries(Object.entries(histories).map(([k, v]) => [k, v?.length ?? 0])), took: Date.now() - started, saved, existing, retested: others.map((o) => o.version) }) });
+        }
+      }
+    } catch (e) {
+      note = `The lab stopped: ${(e as Error).message}`;
+    } finally {
+      this.labRunning = false;
+      this.vault.setLab({ running: false, stage: '', ranAt: Date.now(), note });
+    }
+  }
+
   rotateKey() {
     this.saved.webhookKey = randomBytes(18).toString('base64url');
     this.save();
@@ -690,6 +816,7 @@ export class TradingDesk {
       webhook: { path: '/api/trading/tradingview', key: this.saved.webhookKey },
       tradePilot: { url: this.saved.tradePilot.url, forwarding: !!(this.saved.tradePilot.url && this.saved.tradePilot.key) },
       markets: this.saved.markets,
+      vault: this.vault.view(),
     };
   }
 }

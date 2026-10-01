@@ -164,7 +164,7 @@ export class Floor {
       people: () => ctx.peers(this),
       send: (dog) => ctx.emit(this, { t: 'dog', dog }),
       wing: () => this.plan.wing,
-    });
+    }, def.name);
 
     this.workers = new WorkerManager(
       def.dir,

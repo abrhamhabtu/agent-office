@@ -111,3 +111,14 @@ test("a floor's dog keeps its name and coat, and gets a breed, from its id", () 
   assert.equal(dogBreed('wolf'), 'pup', "a breed this page doesn't know is the pup");
   assert.equal(dogBreed('corgi'), 'corgi');
 });
+
+test('the Opening Bell floor’s dog is called Malu to start with, and looks the same as before', () => {
+  const before = dogDefaults('the-pit');
+  const named = dogDefaults('the-pit', 'Opening Bell');
+  assert.equal(named.name, 'Malu');
+  assert.deepEqual({ coat: named.coat, breed: named.breed }, { coat: before.coat, breed: before.breed });
+  assert.equal(dogDefaults('the-pit', '  opening bell ').name, 'Malu');
+  // Other floors are named as before.
+  assert.equal(dogDefaults('the-desk', 'Back Office').name, dogDefaults('the-desk').name);
+  assert.notEqual(dogDefaults('x', 'Opening Bell 2').name, 'Malu');
+});

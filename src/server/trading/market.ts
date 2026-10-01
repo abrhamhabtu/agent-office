@@ -51,6 +51,69 @@ export function parseChart(json: unknown): Bar[] {
   return out;
 }
 
+/**
+ * Coinbase's public 1-minute candles: [time (s), low, high, open, close, volume], newest first. They
+ * include the minute still forming, so the chart is current to the second. Malformed rows are dropped.
+ */
+export function parseCoinbaseCandles(raw: unknown, now = Date.now()): Bar[] {
+  if (!Array.isArray(raw)) return [];
+  const out: Bar[] = [];
+  for (const r of raw) {
+    if (!Array.isArray(r) || r.length < 6) continue;
+    const [t, low, high, open, close, volume] = r as number[];
+    if (![t, low, high, open, close, volume].every((n) => typeof n === 'number' && Number.isFinite(n))) continue;
+    const ts = t! * 1000;
+    if (ts <= 0 || ts > now + 60_000 || !(low! > 0 && high! > 0 && open! > 0 && close! > 0) || volume! < 0) continue;
+    out.push({ ts, open: open!, high: Math.max(high!, open!, close!), low: Math.min(low!, open!, close!), close: close!, volume: volume! });
+  }
+  return out.sort((a, b) => a.ts - b.ts);
+}
+
+/** The market a TradingView ticker means: NQ1!, MNQ1!, CME_MINI:ES1!, GCZ2026, BTCUSD, MBT1!… */
+export function tvSymbol(ticker: unknown): Symbol | null {
+  if (typeof ticker !== 'string') return null;
+  const t = (ticker.split(':').pop() ?? '').trim().toUpperCase();
+  if (/^M?NQ/.test(t)) return 'NQ';
+  if (/^M?ES/.test(t)) return 'ES';
+  if (/^M?GC/.test(t)) return 'GC';
+  if (/^(BTC|MBT)/.test(t)) return 'BTC';
+  return null;
+}
+
+/**
+ * A one-minute candle from a TradingView bar-close alert (see the Connections panel for the message).
+ * Anything that doesn't add up is refused with a reason, never patched: a bad bar would move every level.
+ */
+export function parseTradingViewBar(body: unknown, now = Date.now()): { symbol: Symbol; bar: Bar } | { error: string } {
+  const b = (body && typeof body === 'object' ? body : {}) as Record<string, unknown>;
+  const symbol = tvSymbol(b.symbol ?? b.ticker);
+  if (!symbol) return { error: `Unknown market “${String(b.symbol ?? b.ticker ?? '')}”: NQ, ES, GC and BTC only` };
+  const interval = b.interval == null ? '1' : String(b.interval).toLowerCase();
+  if (interval !== '1' && interval !== '1m') return { error: 'Set the alert on the 1-minute chart (the message says interval “' + interval + '”)' };
+  const num = (v: unknown) => (typeof v === 'number' || (typeof v === 'string' && v.trim() !== '') ? Number(v) : NaN);
+  const [open, high, low, close] = [b.open, b.high, b.low, b.close].map(num) as [number, number, number, number];
+  const volume = b.volume == null || b.volume === '' ? 0 : num(b.volume);
+  if (![open, high, low, close].every((n) => Number.isFinite(n) && n > 0)) return { error: 'The message needs open, high, low and close as numbers' };
+  if (!Number.isFinite(volume) || volume < 0) return { error: 'Volume has to be a number' };
+  if (high < Math.max(open, close) || low > Math.min(open, close) || high < low) return { error: 'The candle’s high and low don’t contain its open and close' };
+  let at = NaN;
+  if (typeof b.time === 'string') at = Date.parse(b.time);
+  else if (typeof b.time === 'number') at = b.time > 1e12 ? b.time : b.time * 1000;
+  if (!Number.isFinite(at)) return { error: 'The message needs {{time}}, the candle’s own time' };
+  const ts = Math.floor(at / 60_000) * 60_000;
+  if (ts > now + 60_000) return { error: 'That candle is from the future' };
+  if (ts < now - 36 * 3_600_000) return { error: 'That candle is more than a day old' };
+  return { symbol, bar: { ts, open, high, low, close, volume } };
+}
+
+const COINBASE_CANDLES = 'https://api.exchange.coinbase.com/products/BTC-USD/candles?granularity=60';
+/** Coinbase returns at most 300 candles per request. */
+const COINBASE_PAGE_MS = 300 * 60_000;
+/** Bitcoin candles are refreshed this often from Coinbase; the tick stream moves the forming one between. */
+const BTC_BARS_EVERY = 5_000;
+/** How much Bitcoin history to fetch at start-up. */
+const BTC_BACKFILL_MS = 3 * 86_400_000;
+
 function merge(into: Bar[], fresh: Bar[]): Bar[] {
   if (!fresh.length) return into;
   const map = new Map(into.map((b) => [b.ts, b]));
@@ -74,6 +137,15 @@ export class Market {
   private live = new Map<Symbol, Live>();
   private projectXBars = new Map<Symbol, { bars: Bar[]; source: string }>();
   private projectXQuotes = new Map<Symbol, Live>();
+  /** The minute forming right now, built from streamed quotes, so a chart moves with every tick rather than once a candle. */
+  private forming = new Map<Symbol, Bar>();
+  /** Real-time candles straight from an exchange (Bitcoin, off Coinbase), preferred over Yahoo's delayed ones while they're current. */
+  private exchangeBars = new Map<Symbol, { bars: Bar[]; source: string }>();
+  /** Closed one-minute candles sent by TradingView alerts, laid over Yahoo's history while they're current. */
+  private tvBars = new Map<Symbol, Bar[]>();
+  private tvQuotes = new Map<Symbol, Live>();
+  private tvMerged = new Map<Symbol, { key: string; bars: Bar[] }>();
+  private tvVersion = 0;
   private projectXUp = false;
   private context = new Map<string, ContextQuote>();
   private status = new Map<string, FeedStatus>();
@@ -99,6 +171,8 @@ export class Market {
     void this.pullQuotes();
     this.timers.push(setInterval(() => void this.pullQuotes(), QUOTE_EVERY));
     this.timers.push(setInterval(() => void this.pullBars(false), BARS_EVERY));
+    void this.pullBtcBars(true);
+    this.timers.push(setInterval(() => void this.pullBtcBars(false), BTC_BARS_EVERY));
     this.connectCoinbase();
   }
 
@@ -128,6 +202,28 @@ export class Market {
       } catch (e) {
         if (sym !== 'BTC') this.mark('yahoo', false, `Yahoo didn’t answer (${(e as Error).message}); showing the last real prices`);
       }
+    }
+  }
+
+  /** Bitcoin's candles off Coinbase: a few days at start-up, then the last few minutes every few seconds. */
+  private async pullBtcBars(first: boolean) {
+    const now = Date.now();
+    try {
+      let fresh: Bar[] = [];
+      if (first) {
+        for (let end = now; end > now - BTC_BACKFILL_MS; end -= COINBASE_PAGE_MS) {
+          const page = parseCoinbaseCandles(await getJson(`${COINBASE_CANDLES}&start=${new Date(end - COINBASE_PAGE_MS).toISOString()}&end=${new Date(end).toISOString()}`));
+          fresh = fresh.concat(page);
+        }
+      } else fresh = parseCoinbaseCandles(await getJson(`${COINBASE_CANDLES}&start=${new Date(now - 10 * 60_000).toISOString()}&end=${new Date(now).toISOString()}`));
+      if (!fresh.length) return;
+      const before = this.exchangeBars.get('BTC')?.bars.at(-1);
+      const bars = merge(this.exchangeBars.get('BTC')?.bars ?? [], fresh);
+      this.exchangeBars.set('BTC', { bars, source: 'Coinbase' });
+      const after = bars.at(-1);
+      if (!before || !after || before.ts !== after.ts || before.close !== after.close) this.onBars('BTC');
+    } catch {
+      // Yahoo's candles carry on, marked as delayed, until Coinbase answers again.
     }
   }
 
@@ -226,6 +322,10 @@ export class Market {
     const previous = this.projectXQuotes.get(sym);
     if (previous && quote.updatedAt < previous.updatedAt) return;
     this.projectXQuotes.set(sym, quote);
+    const minute = Math.floor(quote.updatedAt / 60_000) * 60_000;
+    const f = this.forming.get(sym);
+    if (!f || f.ts !== minute) this.forming.set(sym, { ts: minute, open: quote.last, high: quote.last, low: quote.last, close: quote.last, volume: 0 });
+    else this.forming.set(sym, { ...f, high: Math.max(f.high, quote.last), low: Math.min(f.low, quote.last), close: quote.last });
     this.projectXStatus(true, note ?? 'Exchange quotes streaming; ProjectX closed 1-minute candles refresh every 20s. Simulation subscription; no orders.');
   }
   setProjectXBars(sym: Symbol, fresh: Bar[], source: string) {
@@ -234,22 +334,73 @@ export class Market {
     this.onBars(sym);
   }
   hasProjectXBars(sym: Symbol) { return !!this.projectXBars.get(sym)?.bars.length; }
-  barSource(sym: Symbol) { return this.projectXBars.get(sym)?.source ?? 'Yahoo'; }
+  /** A candle closed on TradingView: it becomes the newest real price and candle for that market. */
+  setTradingViewBar(sym: Symbol, bar: Bar) {
+    const bars = merge(this.tvBars.get(sym) ?? [], [bar]).filter((b) => b.ts >= Date.now() - 2 * 86_400_000);
+    this.tvBars.set(sym, bars);
+    const cur = this.live.get(sym);
+    const closedAt = Math.min(Date.now(), bar.ts + 60_000);
+    const tail = bars.at(-1)!;
+    // Only the newest candle moves the price, so a late or re-sent older one can't drag it back.
+    if (tail.ts === bar.ts)
+      this.tvQuotes.set(sym, { last: bar.close, prevClose: cur?.prevClose ?? bar.open, high: Math.max(cur?.high ?? bar.high, bar.high), low: Math.min(cur?.low ?? bar.low, bar.low), open: cur?.open ?? bar.open, updatedAt: closedAt, source: 'TradingView' });
+    this.tvVersion++;
+    const live = [...this.tvBars.entries()].filter(([, l]) => Date.now() - (l.at(-1)?.ts ?? 0) < 5 * 60_000).map(([k]) => k);
+    this.status.set('tradingview', { id: 'tradingview', name: 'TradingView · real-time candles', ok: true, lastAt: Date.now(), note: `One-minute candles from your bar-close alerts (${live.join(', ') || sym}). Laid over Yahoo’s history; if they stop for a few minutes the desk goes back to Yahoo and says so.` });
+    this.onBars(sym);
+  }
+  private tvCurrent(sym: Symbol) {
+    const tail = this.tvBars.get(sym)?.at(-1);
+    return !!tail && Date.now() - tail.ts < 4 * 60_000;
+  }
+  /** Yahoo's (or Coinbase's) history with TradingView's candles laid over the recent end. */
+  private withTradingView(sym: Symbol, base: Bar[]): Bar[] {
+    const key = `${this.tvVersion}|${base.length}|${base.at(-1)?.ts}|${base.at(-1)?.close}`;
+    const hit = this.tvMerged.get(sym);
+    if (hit?.key === key) return hit.bars;
+    const bars = merge(base, this.tvBars.get(sym) ?? []);
+    this.tvMerged.set(sym, { key, bars });
+    return bars;
+  }
+  /** The price to show: a streamed exchange quote, else TradingView's if it's newer than Yahoo's, else Yahoo's. */
+  private liveOf(sym: Symbol): Live | undefined {
+    const px = this.projectXQuotes.get(sym);
+    if (px) return px;
+    const base = this.live.get(sym);
+    const tv = this.tvQuotes.get(sym);
+    return tv && Date.now() - tv.updatedAt < 150_000 && (!base || tv.updatedAt > base.updatedAt) ? tv : base;
+  }
+
+  /** Whether an exchange's own candles are current enough to use in place of Yahoo's delayed ones. */
+  private exchangeCurrent(sym: Symbol) {
+    const tail = this.exchangeBars.get(sym)?.bars.at(-1);
+    return !!tail && Date.now() - tail.ts < 5 * 60_000;
+  }
+  barSource(sym: Symbol) { return this.projectXBars.get(sym)?.source ?? (this.exchangeCurrent(sym) ? this.exchangeBars.get(sym)!.source : this.tvCurrent(sym) ? 'TradingView' : 'Yahoo'); }
   clearProjectX() {
     const symbols = [...this.projectXBars.keys()];
-    this.projectXBars.clear(); this.projectXQuotes.clear(); this.projectXUp = false;
+    this.projectXBars.clear(); this.projectXQuotes.clear(); this.forming.clear(); this.projectXUp = false;
     this.status.delete('projectx-market');
     for (const sym of symbols) this.onBars(sym);
   }
-  private selectedBars(sym: Symbol) { return this.projectXBars.get(sym)?.bars ?? this.bars.get(sym) ?? []; }
+  private selectedBars(sym: Symbol): Bar[] {
+    const px = this.projectXBars.get(sym)?.bars;
+    if (px) return px;
+    if (this.exchangeCurrent(sym)) return this.exchangeBars.get(sym)!.bars;
+    const base = this.bars.get(sym) ?? [];
+    return this.tvCurrent(sym) ? this.withTradingView(sym, base) : base;
+  }
 
   /** The minute bars for a market, with the forming minute closed on the live price. */
   barsOf(sym: Symbol): Bar[] {
     const bars = this.selectedBars(sym);
-    const live = this.projectXQuotes.get(sym) ?? this.live.get(sym);
+    const live = this.liveOf(sym);
     if (!bars.length || !live) return bars;
     const tail = bars[bars.length - 1]!;
     const minute = Math.floor(Date.now() / 60_000) * 60_000;
+    // Streamed quotes but candles that only arrive once closed: the minute in progress is drawn from the ticks.
+    const f = this.forming.get(sym);
+    if (f && this.projectXBars.has(sym) && f.ts === minute && f.ts > tail.ts) return [...bars, f];
     if (live.updatedAt < tail.ts) return bars;
     if (tail.ts === minute) return [...bars.slice(0, -1), { ...tail, close: live.last, high: Math.max(tail.high, live.last), low: Math.min(tail.low, live.last) }];
     return bars;
@@ -266,7 +417,7 @@ export class Market {
     const out: Quote[] = [];
     for (const sym of SYMBOLS) {
       const spec = INSTRUMENTS[sym];
-      const live = this.projectXQuotes.get(sym) ?? this.live.get(sym);
+      const live = this.liveOf(sym);
       const bars = this.selectedBars(sym);
       const last = live?.last ?? bars.at(-1)?.close;
       if (last == null) continue;
@@ -290,7 +441,7 @@ export class Market {
         updatedAt,
         barSource: this.barSource(sym),
         source: live?.source ?? (this.projectXBars.has(sym) ? `${this.barSource(sym)} · candle close` : sym === 'BTC' ? 'Yahoo' : 'CME · Yahoo'),
-        stale: (this.projectXQuotes.has(sym) && !this.projectXUp) || Date.now() - updatedAt > (sym === 'BTC' || live?.source.startsWith('ProjectX') ? 120_000 : 15 * 60_000),
+        stale: (this.projectXQuotes.has(sym) && !this.projectXUp) || Date.now() - updatedAt > (sym === 'BTC' || live?.source.startsWith('ProjectX') ? 120_000 : live?.source === 'TradingView' ? 150_000 : 15 * 60_000),
       });
     }
     return out;
@@ -301,7 +452,8 @@ export class Market {
   }
 
   feeds(): FeedStatus[] {
-    return [...this.status.values()].map((s) => ({ ...s }));
+    // TradingView only talks when an alert fires: quiet for five minutes reads as down.
+    return [...this.status.values()].map((s) => ({ ...s, ok: s.id === 'tradingview' ? Date.now() - (s.lastAt ?? 0) < 5 * 60_000 : s.ok }));
   }
 
   // ---- History for the backtest ------------------------------------------------------------------

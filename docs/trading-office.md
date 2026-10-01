@@ -69,6 +69,18 @@ Other ProjectX gateways continue to support account/journal sync; this market co
 TopstepX only. BTC quotes remain Coinbase, BTC candles remain Yahoo, and historical backtests
 continue using Yahoo history. These sources are not relabeled as exchange real-time data.
 
+### Real-time candles from TradingView alerts
+
+TradingView has no data API, but a Pine script can post each closed one-minute candle to the office's webhook. Open **Session Desk → Data connections** and find **TradingView → real-time candles**: it has the script (Copy Pine script) and the steps. In short: add the script to a **1-minute** chart of NQ1!, ES1!, GC1! or BTCUSD, create an alert with Condition **Agent Office feed → Any alert() function call** and **Webhook URL** set to the URL shown under *TradingView → the office*, and repeat for each market. (Without Pine, an ordinary alert on Once Per Bar Close with the JSON message shown in the same card works too.)
+
+While candles keep arriving (none older than four minutes) they are laid over Yahoo's history, the newest one is the market's price, and the freshness labels read **TradingView**. If they stop, the desk falls back to Yahoo and says it is delayed again. Candles are checked before use (known market, 1-minute interval, a high and low that contain the open and close, a sensible time) and refused with a reason otherwise. It is only as real-time as your TradingView data: CME futures need TradingView's CME subscription, and alerts need a plan with webhooks. It steps once a minute; for tick-by-tick futures use ProjectX above. Bitcoin already has real-time candles straight from Coinbase without any setup.
+
+### The Strategy agent and the Strategy Desk
+
+**Strategy** is a permanent resident (desk 12 on both floors). It keeps your Pine scripts: every version dated, with a changelog, where it came from and a fingerprint of its exact source. Click it (or use the **Strategy** button, or ⌘K → Strategy Desk) to open the **Strategy Desk**: the live version with a one-tap **Copy for TradingView**, every version with its test results and a line-by-line "Changes from vX", and the lab's latest news. Nothing is typed: copy, paste into TradingView's Pine Editor, save, add to chart.
+
+The **test lab** replays the live version of the VWAP Double Break Suite on real 1-minute history (NQ, GC, ES), as the script itself plays it on 5-minute bars (NY VWAP, the opening range, the window, the stop and 2R target, one DB2 re-entry), then tries its settings one at a time. A change is called **better** only if it beats the live version overall, holds up on the later third of the days it was not judged on, keeps most of the trades and does not deepen the drawdown, and it gets a **confidence** (low, medium, high) from how big the gap is against the noise in that many trades. It runs after every close and with **Run tests now**. When something holds up it saves a new **candidate** version (marked new, never live on its own), the Strategy agent jumps and you get a notice. Only you make a version live, and the live version is never edited. History is about a month of 1-minute bars, so most results are paper evidence on few trades: the desk says so and never promises anything. Versions live as plain files in `<data>/trading/pine/<script>/` (`manifest.json` and `v<version>.pine`).
+
 ## Trying an upstream integration separately
 
 Use a branch and worktree based on `trading-office`. Merge `upstream/main` there and resolve conflicts
