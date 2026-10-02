@@ -11,6 +11,7 @@ Back to the [README](../README.md).
 | K | On the castle's throne: speak to the Hand of the King, to send out a new worker |
 | P | Prompt: give a task to a new worker, or to the one at this desk |
 | C | Changes: the files the worker at this desk changed and their diff; commit, discard or open a PR |
+| Y | Open the Prop Farm console (accounts, research, forward paper tests and payouts) |
 | B | Open a shared shell at an empty desk |
 | R | Resume a sleeping worker (or restart a shell) |
 | X | Send a worker home (frees the desk; a worker with its own worktree asks what to do with it). In the [castle](maps.md#the-castle), the Kingsguard takes it down to the dungeon |

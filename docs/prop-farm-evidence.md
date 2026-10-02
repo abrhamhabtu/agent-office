@@ -24,9 +24,9 @@ none of his results can be checked):
 
 So the system is four parts: **a signal** (deterministic), **a stage machine** per account (eval →
 passed → funded → payout-ready → parked → paid), **a sizing policy per stage** (all-in on evals, small
-on funded), and **a notifier**. The edge is not the signal. It is the arithmetic: an evaluation's real
-cost is its fee, not the $1,000 drawdown, so a coin-flip trade that pays a funded account is worth
-taking many times, as long as funded accounts actually pay.
+on funded), and **a notifier**. This suggests a fee-versus-payout hypothesis, not an established edge. Screenshots cannot show
+expected value: repeat fees, pass probability, funded survival, execution costs and actual payout
+eligibility all matter. A coin-flip signal is not established as profitable by these examples.
 
 The firm is FundedNext Futures. Its public rule summaries say: bots are allowed; copying between your
 own accounts is allowed; **reverse hedging across accounts** (long on one, short on another) and
@@ -183,13 +183,16 @@ summaries say about running it for real (each to be checked with the firm before
 On the month here, three accounts trading Support & Resistance at 5 micros in the evaluation and 2 funded
 typically net, over 60 days of redraws: LucidFlex 25K about +$6,900, FundedNext Rapid 25K about +$4,400,
 LucidDirect 25K about +$1,900, and Top One Ignite 25K about −$190. Those figures lean on one good month
-for that playbook and on the payout assumption in section 5, so they rank the programs more reliably than
-they price them.
+for that playbook and on the payout assumption in section 5, and have not established a reliable ranking or a forecast. Rerun against current rules and
+held-out evidence before using them to compare programs.
 
 ### 3.7 TradingView
 
-There is no official TradingView connector, and TradingView has no API for running its Strategy Tester
-from outside. Three ways to bring your real TradingView strategies in, in the order they are worth doing:
+Update, 2026-10-02: TradingView now documents an official OAuth MCP research server for Essential
+and above at https://mcp.tradingview.com/mcp. The office includes its read-only sign-in and research
+flow; see [the current guide](prop-farm-expansion.md#tradingview-sign-in-tomorrow). Its documented tools
+do not expose Pine Strategy Tester execution or indicator/webhook alert creation. The following
+Pine-integration ideas remain separate from MCP:
 
 1. **Alerts into the farm** (next to build). Your Pine strategies already can post to the office's
    webhook. Each alert that carries an entry, a stop and a target becomes a paper trade, followed on the

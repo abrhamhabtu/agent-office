@@ -1,12 +1,10 @@
-import type { BacktestDetail, PlaybookId } from '../../shared/trading';
+import type { BacktestDetail } from '../../shared/trading';
 import { STRATEGY_RECIPES } from '../../shared/strategy-recipes';
-import { PLAYBOOK_BY_ID } from '../../shared/trading';
-import { weekdays } from '../../shared/evalsim';
-import { cleanSetup, FARM_DEFAULTS, FARM_PROGRAM_BY_ID, FARM_PROGRAMS, farmDays, farmOdds, programVerified, runFarm, setupProblem, strategyLabel, type FarmCell, type FarmEvent, type FarmOdds, type FarmRun, type FarmSetup, type FarmStage, type FarmStrategy } from '../../shared/farm';
+import { cleanSetup, FARM_DEFAULTS, FARM_PROGRAM_BY_ID, FARM_PROGRAMS, programVerified, setupProblem, strategyLabel, type FarmCell, type FarmEvent, type FarmOdds, type FarmRun, type FarmSetup, type FarmStage, type FarmStrategy } from '../../shared/farm';
 import { STATUS_WORD } from '../../shared/account-ledger';
 import { COST_IDS, COSTS } from '../../shared/fills';
 import { MANAGE } from '../../shared/manage';
-import { splitDays } from '../../shared/validation';
+import type { planFarm } from '../../shared/farm-planner';
 import { h } from '../ui/dom';
 import { openEvalSim } from './evalsim';
 import { trading } from './feed';
@@ -34,7 +32,6 @@ interface Preset {
   strategy: FarmStrategy;
 }
 const ALL_MARKETS: FarmStrategy['markets'] = ['NQ', 'ES', 'GC'];
-const one = (p: PlaybookId): Preset => ({ id: p, name: PLAYBOOK_BY_ID[p].name, strategy: { playbooks: [p], mode: 'every', manage: 'written', markets: ALL_MARKETS } });
 
 export interface Battle {
   show(): void;
@@ -76,8 +73,10 @@ export function mountBattle(shell: FarmShell, rail: HTMLElement, main: HTMLEleme
   };
 
   // ---- The numbers: worked out when the setup or the data changes, not on every drag of the day ----
-  let lists: ReturnType<typeof farmDays> = [];
-  let days: string[] = [];
+  let worker: Worker | null = null;
+  let computing = false;
+  let computeError = '';
+  const stopCompute = () => { worker?.terminate(); worker = null; computing = false; };
   let held = 0;
   let battle: FarmRun | null = null;
   let odds: FarmOdds | null = null;
@@ -90,32 +89,35 @@ export function mountBattle(shell: FarmShell, rail: HTMLElement, main: HTMLEleme
     return { evalMax: p.evalRules?.maxMicros ?? 0, fundedMax: p.fundedRules.maxMicros };
   };
   function compute() {
-    if (!detail?.trades.length) return;
-    // The holdout's days are kept out of planning: only what research may look at.
-    const split = splitDays(weekdays(detail.days));
-    days = [...split.train, ...split.validation];
-    held = split.holdout.length;
-    lists = farmDays(detail.trades, setup.strategy, days);
+    stopPlay();
+    stopCompute();
+    battle = null; odds = null; perProgram.clear(); evalLadder = []; fundedLadder = [];
+    computeError = '';
+    if (!shown || !detail?.trades.length) return;
     const { evalMax, fundedMax } = limits(setup);
-    // A cap from another program that this one doesn't allow is brought inside its limit.
     if (evalMax && setup.evalMicros > evalMax) setup = { ...setup, evalMicros: evalMax };
     if (setup.fundedMicros > fundedMax) setup = { ...setup, fundedMicros: fundedMax };
-    battle = runFarm(lists, setup, days);
-    odds = farmOdds(lists, setup, { runs: 200, horizon: 60, block: 2 });
-    perProgram = new Map(FARM_PROGRAMS.map((p) => {
-      const s = { ...setup, programId: p.id, fee: null };
-      const lim = limits(s);
-      return [p.id, farmOdds(lists, { ...s, evalMicros: Math.min(s.evalMicros, lim.evalMax || s.evalMicros), fundedMicros: Math.min(s.fundedMicros, lim.fundedMax) }, { runs: 60, horizon: 60, block: 2 })];
-    }));
-    const ladder = (max: number, key: 'evalMicros' | 'fundedMicros') => [...new Set([1, 2, 3, 5, 10, 15, 20, max].filter((n) => n >= 1 && n <= max))].sort((a, b) => a - b).map((micros) => ({ micros, odds: farmOdds(lists, { ...setup, [key]: micros }, { runs: 60, horizon: 60, block: 2 }) }));
-    evalLadder = evalMax ? ladder(evalMax, 'evalMicros') : [];
-    fundedLadder = ladder(fundedMax, 'fundedMicros');
+    persist();
+    computing = true;
+    try {
+      const job = new Worker(new URL('./farm-worker.ts', import.meta.url), { type: 'module' });
+      worker = job;
+      job.onmessage = (event: MessageEvent<{ result?: ReturnType<typeof planFarm>; error?: string }>) => {
+        if (worker !== job || !shown) return;
+        stopCompute();
+        const r = event.data.result;
+        if (r) { battle = r.battle; odds = r.odds; held = r.held; perProgram = new Map(r.perProgram); evalLadder = r.evalLadder; fundedLadder = r.fundedLadder; day = Math.max(0, battle.days.length - 1); }
+        else computeError = event.data.error ?? 'Comparison failed';
+        render();
+      };
+      job.onerror = () => { if (worker === job) { stopCompute(); computeError = 'Comparison failed. Reopen Battle test to retry.'; render(); } };
+      job.postMessage({ detail: { trades: detail.trades, days: detail.days }, setup });
+    } catch { stopCompute(); computeError = 'This browser could not start the comparison worker.'; }
     const mix = trading.snap?.backtest?.mixes?.find((m) => m.order.length > 1 && m.mode !== 'every' && m.trades >= 20);
     presets = [
       ...(mix ? [{ id: 'mix', name: 'The lab’s best mix', strategy: { playbooks: mix.order, mode: mix.mode, manage: 'written' as const, markets: ALL_MARKETS } }] : []),
       ...STRATEGY_RECIPES,
     ];
-    day = Math.max(0, battle.days.length - 1);
   }
 
   // ---- Drawing ---------------------------------------------------------------------------------------
@@ -145,7 +147,7 @@ export function mountBattle(shell: FarmShell, rail: HTMLElement, main: HTMLEleme
         ...FARM_PROGRAMS.filter((p) => p.firm === firm).map((p) => {
           const o = perProgram.get(p.id);
           return h('button.fm-program', { type: 'button', 'aria-pressed': String(p.id === setup.programId), onclick: () => change({ programId: p.id, fee: null }) },
-            h('span.fm-program-top', {}, h('b', {}, p.name), programVerified(p) ? badge('RULES VERIFIED', 'ok', 'Read on the firm’s own pages, 2 October 2026') : badge('WHAT-IF RULES', 'warn', 'From public summaries: every number is to be checked with the firm')),
+            h('span.fm-program-top', {}, h('b', {}, p.name), programVerified(p) ? badge('RULES VERIFIED', 'ok', 'Read on the firm’s own pages, 2 October 2026') : badge('RULES PARTIAL', 'warn', 'Inspect the rule sheet for source links and conditions still needing verification')),
             h('small', {}, p.note),
             o?.runs ? h('span.fm-program-odds', { 'data-tone': o.mean >= 0 ? 'up' : 'down' }, `${signedMoney(o.mean)} on average in ${o.horizon} days · ahead ${pct(o.ahead)}`) : null);
         }),
@@ -236,12 +238,17 @@ export function mountBattle(shell: FarmShell, rail: HTMLElement, main: HTMLEleme
   function render() {
     if (!shown) return;
     const bt = trading.snap?.backtest;
+    drawRail();
     if (!detail?.trades.length) {
-      rail.replaceChildren(h('span.tl-kicker', {}, 'SET IT UP'));
       main.replaceChildren(h('div.tl-waiting', {}, h('span.tl-spin'), h('b', {}, bt?.running || !bt ? 'Replaying the month on real bars…' : 'No backtest trades yet'), h('p', {}, 'The battle test runs on the backtest’s trades. It fills in the moment the backtest finishes.')));
       return;
     }
-    drawRail();
+    if (computing || computeError) {
+      main.replaceChildren(h('div.tl-waiting', { role: 'status' }, computing ? h('span.tl-spin') : null,
+        h('b', {}, computing ? 'Comparing account paths…' : computeError),
+        h('p', {}, 'You can keep changing the setup. Closing this tab cancels the calculation.')));
+      return;
+    }
     const run = battle;
     const refused = setupProblem(setup);
     const program = FARM_PROGRAM_BY_ID[setup.programId]!;
@@ -305,19 +312,22 @@ export function mountBattle(shell: FarmShell, rail: HTMLElement, main: HTMLEleme
   return {
     show() {
       shown = true;
+      if (!battle) compute();
       render();
     },
     hide() {
       if (!shown) return;
       shown = false;
       stopPlay();
+      stopCompute();
       rail.replaceChildren();
     },
     data(d) {
+      if (detail === d) return;
       detail = d;
       compute();
       render();
     },
-    dispose: stopPlay,
+    dispose: () => { shown = false; stopPlay(); stopCompute(); },
   };
 }

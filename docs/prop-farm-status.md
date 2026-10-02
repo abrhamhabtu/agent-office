@@ -1,3 +1,6 @@
+> Current expansion: [Prop Farm expansion](prop-farm-expansion.md). The list below records the
+> Claude implementation baseline at `75ad323`; later work is recorded in that guide.
+
 # Prop Farm: where the build stands
 
 A handoff note for whoever picks this up. The plan is [prop-farm-plan.md](prop-farm-plan.md); this says

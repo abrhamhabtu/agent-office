@@ -128,32 +128,39 @@ paper result, and the live eval's race.
 
 ### The Farm
 
-**🌾 Prop farm** (the fourth wall display on Back Office, the ☰ menu, or the command palette) runs a few
-prop accounts through one firm's program on paper, from the fee to the payout. Set it up in the steps on
-the left:
+Press **Y**, use **Prop farm** in the menu, walk up to the fourth Back Office wall display, or visit
+`/#farm`. Six views share the same account ledgers: Overview, Research, Compare, Forward, Payouts and
+Battle test. The research queue is bounded and resumes saved jobs after a restart. Forward runs pin
+settings and distinguish decisions recorded before an outcome from history added late.
 
-1. **The firm and the program**: Lucid (LucidFlex 25K and 50K, LucidDirect 25K), Top One (Ignite 25K and
-   50K, straight to funded) or FundedNext (Rapid 25K and 50K). Each card shows what that program typically
-   nets with your setup. Set what an attempt really costs you; two of the fees are guesses and say so.
-2. **How many accounts** side by side (up to five), how many attempts in all, and whether they **take
-   turns** (each signal goes to the next account, so no two are on opposite sides) or all take every trade.
-3. **What they trade**: a playbook, or the lab's best mix, and how a trade is managed.
-4. **How big**: micros in the evaluation and micros funded. Under each size is what the farm typically
-   nets at it; ★ is the best on these days.
-5. **Notices**: once the farm is live, a Discord webhook address gets every fill, pass and payout.
+Battle test offers Lucid, Top One and FundedNext account scenarios. Current FundedNext Rapid Pro
+25K/50K/100K and Flex 50K/100K/150K sit beside the historical scenarios. Read each rule sheet: some
+conditions remain unverified. Fees are editable estimates; enter the checkout price and applicable
+activation costs. Automation permission differs by firm and program.
 
-**Battle test** replays the setup over the backtest's month: accounts move from *Evaluations* to *Funded*
-to *Payout ready* (parked until paid) or *Out*. Drag the day or press **Replay** to watch it happen; the
-feed lists every milestone and the chart is payouts less fees. The odds beside the headline run the same
-farm over 300 redraws of your real days, 60 at a time. **Live on paper** runs it forward on what the
-playbooks really take, a day at a time, and the wall display shows every account. Nothing is bought and
-no order is placed.
+Choose a strategy recipe, markets, signal-combination mode and cost model. Recipes combine existing
+VWAP, support/resistance, breakout and failed-auction playbooks. They are candidates to test, not
+validated recommendations. Trend/range selection abstains when indicator readings are missing.
 
-A payout lands the day after an account parks, and the account rests that day. The model assumes an
-account starts again at its opening balance with its full drawdown after a payout, which some firms are
-stricter about, and it does not model a program's limit on payouts per account. Fees, splits and payout
-caps are from public summaries: check them with the firm. [The prop farm plan](prop-farm-plan.md) has the
-rest, including what each firm says about automation.
+**Phase-aware** sizing sets separate evaluation/funded risk shares, with a reserved drawdown cushion.
+Payout protection reduces funded per-trade risk as its cycle goal approaches. The numbers are percentages
+of usable drawdown cushion, not of the account's nominal balance. Caps and firm rules still apply; a
+20-micro ceiling does not mean every trade can carry 20. Account rotation and correlated copying are
+separate choices. Higher evaluation risk can shorten winning attempts while increasing losses and fees.
+
+The battle view compares 200 seeded redraws over 60 trading days, with 60 redraws for program/size
+comparisons. Holdout days are excluded. Calculations run in a background worker and stop when the view
+closes. The highlighted size only won this in-sample comparison. Test it forward before interpreting it
+as an improvement. Payouts preserve the remaining account balance and floor, enforce cycle checks and
+park the account while its modeled withdrawal is pending. Simulated receipts remain separate from
+confirmed real receipts.
+
+The adaptive lane uses a statistical regime filter by default. Set `AGENT_OFFICE_ADAPTIVE_CMD` to a
+trusted local command to use an agent: it reads a JSON request on stdin and returns a take/abstain
+JSON decision. It cannot set size, stop or target. Responses, model identity and timestamps are recorded;
+invalid, late or unavailable responses abstain, including on replay. This lane is shadow research,
+not live brokerage execution. See [expansion and connection guide](prop-farm-expansion.md).
+
 
 ## Session Desk and cleaner desks
 
@@ -205,9 +212,18 @@ Other ProjectX gateways continue to support account/journal sync; this market co
 TopstepX only. BTC quotes remain Coinbase, BTC candles remain Yahoo, and historical backtests
 continue using Yahoo history. These sources are not relabeled as exchange real-time data.
 
+### TradingView MCP research
+
+Open **Session Desk → Data connections → TradingView · official MCP research**. Connect, follow the
+official sign-in link, then return and run a research request. Essential and above (excluding trials)
+include MCP access. The office exposes four read-only tools and stores OAuth credentials privately on
+the local server. It does not infer real-time entitlement from a successful sign-in. Inspect the returned
+market timestamp and delay fields. This is an on-demand research connection, separate from the candle
+feed below. [Tomorrow's setup](prop-farm-expansion.md#tradingview-sign-in-tomorrow).
+
 ### Real-time candles from TradingView alerts
 
-TradingView has no data API, but a Pine script can post each closed one-minute candle to the office's webhook. Open **Session Desk → Data connections** and find **TradingView → real-time candles**: it has the script (Copy Pine script) and the steps. In short: add the script to a **1-minute** chart of NQ1!, ES1!, GC1! or BTCUSD, create an alert with Condition **Agent Office feed → Any alert() function call** and **Webhook URL** set to the URL shown under *TradingView → the office*, and repeat for each market. (Without Pine, an ordinary alert on Once Per Bar Close with the JSON message shown in the same card works too.)
+For the office's candle feed, a Pine script can post each closed one-minute candle to the office's webhook. Open **Session Desk → Data connections** and find **TradingView → real-time candles**: it has the script (Copy Pine script) and the steps. In short: add the script to a **1-minute** chart of NQ1!, ES1!, GC1! or BTCUSD, create an alert with Condition **Agent Office feed → Any alert() function call** and **Webhook URL** set to the URL shown under *TradingView → the office*, and repeat for each market. (Without Pine, an ordinary alert on Once Per Bar Close with the JSON message shown in the same card works too.)
 
 While candles keep arriving (none older than four minutes) they are laid over Yahoo's history, the newest one is the market's price, and the freshness labels read **TradingView**. If they stop, the desk falls back to Yahoo and says it is delayed again. Candles are checked before use (known market, 1-minute interval, a high and low that contain the open and close, a sensible time) and refused with a reason otherwise. It is only as real-time as your TradingView data: CME futures need TradingView's CME subscription, and alerts need a plan with webhooks. It steps once a minute; for tick-by-tick futures use ProjectX above. Bitcoin already has real-time candles straight from Coinbase without any setup.
 

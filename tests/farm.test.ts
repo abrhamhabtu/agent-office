@@ -41,6 +41,13 @@ test('one LucidFlex 25K account goes from the fee to the payout, by hand', () =>
   // Parked: its floor is the locked balance, $25,100.
   assert.equal(run.cells[6]![0]!.floor, 25_100);
   assert.deepEqual([run.cells[6]![0]!.profitDays, run.cells[6]![0]!.profitDaysNeeded], [5, 5]);
+  // The payout view gets the ledger's actual cycle checks and withdrawal details.
+  const parked = run.cells[6]![0]!.payout!;
+  assert.ok(parked.checks.some(c => c.label === 'Net profit this cycle'));
+  assert.ok(parked.checks.every(c => c.ok));
+  assert.equal(parked.requested, 1000);
+  assert.equal(run.cells[8]![0]!.payout!.payouts, 1);
+  assert.equal(run.cells[8]![0]!.payout!.received, 900);
   // Every trade says why it was the size it was.
   const first = run.events.find((e) => e.kind === 'trade')!;
   assert.match(first.why!, /^10 MNQ, risking \$400: the cap asked for is 10\.$/);

@@ -172,6 +172,14 @@ export function policyOf(setup: FarmSetup, phase: 'eval' | 'funded', context?: {
   return setup.sizing === 'cushion' ? { ...CUSHION_BASELINE, id: `cushion-${cap}`, name: `Cushion-based, up to ${cap}`, cap } : capPolicy(cap);
 }
 
+/** Use the same cycle state for sizing and for the account card's explanation. */
+export function accountPolicy(setup: FarmSetup, a: Account, rules: RuleSet): RiskPolicy {
+  const p = rules.payout;
+  const goal = Math.max(p?.minCycleProfit ?? 0, p?.minProfit ?? 0, (p?.profitDayMin ?? 0) * (p?.profitDays ?? 0),
+    p?.consistencyPercent && p.consistencyPercent < 100 ? a.cycle.bestDay / (p.consistencyPercent / 100) : 0);
+  return policyOf(setup, a.phase, { profit: a.balance - a.cycle.startBalance, goal, drawdown: rules.drawdown });
+}
+
 /** Why a setup can't be run at all (null: it can): a cap over the firm's ceiling is refused, not quietly shrunk. */
 export function setupProblem(setup: FarmSetup): string | null {
   const program = FARM_PROGRAM_BY_ID[setup.programId];
@@ -225,6 +233,9 @@ export interface FarmCell {
   /** Days that counted toward the payout this cycle, of how many it needs (funded accounts). */
   profitDays: number;
   profitDaysNeeded: number;
+  /** End-of-day ledger checks, retained so the view does not invent a shorter checklist. */
+  payout?: ReturnType<typeof payoutCheck> & { requested: number | null; requestedOn: string | null; payouts: number; received: number };
+  risk?: RiskPolicy;
   /** Why it is where it is. */
   why: string;
 }
@@ -365,7 +376,7 @@ export function runFarm(dayLists: PaperTrade[][], setup: FarmSetup, labels?: str
         const conflict = crossAccountConflict(t.symbol, t.side, held, tag(slots[i]!));
         const decision = conflict
           ? null
-          : sizeTrade({ symbol: t.symbol, stopPoints: Math.abs(t.entry - t.stop), policy: setup.sizing === 'phase' ? policyOf(setup, a.phase, { profit: a.balance - a.cycle.startBalance, goal: Math.max(rules.payout?.minCycleProfit ?? 0, rules.payout?.minProfit ?? 0, (rules.payout?.profitDayMin ?? 0) * (rules.payout?.profitDays ?? 0), rules.payout?.consistencyPercent && rules.payout.consistencyPercent < 100 ? a.cycle.bestDay / (rules.payout.consistencyPercent / 100) : 0), drawdown: rules.drawdown }) : policies[a.phase], cost, allowedMicros: a.allowedMicros, openMicros: s.openMicros, cushion: cushionOf(a, rules), openRisk: s.openRisk, dayStartCushion: openCushion[i]!, dayLoss: Math.max(0, -s.dayPnl), dailyLossLimit: rules.dailyLossLimit });
+          : sizeTrade({ symbol: t.symbol, stopPoints: Math.abs(t.entry - t.stop), policy: setup.sizing === 'phase' ? accountPolicy(setup, a, rules) : policies[a.phase], cost, allowedMicros: a.allowedMicros, openMicros: s.openMicros, cushion: cushionOf(a, rules), openRisk: s.openRisk, dayStartCushion: openCushion[i]!, dayLoss: Math.max(0, -s.dayPnl), dailyLossLimit: rules.dailyLossLimit });
         if (!decision?.micros) {
           lastWhy ||= conflict ?? decision!.why;
           if (decision && (decision.binding === 'cushion' || decision.binding === 'day')) starved[i]!++;
@@ -439,6 +450,8 @@ export function runFarm(dayLists: PaperTrade[][], setup: FarmSetup, labels?: str
         const best = funded ? a.cycle.bestDay : a.bestDay;
         const stage = stageOf(a);
         return {
+          risk: accountPolicy(setup, a, r),
+          payout: funded ? { ...payoutCheck(a, r), requested: a.request?.amount ?? null, requestedOn: a.request?.day ?? null, payouts: a.payouts, received: a.received } : undefined,
           stage, status: a.status, account: stage === 'busted' ? `#${s.no}` : a.id, balance: Math.round(a.balance), size: a.start, floor: Math.round(floorOf(a, r)),
           target: funded ? a.start + (r.payout?.minProfit ?? 0) : a.start + r.profitTarget, pnl: Math.round(rep?.pnl ?? 0), trades: rep?.fills ?? 0, last: s.last,
           tradingDays: funded ? a.cycle.tradingDays : a.tradingDays, bestShare: base > 0 ? best / base : null, allowed: a.allowedMicros, lowCushion: Math.round(rep?.lowCushion ?? cushionOf(a, r)),

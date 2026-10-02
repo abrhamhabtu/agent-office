@@ -66,8 +66,14 @@ const FORBIDDEN = ['size', 'micros', 'contracts', 'quantity', 'qty', 'risk', 'st
 
 /** Features that were known when the decision was made; the rest are reported as problems. */
 export function usableFeatures(req: DecisionRequest): { features: Feature[]; problems: string[] } {
-  const late = req.features.filter((f) => f.availableAt > req.at);
-  return { features: req.features.filter((f) => f.availableAt <= req.at), problems: late.map((f) => `Feature "${f.name}" wasn't known until after the decision`) };
+  const problems: string[] = [];
+  if (!Number.isFinite(req.at)) problems.push('Invalid decision time');
+  const features = req.features.filter(f => {
+    if (!Number.isFinite(f.availableAt) || (f.value !== null && !Number.isFinite(f.value))) { problems.push(`Feature "${f.name}" has an invalid value or timestamp`); return false; }
+    if (f.availableAt > req.at) { problems.push(`Feature "${f.name}" wasn't known until after the decision`); return false; }
+    return Number.isFinite(req.at);
+  });
+  return { features, problems };
 }
 
 /**
@@ -92,6 +98,7 @@ export function parseDecision(raw: unknown, req: DecisionRequest): { decision: A
   const b = body as Record<string, unknown>;
   const tried = Object.keys(b).filter((k) => FORBIDDEN.includes(k));
   if (tried.length) return fail(`The response tries to set ${tried.join(', ')}: the lane can only take or abstain`);
+  if (Object.keys(b).some(k => !['action', 'regime', 'confidence', 'reason', 'playbook'].includes(k))) return fail('The response contains an unsupported field');
   if (b.action !== 'take' && b.action !== 'abstain') return fail('The action must be "take" or "abstain"');
   const confidence = typeof b.confidence === 'number' && Number.isFinite(b.confidence) ? b.confidence : NaN;
   if (!(confidence >= 0 && confidence <= 1)) return fail('The confidence must be a number from 0 to 1');
@@ -148,12 +155,13 @@ export async function decide(req: DecisionRequest, model: ModelInfo, decider: De
   const record = (raw: string, decision: AdaptiveDecision, valid: boolean, problems: string[]): DecisionRecord => ({ request: req, model, raw, decision, valid, problems, askedAt, answeredAt: clock() });
   if (!decider) return record('', ABSTAIN('The model is unavailable'), false, ['The model is unavailable']);
   let raw: unknown;
+  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    raw = await Promise.race([Promise.resolve().then(() => decider(shown)), new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), budget))]);
+    raw = await Promise.race([Promise.resolve().then(() => decider(shown)), new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('timeout')), budget); })]);
   } catch (e) {
     const why = (e as Error).message === 'timeout' ? `No answer within ${Math.round(budget / 1000)}s` : `The model failed: ${(e as Error).message.slice(0, 120)}`;
     return record('', ABSTAIN(why), false, [why]);
-  }
+  } finally { clearTimeout(timer); }
   const text = typeof raw === 'string' ? raw : JSON.stringify(raw ?? null);
   // A leak in what it would have been shown, or an answer that came back after the budget: abstain either way.
   const parsed = parseDecision(raw, req);

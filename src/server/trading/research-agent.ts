@@ -115,7 +115,7 @@ export class ShadowLane {
 
   /** A record read back: the decision it holds, re-checked from the raw response. The model is not asked again. */
   static replay(r: DecisionRecord) {
-    return r.raw ? parseDecision(r.raw, r.request) : { decision: r.decision, valid: r.valid, problems: r.problems };
+    return r.valid && r.raw ? parseDecision(r.raw, r.request) : { decision: r.decision, valid: r.valid, problems: r.problems };
   }
 
   /** How the lane stands against taking every setup, on the decisions that have closed. In R after costs. */

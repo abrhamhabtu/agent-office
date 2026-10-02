@@ -11,7 +11,7 @@ import { describeRules, isVerified, ruleIssues, ruleSetById, RULESETS, type Rule
 import { datasetHash, fingerprint, splitDays, validate, VERDICT_WORD, type Candidate, type ValidationReport } from '../../shared/validation.js';
 import type { AccountCard, FarmTotals, ForwardRunView, JobDetail, JobPreset, OpsView, PayoutEntry, PayoutRow, PropFarmView, SizingCell, SizingResult } from '../../shared/propfarm.js';
 import { AccountBook } from './accounts.js';
-import { BROKERS, readiness } from './broker.js';
+import { BROKERS, readiness, feedsReady } from './broker.js';
 import { ForwardBook, type FeedState } from './forward.js';
 import { JobQueue, type Dataset, type JobSpec, type Runner } from './jobs.js';
 import { PayoutLedger, payoutRow } from './payouts.js';
@@ -512,7 +512,7 @@ export class PropFarm {
         if (c.status === 'empty') return;
         const funded = c.stage === 'funded' || c.stage === 'parked' || /^FUNDED/.test(c.account);
         const rules = funded ? program.fundedRules : program.evalRules ?? program.fundedRules;
-        const policy = policyOf(v.setup, rules.phase);
+        const policy = c.risk ?? policyOf(v.setup, rules.phase);
         const cushion = Math.max(0, c.balance - c.floor);
         const dayBudget = Math.min(policy.dayShare != null ? cushion * policy.dayShare : Infinity, rules.dailyLossLimit ?? Infinity, cushion);
         accounts.push({
@@ -535,19 +535,15 @@ export class PropFarm {
         const rules = program.fundedRules;
         const p = rules.payout!;
         const profit = c.balance - c.size;
-        const amount = Math.max(0, Math.floor(Math.min(profit * p.withdrawShare, p.maxRequest ?? Infinity)));
+        const amount = c.payout?.requested ?? c.payout?.amount ?? 0;
         const parked = c.status === 'parked';
         const eligible = c.status === 'payout-eligible' ? amount : 0;
         if (parked) totals.requested += amount;
         totals.eligible += eligible;
         payouts.push({
           account: `${v.id}:${slot}`, label: `${c.account} · ${v.name}`, source: 'simulated', firm: program.firm, program: rules.program, status: c.status as Account['status'],
-          checks: [
-            { label: p.profitDayMin ? `Days of $${p.profitDayMin} or more` : 'Trading days', ok: c.profitDays >= p.profitDays || parked, detail: `${c.profitDays} of ${p.profitDays} this cycle` },
-            { label: 'Profit in the account', ok: profit >= p.minProfit, detail: profit >= p.minProfit ? `$${Math.round(profit).toLocaleString('en-US')} (needs $${p.minProfit.toLocaleString('en-US')})` : `$${Math.round(p.minProfit - profit).toLocaleString('en-US')} more to reach $${p.minProfit.toLocaleString('en-US')}` },
-            { label: 'Request size', ok: amount >= p.minRequest && amount > 0, detail: `$${amount.toLocaleString('en-US')} available` },
-          ],
-          eligible, requested: parked ? amount : null, requestedOn: null, received: 0, payouts: 0, payoutsAllowed: p.maxPayouts, floor: c.floor, floorAfter: p.floorOnRequest != null ? Math.max(c.floor, c.size + p.floorOnRequest) : c.floor,
+          checks: c.payout?.checks ?? [],
+          eligible, requested: c.payout?.requested ?? null, requestedOn: c.payout?.requestedOn ?? null, received: c.payout?.received ?? 0, payouts: c.payout?.payouts ?? 0, payoutsAllowed: p.maxPayouts, floor: c.floor, floorAfter: p.floorOnRequest != null ? Math.max(c.floor, c.size + p.floorOnRequest) : c.floor,
           cushionAfter: Math.max(0, c.balance - (parked || eligible ? amount : 0) - (p.floorOnRequest != null ? Math.max(c.floor, c.size + p.floorOnRequest) : c.floor)), microsAfter: c.allowed,
           next: parked ? 'When the simulated payout lands' : c.status === 'breached' ? 'Never: it is breached' : 'Now', split: p.split,
         });
@@ -607,7 +603,7 @@ export class PropFarm {
       rules: RULESETS.map((r) => ({ id: r.id, firm: r.firm, program: r.program, size: r.size, phase: r.phase, cohort: r.cohort, verifiedOn: r.verifiedOn, verified: isVerified(r), automation: r.automation, rows: describeRules(r), issues: ruleIssues(r), notes: r.notes, sources: r.sources })),
       readiness: readiness({
         automation: activeProgram ? (activeProgram.evalRules ?? activeProgram.fundedRules).automation : null, rulesVerified: activeProgram ? programVerified(activeProgram) : false, gateMet: runs.some((r) => r.gate.met),
-        holdoutHeld: this.saved.holdout.some((h) => h.verdict === VERDICT_WORD.held), realTimeData: Object.values(feeds).some((f) => f && !f.delayed && !f.stale), projectxConnected: this.host.projectxConnected(),
+        holdoutHeld: this.saved.holdout.some((h) => h.verdict === VERDICT_WORD.held), realTimeData: feedsReady(feeds, runs.some(r => r.status !== 'stopped') ? [...new Set(runs.filter(r => r.status !== 'stopped').flatMap(r => r.setup.strategy.markets))] : MARKETS), projectxConnected: this.host.projectxConnected(),
       }),
       brokers: BROKERS,
       ops: {

@@ -376,4 +376,8 @@ For optional real-time NQ, ES and GC, use **Session Desk → Data connections �
 
 Prop Farm: press **Y** or open `/#farm` for accounts, research, comparison, forward paper tests,
 payouts and battle tests. Current FundedNext 25K–150K scenarios and setup notes are documented in
-[Prop Farm expansion](docs/prop-farm-expansion.md).
+[Prop Farm expansion](docs/prop-farm-expansion.md). Includes FundedNext Rapid Pro/Flex scenarios through
+150K, strategy recipes and separate evaluation/funded risk budgets.
+
+**TradingView MCP:** Session Desk → Data connections → Connect TradingView prepares official OAuth
+sign-in for Essential or higher. [Setup and limits](docs/prop-farm-expansion.md#tradingview-sign-in-tomorrow).

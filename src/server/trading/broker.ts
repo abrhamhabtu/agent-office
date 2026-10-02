@@ -271,6 +271,14 @@ export const BROKERS: BrokerCapability[] = [
   { id: 'tradingview', name: 'TradingView alerts', data: 'wired', accounts: 'none', orders: 'none', note: 'Bar closes and alerts arrive by webhook. It cannot report an account or take an order back.' },
 ];
 
+/** Every selected market needs its own recent, entitled feed; BTC cannot stand in for CME. */
+export function feedsReady(feeds: Partial<Record<Symbol, { delayed: boolean; stale: boolean; ageSec: number | null }>>, markets: Symbol[]): boolean {
+  return markets.length > 0 && markets.every(symbol => {
+    const f = feeds[symbol];
+    return !!f && !f.delayed && !f.stale && f.ageSec != null && Number.isFinite(f.ageSec) && f.ageSec >= 0 && f.ageSec <= 240;
+  });
+}
+
 export interface ReadinessContext {
   /** The program a run trades allows automation, by its rule set. */
   automation: 'allowed' | 'prohibited' | 'unknown' | null;
@@ -289,9 +297,9 @@ export function readiness(c: ReadinessContext): ReadinessItem[] {
     { label: 'The firm allows automation', state: c.automation === 'allowed' && c.rulesVerified ? 'ready' : 'blocked', detail: c.automation == null ? 'No forward run to check' : c.automation === 'allowed' ? (c.rulesVerified ? 'Read on the firm’s own pages. Its API access is a separate question, below.' : 'Reported, not read on the firm’s pages') : c.automation === 'prohibited' ? 'This firm prohibits automated execution: manual only, with the office advising' : 'Not known for this program' },
     { label: 'Forward evidence', state: c.gateMet ? 'ready' : 'blocked', detail: c.gateMet ? 'A run has 30 forward sessions and 100 closed forward trades' : 'No run has 30 forward sessions and 100 closed forward trades yet' },
     { label: 'Holdout under stressed costs', state: c.holdoutHeld ? 'ready' : 'blocked', detail: c.holdoutHeld ? 'A candidate held up on the untouched days' : 'No candidate has been taken to the holdout and held' },
-    { label: 'Real-time data', state: c.realTimeData ? 'ready' : 'blocked', detail: c.realTimeData ? 'Bars are arriving in real time' : 'The office is on delayed bars: fine for research, not for an order' },
+    { label: 'Real-time data', state: c.realTimeData ? 'ready' : 'blocked', detail: c.realTimeData ? 'Every selected market has recent, non-delayed bars' : 'A selected futures feed is delayed, stale or missing: research only' },
     { label: 'Account reconciliation', state: c.projectxConnected ? 'ready' : 'blocked', detail: c.projectxConnected ? 'ProjectX reports balances and fills, read-only' : 'No broker reports your accounts: balances are typed in by hand' },
-    { label: 'Order lifecycle proven in a sandbox', state: 'ready', detail: 'Idempotent keys, partial fills, rejections, timeouts reconciled before any retry, missing brackets flattened, repeats ignored: all tested against a sandbox broker' },
+    { label: 'Order lifecycle proven in a sandbox', state: 'blocked', detail: 'Sandbox components exist; complete fault-path integration coverage and broker-specific validation are still pending' },
     { label: 'A supported order route', state: 'missing', detail: 'None. No provider’s order API has been verified for a prop account, so no live adapter exists in this build.' },
     { label: 'Your decision to arm it', state: 'missing', detail: 'A separate step, by you, after reviewing all of the above. Nothing here does it for you.' },
   ];
