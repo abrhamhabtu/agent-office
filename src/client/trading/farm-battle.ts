@@ -37,6 +37,7 @@ export interface Battle {
   show(): void;
   hide(): void;
   data(detail: BacktestDetail | null): void;
+  tick(): void;
   dispose(): void;
 }
 
@@ -50,6 +51,8 @@ export function mountBattle(shell: FarmShell, rail: HTMLElement, main: HTMLEleme
   let playing = 0;
   let feedAll = false;
   let shown = false;
+  /** What the waiting screen last said it was waiting for, so it is redrawn when that changes. */
+  let waitingFor = '';
   const persist = () => save.set({ ...setup, firm });
 
   const money$ = h('div');
@@ -240,7 +243,18 @@ export function mountBattle(shell: FarmShell, rail: HTMLElement, main: HTMLEleme
     const bt = trading.snap?.backtest;
     drawRail();
     if (!detail?.trades.length) {
-      main.replaceChildren(h('div.tl-waiting', {}, h('span.tl-spin'), h('b', {}, bt?.running || !bt ? 'Replaying the month on real bars…' : 'No backtest trades yet'), h('p', {}, 'The battle test runs on the backtest’s trades. It fills in the moment the backtest finishes.')));
+      // Say which it is: the office not answering, its backtest still running, a backtest that failed or found
+      // nothing, or the trades on their way. A spinner is only shown for the ones that will end by themselves.
+      const failed = !!bt && !bt.running && !bt.days.length;
+      const [head, body, spin] = trading.offline
+        ? ['The office isn’t answering', 'This window is showing the last thing the office sent. The battle test fills in as soon as it is back: nothing needs reloading.', true]
+        : !bt || bt.running
+          ? ['Replaying the month on real bars…', 'The battle test runs on the backtest’s trades. It fills in the moment the backtest finishes.', true]
+          : failed
+            ? ['The backtest has no trades', bt.note || 'The backtest finished without any trading days. It runs again after the next close, or from the Backtest tab of the trading panel.', false]
+            : ['Fetching the backtest’s trades…', 'The backtest has finished: its trades are on their way.', true];
+      main.replaceChildren(h('div.tl-waiting', { role: 'status' }, spin ? h('span.tl-spin') : null, h('b', {}, head), h('p', {}, body)));
+      waitingFor = `${trading.offline}:${!!bt}:${bt?.running}:${failed}`;
       return;
     }
     if (computing || computeError) {
@@ -327,6 +341,11 @@ export function mountBattle(shell: FarmShell, rail: HTMLElement, main: HTMLEleme
       detail = d;
       compute();
       render();
+    },
+    /** The office's state moved on while the battle test was waiting for its data: say the new thing. */
+    tick() {
+      const bt = trading.snap?.backtest;
+      if (shown && !detail?.trades.length && waitingFor !== `${trading.offline}:${!!bt}:${bt?.running}:${!!bt && !bt.running && !bt.days.length}`) render();
     },
     dispose: () => { shown = false; stopPlay(); stopCompute(); },
   };

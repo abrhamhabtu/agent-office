@@ -29,6 +29,8 @@ export class TradingFeed {
   private rungBell: number | null | undefined;
   /** Bumps on every snapshot, so a screen can tell whether it has anything new to draw. */
   tick = 0;
+  /** The last refresh didn't get through (the office is restarting or stopped): what's on screen is the last snapshot. */
+  offline = false;
 
   on(fn: () => void): () => void {
     this.listeners.add(fn);
@@ -83,6 +85,7 @@ export class TradingFeed {
       // The office is restarting; the last snapshot stays up.
     } finally {
       this.busy = false;
+      this.offline = !received;
       // A failed refresh must still age every screen's freshness label; retain source timestamps.
       if (!received && this.snap) {
         this.tick++;
@@ -151,8 +154,11 @@ export class TradingFeed {
     try {
       const res = await fetch('/api/trading/backtest/trades', { credentials: 'same-origin' });
       if (res.ok) {
-        this.detail = (await res.json()) as BacktestDetail;
-        this.detailKey = key;
+        const detail = (await res.json()) as BacktestDetail;
+        // An office that has only just restarted answers with nothing until its backtest has run: that
+        // isn't an answer to keep. It is asked again rather than remembered as "no trades".
+        if (detail.trades.length || !this.detail) this.detail = detail;
+        if (detail.trades.length && detail.ranAt === bt?.ranAt) this.detailKey = key;
       }
     } catch {
       // The office is restarting; whatever was fetched before stays.

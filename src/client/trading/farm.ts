@@ -397,6 +397,7 @@ export function openFarm(first?: TabId) {
   const footer = () => {
     const v = shell.view();
     const d = v?.dataset;
+    if (trading.offline) return 'The office isn’t answering: this is the last it sent. Trying again every second…';
     return `${d ? `Research data ${d.hash.slice(0, 8)}: ${d.days} days, ${d.trades} trades` : 'Waiting for the backtest'} · everything here is paper or your own bookkeeping${note ? ` · ${note}` : ''}`;
   };
 
@@ -417,6 +418,7 @@ export function openFarm(first?: TabId) {
       return { id: t.id, label: n ? `${t.label} · ${n}` : t.label };
     }), tab, (t) => shell.go(t)));
     status.textContent = footer();
+    status.toggleAttribute('data-offline', trading.offline);
     el.classList.toggle('tl-how-open', how || !!custom);
     el.classList.toggle('pf-wide', tab !== 'battle');
     const sig = `${tab}:${signature(v)}:${how}:${custom ? 1 : 0}`;
@@ -437,18 +439,32 @@ export function openFarm(first?: TabId) {
     else if (how) sheet.replaceChildren(howIt(() => { how = false; render(true); }));
   }
 
+  // The backtest's trades, for the battle test and the Compare view. Asked for again until they arrive:
+  // a request that fails (the office restarting) or comes back empty (its backtest hasn't run yet) is
+  // not remembered as the answer, or the battle test would wait for ever on trades the office has.
+  let loading = false;
+  let askedAt = 0;
   const load = async () => {
     const bt = trading.snap?.backtest;
     const key = `${bt?.ranAt}:${bt?.tuner?.ranAt}`;
-    if (!bt || bt.running || key === loadedFor) return;
-    loadedFor = key;
-    detail = await trading.backtestDetail();
-    battle.data(detail);
-    render(tab === 'compare');
+    if (!bt || bt.running || key === loadedFor || loading || Date.now() - askedAt < 2500) return;
+    loading = true;
+    askedAt = Date.now();
+    try {
+      const got = await trading.backtestDetail();
+      if (!got?.trades.length || got.ranAt !== bt.ranAt) return;
+      loadedFor = key;
+      detail = got;
+      battle.data(got);
+      render(tab === 'compare');
+    } finally {
+      loading = false;
+    }
   };
   off = trading.on(() => {
     // A sheet with a form in it is left alone while it is open.
     if (!custom) render();
+    battle.tick();
     void load();
   });
   render(true);
