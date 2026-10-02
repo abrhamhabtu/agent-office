@@ -4,6 +4,7 @@ import { DAILY_STOP, INSTRUMENTS, PLAYBOOK_BY_ID, PLAYBOOKS, PROP_ACCOUNTS, SYMB
 import { h, openModal } from '../ui/dom';
 import { trading } from './feed';
 import { accountLabel, fmt, money, pct, STAGE_COLOR, STAGE_LABEL } from './screens';
+import { tradingViewMcpCard } from './tv-mcp';
 import { openStrategyDesk } from './strategy';
 import { openBacktestLab } from './backtestlab';
 import { openEvalSim } from './evalsim';
@@ -30,6 +31,7 @@ const WARN = '#c98a00';
 export function openTrading(role: FloorRole, start?: PanelTab) {
   let tab: PanelTab = start ?? (role === 'office' ? 'backtest' : 'proposals');
   let note = '';
+  const mcpCard = tradingViewMcpCard();
   const body = h('div.body', { style: 'display:grid;gap:10px;max-height:72vh;overflow:auto' });
   const nav = h('div.os-tabs', { style: 'flex-wrap:wrap;padding:0 16px 8px' });
   const close = h('button.btn.close', { 'aria-label': 'Close' }, '✕');
@@ -235,6 +237,7 @@ export function openTrading(role: FloorRole, start?: PanelTab) {
       const pineScript = '//@version=6\nindicator("Agent Office feed", overlay = true)\n// Sends each CLOSED candle to the office. Add to a 1-minute chart, then create one alert:\n// Condition = this indicator -> "Any alert() function call", Webhook URL = the office\'s.\nsendCandles = input.bool(true, "Send candles to the office")\nf(x) => str.tostring(x, "#.########")\nif sendCandles and barstate.isconfirmed\n    alert(\'{"type":"bar","symbol":"\' + syminfo.ticker + \'","interval":"\' + timeframe.period + \'","time":\' + str.tostring(time) + \',"open":\' + f(open) + \',"high":\' + f(high) + \',"low":\' + f(low) + \',"close":\' + f(close) + \',"volume":\' + f(nz(volume)) + \'}\', alert.freq_once_per_bar_close)';
       const template = JSON.stringify({ symbol: '{{ticker}}', side: 'long', setup: 'VWAP Double Break', price: '{{close}}', message: '{{strategy.order.comment}}' });
       return [
+        mcpCard,
         heading('Data connections'),
         ...s.feeds.map((f) => card(row(mono(f.ok ? 'CONNECTED' : 'DOWN', f.ok ? GOOD : BAD), h('b', {}, f.name), h('span.grow', {}), f.lastAt ? dim(`updated ${new Date(f.lastAt).toLocaleTimeString()}`) : null), dim(f.note))),
         heading('TradingView → the office'),
