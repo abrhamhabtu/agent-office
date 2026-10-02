@@ -23,7 +23,7 @@ test('a steady winner passes, and the ledger shows the Law of 10 sizing each day
 
 test('the pass waits for the minimum trading days', () => {
   // One enormous day reaches the target at once, but an eval needs its days.
-  const r = { ...rules('lucidflex-50k'), consistencyPercent: 100 };
+  const r = { ...rules('lucidflex-50k'), consistencyPercent: 100, minTradingDays: 5 };
   const run = runEval([trade(1, 20), trade(2, 0.1), trade(3, 0.1)], r);
   assert.equal(run.targetDay, 1);
   assert.equal(run.result, 'running');
