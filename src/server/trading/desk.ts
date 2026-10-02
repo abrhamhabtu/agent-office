@@ -9,10 +9,13 @@ import { DAILY_STOP, INSTRUMENTS, lawOf10, microsFor, PLAYBOOK_BY_ID, PLAYBOOKS,
 import { byTradingDay, pacific, replayDay, RTH_CLOSE, RTH_OPEN, sessionMinute, tradingDay, type DayResult } from './engine.js';
 import { runEval, weekdays } from '../../shared/evalsim.js';
 import { TUNED_PLAYBOOKS } from '../../shared/tuning.js';
+import { splitDays } from '../../shared/validation.js';
 import { rankPlans } from '../../shared/dayplan.js';
 import { Tuner, type History } from './tuner.js';
 import { liveEvalView, readLiveEval, type LiveEvalConfig } from './live-eval.js';
-import { cleanSetup, farmDays, runFarm, type FarmSetup, type FarmView } from '../../shared/farm.js';
+import type { FarmSetup } from '../../shared/farm.js';
+import { PropFarm } from './propfarm.js';
+import type { FeedState } from './forward.js';
 import { Market, parseTradingViewBar } from './market.js';
 import { readParams, reportOf, runLab, testVersions } from './lab.js';
 import { Vault } from './vault.js';
@@ -35,7 +38,7 @@ interface Saved {
   markets: Symbol[];
   /** The eval being run forward live, when there is one (see live-eval.ts). */
   liveEval?: LiveEvalConfig | null;
-  /** The prop farm being run forward on the paper book, when there is one (see shared/farm.ts). */
+  /** The single live farm from before forward runs: read once and brought in as a run (see PropFarm.migrate). */
   farm?: { setup: FarmSetup; startDay: string; discord: string | null; notified: number } | null;
 }
 
@@ -177,6 +180,8 @@ export class TradingDesk {
   /** The tuned playbooks' versions, and the runs that look for better ones. */
   readonly tuner: Tuner;
   readonly projectx: ProjectX;
+  /** The prop farm: research jobs, forward runs, tracked accounts, payouts (see propfarm.ts). */
+  readonly farm: PropFarm;
   private file: string;
   private paperFile: string;
   private saved: Saved;
@@ -222,7 +227,7 @@ export class TradingDesk {
       alerts: Array.isArray(s.alerts) ? s.alerts.slice(-30) : [],
       markets: Array.isArray(s.markets) && s.markets.every((m) => (SYMBOLS as readonly string[]).includes(m)) && s.markets.length ? s.markets : ['NQ', 'GC', 'BTC'],
       liveEval: s.liveEval && typeof s.liveEval === 'object' && s.liveEval.rules && Array.isArray(s.liveEval.playbooks) ? s.liveEval : null,
-      farm: s.farm && typeof s.farm === 'object' && typeof s.farm.startDay === 'string' ? { setup: cleanSetup(s.farm.setup), startDay: s.farm.startDay, discord: typeof s.farm.discord === 'string' ? s.farm.discord : null, notified: Number(s.farm.notified) || 0 } : null,
+      farm: s.farm && typeof s.farm === 'object' && typeof s.farm.startDay === 'string' ? { setup: s.farm.setup, startDay: s.farm.startDay, discord: typeof s.farm.discord === 'string' ? s.farm.discord : null, notified: 0 } : null,
     };
     for (const a of PROP_ACCOUNTS) this.saved.accounts[a.id] ??= { active: DEFAULT_ACTIVE.has(a.id), balance: a.size, peak: a.size };
     try {
@@ -230,7 +235,52 @@ export class TradingDesk {
     } catch {
       // No paper trades yet.
     }
+    this.farm = new PropFarm(path.join(dir, 'farm'), {
+      now: () => Date.now(),
+      today: () => tradingDay(Date.now()),
+      backtest: () => this.researchData(),
+      tuning: () => this.tuner.liveTuning(),
+      feeds: () => Object.fromEntries(SYMBOLS.map((sym) => [sym, this.feedState(sym)])),
+      inSession: () => {
+        const s = sessionAt(Date.now());
+        return !s.weekend && s.minutes >= RTH_OPEN && s.minutes < RTH_CLOSE;
+      },
+      paper: () => [...this.paperHistory.values()],
+      feed: (sym) => this.feedState(sym),
+      connected: () => this.accounts().filter((a) => a.source === 'projectx'),
+      projectxConnected: () => this.projectx.state().connected,
+    });
+    // The single live farm from before is a forward run now.
+    if (this.saved.farm) {
+      this.farm.migrate(this.saved.farm, [...this.paperHistory.values()], { source: 'Reconstructed from the paper book', delayed: true, stale: false });
+      this.saved.farm = null;
+    }
     this.save();
+  }
+
+  /** Where a market's bars come from right now, whether that runs behind the exchange, and whether it has gone quiet. */
+  private feedState(sym: Symbol): FeedState & { ageSec: number | null } {
+    const source = this.market.barSource(sym);
+    const delayed = !/tradingview|topstep|projectx|coinbase/i.test(source);
+    const at = this.liveAt.get(sym);
+    // A bar is stamped at its open: it is a minute old the moment it closes.
+    const ageSec = at ? Math.max(0, Math.round((Date.now() - at) / 1000) - 60) : null;
+    return { source: source === 'Yahoo' ? 'CME · Yahoo (delayed)' : source, delayed, ageSec, stale: ageSec == null || ageSec > (delayed ? 25 * 60 : 5 * 60) };
+  }
+
+  /** What the last backtest gives research to work on: the trades by day, the tuner's candidates, the lab's mixes. */
+  private researchData() {
+    const bt = this.backtest;
+    if (!bt || !bt.days.length || !this.backtestTrades.length) return null;
+    const tuner = this.tuner.view();
+    return {
+      ranAt: bt.ranAt + (tuner.ranAt ?? 0),
+      days: weekdays(bt.days),
+      trades: this.backtestTrades.filter((t) => t.symbol !== 'BTC'),
+      versions: this.tuner.versionTrades(),
+      tried: Object.fromEntries(tuner.books.map((b) => [b.playbook, b.tried.length])),
+      mixes: bt.mixes ?? [],
+    };
   }
 
   start() {
@@ -252,7 +302,7 @@ export class TradingDesk {
     this.timers.push(setInterval(() => SYMBOLS.forEach((s) => this.replay(s)), LIVE_EVERY));
     this.timers.push(setInterval(() => this.writeLive(), 15_000));
     this.timers.push(setInterval(() => this.noteMine(), 20_000));
-    this.timers.push(setInterval(() => void this.notifyFarm(), 20_000));
+    this.timers.push(setInterval(() => void this.farm.tick(this.liveIds()).catch(() => {}), 10_000));
     // The month's backtest: once the bars are in, then again after every close.
     setTimeout(() => void this.runBacktest(), 8000);
     // The Strategy lab after the backtest has fetched the history, then again after every close.
@@ -268,6 +318,7 @@ export class TradingDesk {
 
   stop() {
     for (const t of this.timers) clearInterval(t);
+    this.farm.stop();
     this.market.stop();
     this.news.stop();
     this.projectx.stop();
@@ -311,6 +362,23 @@ export class TradingDesk {
       }
     }
     if (changed) this.savePaper();
+    // Every setup the day has called is a decision for the forward runs, written down the moment it is seen.
+    if (today.length) {
+      const feed = this.feedState(sym);
+      for (const t of res.trades) this.farm.observe(t, feed);
+    }
+  }
+
+  /** Today's paper trades as the last replay of every market has them (null: some market hasn't been replayed yet). */
+  private liveIds(): Set<string> | null {
+    const day = tradingDay(Date.now());
+    const ids = new Set<string>();
+    for (const sym of SYMBOLS) {
+      const res = this.live.get(sym);
+      if (!res) return null;
+      for (const t of res.trades) if (t.day === day) ids.add(t.id);
+    }
+    return ids;
   }
 
   private savePaper() {
@@ -351,6 +419,9 @@ export class TradingDesk {
         for (const s of SYMBOLS) statsList.push(stats(all, p.id, s));
       }
       const sortedDays = weekdays([...days].sort());
+      const split = splitDays(sortedDays);
+      const seenDays = [...split.train, ...split.validation];
+      const seen = new Set(seenDays);
       this.backtestTrades = all;
       const evals: EvalRun[] = [];
       for (const p of PLAYBOOKS)
@@ -368,12 +439,14 @@ export class TradingDesk {
         stats: statsList,
         evals,
         best: top && top.avgR > 0 ? { playbook: top.playbook, symbol: top.symbol as Symbol, avgR: top.avgR, trades: top.trades } : null,
-        // The owner's three playbooks mixed in a day, on the markets a prop account trades.
-        mixes: rankPlans(all.filter((t) => t.symbol !== 'BTC'), TUNED_PLAYBOOKS, sortedDays).slice(0, 8).map((m) => ({ label: m.label, mode: m.plan.mode, order: m.plan.order, trades: m.stats.trades, winRate: m.stats.winRate, avgR: m.stats.avgR, totalR: m.stats.totalR, maxDrawdownR: m.stats.maxDrawdownR, laterAvgR: m.laterAvgR })),
-        note: `${days.size} trading days of real 1-minute bars (Yahoo keeps a month). Entries on the signal bar's close, stop before target when one bar tags both, flat at 13:00 PT. No fees or slippage.`,
+        // The owner's three playbooks mixed in a day, on the markets a prop account trades. Ranked on the days
+        // research may look at: the last quarter is the prop farm's holdout, and nothing is picked on it.
+        mixes: rankPlans(all.filter((t) => t.symbol !== 'BTC' && seen.has(t.day)), TUNED_PLAYBOOKS, seenDays).slice(0, 8).map((m) => ({ label: m.label, mode: m.plan.mode, order: m.plan.order, trades: m.stats.trades, winRate: m.stats.winRate, avgR: m.stats.avgR, totalR: m.stats.totalR, maxDrawdownR: m.stats.maxDrawdownR, laterAvgR: m.laterAvgR })),
+        note: `${days.size} trading days of real 1-minute bars (Yahoo keeps a month). Entries on the signal bar's close, stop before target when one bar tags both, a gap through a stop filled at the open, flat at 13:00 PT. Gross: the Prop Farm adds fees and slippage. The last ${split.holdout.length} weekdays are held out: the tuner and the mixes are never judged on them.`,
       };
       // The tuner follows every backtest, in the background: the boards don't wait for it.
-      void this.tuner.run(history, all, [...days].sort()).catch(() => {});
+      void this.tuner.run(history, all, [...days].sort(), Date.now(), seenDays).catch(() => {}).finally(() => this.farm.dataReady());
+      this.farm.dataReady();
     } catch (e) {
       this.backtest = { ...this.backtest!, running: false, note: `Backtest failed: ${(e as Error).message}` };
     }
@@ -564,57 +637,6 @@ export class TradingDesk {
     // What's live and ready first, then what's being watched.
     const order: Record<string, number> = { live: 0, ready: 1, won: 2, lost: 2, closed: 2, watching: 3, done: 4, failed: 4, off: 5 };
     return out.sort((a, b) => (order[a.stage] ?? 9) - (order[b.stage] ?? 9));
-  }
-
-  /** Starts the farm on the paper book (from today, or from as far back as the book goes), stops it, or sets where its notices go. */
-  setFarm(b: Record<string, unknown>): string | undefined {
-    if (b.action === 'stop') this.saved.farm = null;
-    else if (b.action === 'discord') {
-      if (!this.saved.farm) return 'Start the farm first';
-      const url = typeof b.url === 'string' ? b.url.trim() : '';
-      if (url && !/^https:\/\/(discord\.com|discordapp\.com)\/api\/webhooks\/\d+\/[\w-]+$/.test(url)) return 'That isn’t a Discord webhook address';
-      this.saved.farm.discord = url || null;
-    } else {
-      const today = tradingDay(Date.now());
-      const first = [...this.paperHistory.values()].reduce<string | null>((a, t) => (a == null || t.day < a ? t.day : a), null);
-      const monthAgo = new Date(Date.parse(`${today}T12:00:00Z`) - 31 * 86_400_000).toISOString().slice(0, 10);
-      const startDay = b.from === 'back' && first ? (first > monthAgo ? first : monthAgo) : today;
-      this.saved.farm = { setup: cleanSetup(b.setup), startDay, discord: this.saved.farm?.discord ?? null, notified: 0 };
-      // What already happened on the days it's counting isn't news.
-      this.saved.farm.notified = this.farmView()?.run.events.length ?? 0;
-    }
-    this.save();
-    return undefined;
-  }
-
-  /** The farm so far: its setup run over the paper book's days since it started. */
-  private farmView(): FarmView | null {
-    const f = this.saved.farm;
-    if (!f) return null;
-    const today = tradingDay(Date.now());
-    const days = weekdays(Array.from({ length: 400 }, (_, i) => new Date(Date.parse(`${f.startDay}T12:00:00Z`) + i * 86_400_000).toISOString().slice(0, 10)).filter((d) => d <= today));
-    const paper = [...this.paperHistory.values()].filter((t) => t.day >= f.startDay);
-    return { setup: f.setup, startDay: f.startDay, run: runFarm(farmDays(paper, f.setup.strategy, days), f.setup, days), discord: !!f.discord };
-  }
-
-  /** Sends what has happened on the farm since the last look to its Discord webhook, in order. */
-  private async notifyFarm() {
-    const f = this.saved.farm;
-    if (!f) return;
-    const events = this.farmView()?.run.events ?? [];
-    if (events.length <= f.notified) return;
-    const fresh = events.slice(f.notified);
-    f.notified = events.length;
-    this.save();
-    if (!f.discord) return;
-    const icon = { bought: '🧾', passed: '✅', busted: '💥', 'payout-ready': '💰', paid: '🏦', trade: '📈', skip: '⏭️', note: '📝' } as const;
-    for (const e of fresh.slice(-10)) {
-      try {
-        await fetch(f.discord, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ username: 'Prop Farm (paper)', content: `${icon[e.kind]} **${e.account || `Slot ${e.slot + 1}`}** · ${e.text}` }), signal: AbortSignal.timeout(5000) });
-      } catch {
-        // Discord is unreachable; the farm carries on.
-      }
-    }
   }
 
   /** Starts a live eval from what the simulator has on screen, or stops the one that's running. */
@@ -916,7 +938,8 @@ export class TradingDesk {
       guard,
       paper: this.paperBook(),
       backtest: this.backtest ? { ...this.backtest, tuner: this.tuner.view() } : null,
-      farm: this.farmView(),
+      farm: this.farm.primary(),
+      propFarm: this.farm.view(),
       liveEval: this.saved.liveEval ? liveEvalView(this.saved.liveEval, [...this.paperHistory.values()], tradingDay(now)) : null,
       playbook: this.checklist(),
       bias: this.bias(),

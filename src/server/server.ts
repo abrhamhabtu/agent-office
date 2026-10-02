@@ -885,6 +885,11 @@ export async function startServer(cfg: Config) {
     if (p === '/api/trading/snapshot' && req.method === 'GET') return send(res, 200, desk.snapshot(), { 'cache-control': 'no-store' });
     // The backtest trade by trade, for the Backtest Lab and the eval simulator (only fetched when one is open).
     if (p === '/api/trading/backtest/trades' && req.method === 'GET') return send(res, 200, desk.backtestDetail(), { 'cache-control': 'no-store' });
+    // One research job in full (the snapshot only carries each job's summary).
+    if (p === '/api/trading/prop-farm/job' && req.method === 'GET') {
+      const detail = desk.farm.jobDetail(url.searchParams.get('id') ?? '');
+      return detail ? send(res, 200, detail, { 'cache-control': 'no-store' }) : send(res, 404, { error: 'No such job' });
+    }
     // The Pine Vault: a version's exact source to copy into TradingView, and the owner's changes to it.
     if (p === '/api/trading/vault/source' && req.method === 'GET') {
       const src = desk.vault.source(url.searchParams.get('script') ?? '', url.searchParams.get('version') ?? '');
@@ -930,8 +935,8 @@ export async function startServer(cfg: Config) {
       case '/api/trading/backtest':
         void desk.runBacktest();
         return done(undefined);
-      case '/api/trading/farm':
-        return done(desk.setFarm(b));
+      case '/api/trading/prop-farm':
+        return done(desk.farm.act(b));
       case '/api/trading/live-eval':
         return done(desk.setLiveEval(b));
       case '/api/trading/tuner':

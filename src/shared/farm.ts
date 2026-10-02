@@ -64,6 +64,7 @@ export const FARM_CAVEATS = [
   'Only the LucidFlex 25K and 50K rules were read on the firm’s own pages (2 October 2026). The other programs are from public summaries: treat every number on them as a what-if.',
   'Fees are not on the firms’ pages: set what you actually pay. Commission and slippage are assumptions too, which is why there are three cost settings to compare.',
   'A pass is confirmed and a payout arrives on schedule here. In life the firm reviews both, and can refuse.',
+  'An account that isn’t breached but has too little cushion left to carry one micro is counted as lost: the farm retires it and buys the next attempt, as a trader would.',
   'After its last allowed payout a funded account is moved to a live one by the firm: that is outside this simulation, and the slot buys a new attempt.',
   'Firms prohibit opposite positions across your accounts and deliberately failing evaluations. The farm refuses the first; the second is a judgment the firm makes.',
 ];
@@ -221,6 +222,8 @@ export interface FarmRun {
   evalBusts: number;
   fundedBusts: number;
   payoutCount: number;
+  /** Of the accounts lost, those that weren't breached but had too little cushion left to trade: retired as spent. */
+  spent: number;
   /** Trades taken, signals nothing could take, and what the fills paid in commission and slippage. */
   taken: number;
   skipped: number;
@@ -243,6 +246,8 @@ interface Slot {
   due: number;
 }
 
+/** An account with this share of its drawdown left, or less, that can no longer size a single micro is spent. */
+export const SPENT_SHARE = 0.25;
 const money = (n: number) => `${n < 0 ? '−' : ''}$${Math.abs(Math.round(n)).toLocaleString('en-US')}`;
 const stageOf = (a: Account | null): FarmStage => (!a ? 'empty' : a.status === 'breached' || a.status === 'retired' || a.status === 'passed' ? 'busted' : a.status === 'parked' ? 'parked' : a.phase === 'eval' ? 'eval' : 'funded');
 const tag = (s: Slot) => (s.account ? `${s.account.phase === 'eval' ? 'EVAL' : 'FUNDED'}-${s.no}` : '');
@@ -263,7 +268,7 @@ export function runFarm(dayLists: PaperTrade[][], setup: FarmSetup, labels?: str
   const fee = setup.fee ?? program.fee;
   const cost = COSTS[setup.cost] ?? COSTS.base;
   const isManaged = setup.strategy.manage !== 'written';
-  const run: FarmRun = { days: labels ?? dayLists.map((_, i) => String(i + 1)), cells: [], events: [], cash: [], fees: 0, payouts: 0, attempts: 0, passed: 0, evalBusts: 0, fundedBusts: 0, payoutCount: 0, taken: 0, skipped: 0, costs: 0, firstPayoutDay: null, cushionAfterPayout: null, worstStreak: 0, refused: setupProblem(setup) };
+  const run: FarmRun = { days: labels ?? dayLists.map((_, i) => String(i + 1)), cells: [], events: [], cash: [], fees: 0, payouts: 0, attempts: 0, passed: 0, evalBusts: 0, fundedBusts: 0, payoutCount: 0, spent: 0, taken: 0, skipped: 0, costs: 0, firstPayoutDay: null, cushionAfterPayout: null, worstStreak: 0, refused: setupProblem(setup) };
   if (run.refused) return run;
   const slots: Slot[] = Array.from({ length: setup.slots }, () => ({ account: null, rules: null, no: 0, last: '', due: 0 }));
   const policies = { eval: policyOf(setup, 'eval'), funded: policyOf(setup, 'funded') };
@@ -316,6 +321,8 @@ export function runFarm(dayLists: PaperTrade[][], setup: FarmSetup, labels?: str
     // The session: each signal goes to the next account in turn, or to all of them.
     const sessions = slots.map((s, i) => (s.account && canTrade(s.account.status) && !resting.has(i) ? new DaySession(s.account, s.rules!, label) : null));
     const openCushion = slots.map((s) => (s.account ? cushionOf(s.account, s.rules!) : 0));
+    /** Signals an account was offered today and couldn't size even one micro for. */
+    const starved = slots.map(() => 0);
     const done = (i: number) => {
       const s = sessions[i]!;
       const a = slots[i]!.account!;
@@ -340,6 +347,7 @@ export function runFarm(dayLists: PaperTrade[][], setup: FarmSetup, labels?: str
           : sizeTrade({ symbol: t.symbol, stopPoints: Math.abs(t.entry - t.stop), policy: policies[a.phase], cost, allowedMicros: a.allowedMicros, openMicros: s.openMicros, cushion: cushionOf(a, rules), openRisk: s.openRisk, dayStartCushion: openCushion[i]!, dayLoss: Math.max(0, -s.dayPnl), dailyLossLimit: rules.dailyLossLimit });
         if (!decision?.micros) {
           lastWhy ||= conflict ?? decision!.why;
+          if (decision && (decision.binding === 'cushion' || decision.binding === 'day')) starved[i]!++;
           if (setup.share === 'copy') {
             run.skipped++;
             event(i, 'skip', `${t.side === 'long' ? 'Long' : 'Short'} ${t.symbol} (${PLAYBOOK_BY_ID[t.playbook].short}) not taken.`, 0, { why: conflict ?? decision!.why, trade: t.id });
@@ -376,6 +384,15 @@ export function runFarm(dayLists: PaperTrade[][], setup: FarmSetup, labels?: str
         if (a.phase === 'eval') run.evalBusts++;
         else run.fundedBusts++;
         event(i, 'busted', `${a.why} (${money(a.balance)}).`, 0);
+      } else if (canTrade(a.status) && starved[i]! > 0 && !rep.fills && cushionOf(a, rules) <= rules.drawdown * SPENT_SHARE) {
+        // Not breached, but there is too little cushion left to carry one micro of what the strategy trades:
+        // the account is spent. A farm stops feeding it and buys the next attempt.
+        if (a.phase === 'eval') run.evalBusts++;
+        else run.fundedBusts++;
+        run.spent++;
+        a.status = 'retired';
+        a.why = `Spent: ${money(cushionOf(a, rules))} of cushion can’t carry one micro`;
+        event(i, 'busted', `Spent: only ${money(cushionOf(a, rules))} of cushion left, which can’t carry one micro of this strategy’s trades. Retired at ${money(a.balance)}.`, 0);
       } else if (a.status === 'pass-pending') {
         run.passed++;
         event(i, 'passed', `Passed: ${money(a.balance)} with every rule met. Waiting for the firm to confirm.`, 0);
@@ -436,6 +453,8 @@ export interface FarmOdds {
   /** The share of runs that ended with more paid out than spent on fees, with the range that share could really be (95%). */
   ahead: number;
   aheadRange: [number, number];
+  /** The average net over the runs: payouts received less fees paid. */
+  mean: number;
   /** Averages over the runs. */
   attempts: number;
   passed: number;
@@ -444,6 +463,8 @@ export interface FarmOdds {
   paid: number;
   /** Of the attempts made, the share that passed (or, straight to funded, reached a payout). */
   passRate: number;
+  /** Of the accounts opened (evaluations and the funded accounts they became), the share that was breached. */
+  breachRate: number;
   /** The share of runs that reached a first payout, and the days it took in the middle one that did. */
   payoutRate: number;
   daysToPayout: number | null;
@@ -493,14 +514,14 @@ export function farmOdds(dayLists: PaperTrade[][], setup: FarmSetup, cfg: { runs
   const runs = cfg.runs ?? 300;
   const horizon = cfg.horizon ?? 60;
   const sampleTrades = dayLists.reduce((a, l) => a + l.length, 0);
-  const empty: FarmOdds = { runs: 0, horizon, p10: 0, p50: 0, p90: 0, ahead: 0, aheadRange: [0, 1], attempts: 0, passed: 0, payouts: 0, fees: 0, paid: 0, passRate: 0, payoutRate: 0, daysToPayout: null, cushionAfterPayout: null, worstStreak: 0, worstStreakBad: 0, sampleDays: dayLists.length, sampleTrades, refused: setupProblem(setup) };
+  const empty: FarmOdds = { runs: 0, horizon, p10: 0, p50: 0, p90: 0, ahead: 0, aheadRange: [0, 1], mean: 0, attempts: 0, passed: 0, payouts: 0, fees: 0, paid: 0, passRate: 0, breachRate: 0, payoutRate: 0, daysToPayout: null, cushionAfterPayout: null, worstStreak: 0, worstStreakBad: 0, sampleDays: dayLists.length, sampleTrades, refused: setupProblem(setup) };
   if (empty.refused || !dayLists.length || !sampleTrades) return empty;
   const rand = rng(cfg.seed ?? 11);
   const nets: number[] = [];
   const firsts: number[] = [];
   const cushions: number[] = [];
   const streaks: number[] = [];
-  const sum = { attempts: 0, passed: 0, payouts: 0, fees: 0, paid: 0 };
+  const sum = { attempts: 0, passed: 0, payouts: 0, fees: 0, paid: 0, busts: 0, opened: 0 };
   const straight = !FARM_PROGRAM_BY_ID[setup.programId]?.evalRules;
   for (let r = 0; r < runs; r++) {
     const f = runFarm(drawDays(dayLists, horizon, rand, cfg.block ?? 1), setup, undefined, { quiet: true });
@@ -513,14 +534,16 @@ export function farmOdds(dayLists: PaperTrade[][], setup: FarmSetup, cfg: { runs
     sum.payouts += f.payoutCount;
     sum.fees += f.fees;
     sum.paid += f.payouts;
+    sum.busts += f.evalBusts + f.fundedBusts;
+    sum.opened += f.attempts + (straight ? 0 : f.passed);
   }
   const sorted = (xs: number[]) => [...xs].sort((a, b) => a - b);
   const at = (xs: number[], q: number) => xs[Math.min(xs.length - 1, Math.floor(q * xs.length))]!;
   const n = sorted(nets);
   const ahead = nets.filter((x) => x > 0).length / runs;
   return {
-    runs, horizon, p10: at(n, 0.1), p50: at(n, 0.5), p90: at(n, 0.9), ahead, aheadRange: shareRange(ahead, runs),
-    attempts: sum.attempts / runs, passed: sum.passed / runs, payouts: sum.payouts / runs, fees: sum.fees / runs, paid: sum.paid / runs, passRate: sum.attempts ? sum.passed / sum.attempts : 0,
+    runs, horizon, p10: at(n, 0.1), p50: at(n, 0.5), p90: at(n, 0.9), ahead, aheadRange: shareRange(ahead, runs), mean: Math.round((sum.paid - sum.fees) / runs),
+    attempts: sum.attempts / runs, passed: sum.passed / runs, payouts: sum.payouts / runs, fees: sum.fees / runs, paid: sum.paid / runs, passRate: sum.attempts ? sum.passed / sum.attempts : 0, breachRate: sum.opened ? sum.busts / sum.opened : 0,
     payoutRate: firsts.length / runs, daysToPayout: firsts.length ? at(sorted(firsts), 0.5) : null, cushionAfterPayout: cushions.length ? at(sorted(cushions), 0.5) : null,
     worstStreak: at(sorted(streaks), 0.5), worstStreakBad: at(sorted(streaks), 0.1), sampleDays: dayLists.length, sampleTrades, refused: null,
   };

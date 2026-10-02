@@ -255,6 +255,9 @@ export function chip(label: Node | string, on: boolean, onclick: () => void, opt
   return h('button.tl-chip', { type: 'button', 'aria-pressed': String(on), title: opts.title, 'data-kind': opts.kind, style: opts.color ? `--c:${opts.color}` : undefined, onclick }, opts.color ? h('i.tl-chip-dot') : null, label);
 }
 
+/** A small badge saying where a number comes from, or what something is. */
+export const badge = (text: string, kind: string, title?: string) => h('span.pf-badge', { 'data-kind': kind, title }, text);
+
 /** One of a few choices side by side. */
 export function segmented<T extends string>(options: { id: T; label: string }[], value: T, pick: (v: T) => void): HTMLElement {
   return h('div.tl-seg', { role: 'group' }, ...options.map((o) => h('button', { type: 'button', 'aria-pressed': String(o.id === value), onclick: () => pick(o.id) }, o.label)));

@@ -64,9 +64,14 @@ test('the governor sizes a trade so its full stop can’t breach the account, an
   const cell = run.cells[0]![0]!;
   assert.deepEqual([cell.stage, cell.pnl, cell.lowCushion], ['eval', 1280, 168]);
   assert.match(run.events.find((e) => e.kind === 'trade')!.why!, /^16 MNQ, risking \$960: \$1,000 of the \$1,000 cushion may be risked, and one MNQ risks \$60\.$/);
-  // Two trades open at once share the cushion: the second gets what the first hasn't already put at risk.
-  const pair = runFarm(lists([trade(1, 2, 0, { exitAt: 1e9 + 90 * MIN }), trade(1, 2, 1)]), setup({ evalMicros: 20 }));
-  assert.deepEqual(pair.events.filter((e) => e.kind === 'trade').map((e) => e.why!.split(',')[0]), ['20 MNQ', '5 MNQ']);
+  // Two trades open at once share the firm's limit: 15 are held, so the second gets the 5 that are left of 20.
+  const pair = runFarm(lists([trade(1, 2, 0, { exitAt: 1e9 + 90 * MIN }), trade(1, 2, 1)]), setup({ evalMicros: 15 }));
+  assert.deepEqual(pair.events.filter((e) => e.kind === 'trade').map((e) => e.why!.split(',')[0]), ['15 MNQ', '5 MNQ']);
+  assert.match(pair.events.filter((e) => e.kind === 'trade')[1]!.why!, /the firm allows 20 and 15 are already held or resting/);
+  // At the limit already, the next signal is a skip that says so.
+  const full = runFarm(lists([trade(1, 2, 0, { exitAt: 1e9 + 90 * MIN }), trade(1, 2, 1)]), setup({ evalMicros: 20 }));
+  assert.deepEqual([full.taken, full.skipped], [1, 1]);
+  assert.match(full.events.find((e) => e.kind === 'skip')!.why!, /^No trade: the firm allows 20 and 20 are already held or resting, so not even one MNQ fits\.$/);
 });
 
 test('taking turns gives each signal to one account; copying gives it to all; opposite sides are refused', () => {

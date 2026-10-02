@@ -555,7 +555,8 @@ export class LiveEvalBoard extends Board {
 
 // ---- 🌾 The farm: every account by its stage. With no farm running, the wall shows the live eval ----------
 const STAGE_INK: Record<string, string> = { eval: '#5cc8ff', funded: '#2ee6a6', parked: '#ffd166', busted: '#566385', empty: '#566385' };
-const STAGE_WORD: Record<string, string> = { eval: 'IN PLAY', funded: 'TRADING', parked: 'PAYOUT READY', busted: 'BUSTED', empty: 'WAITING' };
+const STAGE_WORD: Record<string, string> = { eval: 'IN PLAY', funded: 'TRADING', parked: 'PARKED', busted: 'LOST', empty: 'WAITING' };
+const EVENT_WORD: Record<string, string> = { bought: 'OPENED', passed: 'PASSED', busted: 'LOST', 'payout-ready': 'PAYOUT REQUESTED', paid: 'PAID', note: 'NOTE' };
 
 export class FarmBoard extends LiveEvalBoard {
   draw(s: TradingSnapshot) {
@@ -567,7 +568,9 @@ export class FarmBoard extends LiveEvalBoard {
     const run = farm.run;
     const cells = run.cells[run.cells.length - 1] ?? [];
     const net = run.cash[run.cash.length - 1] ?? 0;
-    this.frame(s, 'The Farm', `${program?.firm ?? ''} ${program?.name ?? ''} · on paper since ${farm.startDay.slice(5)}`, ACCENT, clip(g, `Trading: ${strategyLabel(farm.setup.strategy)}`, 700), 'Click to run it');
+    const jobs = s.propFarm?.jobs.filter((j) => j.status === 'running' || j.status === 'queued').length ?? 0;
+    const runs = s.propFarm?.runs.filter((r) => r.status !== 'stopped').length ?? 1;
+    this.frame(s, 'Prop Farm', `${program?.firm ?? ''} ${program?.name ?? ''} · forward on paper since ${farm.startDay.slice(5)}${runs > 1 ? ` · 1 of ${runs} runs` : ''}`, ACCENT, clip(g, `${jobs ? `${jobs} research job${jobs === 1 ? '' : 's'} running · ` : ''}Trading: ${strategyLabel(farm.setup.strategy)}`, 700), 'Click for the console (Y)');
 
     card(g, 24, 94, 330, 250, C.card2);
     kicker(g, 'Payouts less fees', 46, 128, ACCENT);
@@ -583,7 +586,7 @@ export class FarmBoard extends LiveEvalBoard {
     // The last few things that happened.
     card(g, 24, 356, 330, 198);
     kicker(g, 'Latest', 46, 388);
-    const feed = run.events.filter((e) => e.kind !== 'trade').slice(-4).reverse();
+    const feed = run.events.filter((e) => e.kind !== 'trade' && e.kind !== 'skip').slice(-4).reverse();
     if (!feed.length) {
       g.fillStyle = C.dim;
       g.font = `700 15px ${SANS}`;
@@ -593,7 +596,7 @@ export class FarmBoard extends LiveEvalBoard {
       const y = 414 + i * 36;
       g.fillStyle = e.kind === 'busted' ? INK.down : e.kind === 'paid' || e.kind === 'passed' ? INK.up : e.kind === 'payout-ready' ? INK.warn : C.text;
       g.font = `900 13px ${MONO}`;
-      g.fillText(clip(g, `${e.account} · ${e.kind === 'payout-ready' ? 'PAYOUT READY' : e.kind.toUpperCase()}`, 290), 46, y);
+      g.fillText(clip(g, `${e.account} · ${EVENT_WORD[e.kind] ?? e.kind.toUpperCase()}`, 290), 46, y);
       g.fillStyle = C.dim;
       g.font = `700 12px ${SANS}`;
       g.fillText(clip(g, e.text, 290), 46, y + 16);

@@ -1,4 +1,5 @@
 import type { BacktestDetail, ProposalAction, TradingSnapshot, TvAlert } from '../../shared/trading';
+import type { JobDetail } from '../../shared/propfarm';
 
 /** A version the test lab made that tested better than the live one, which the owner hasn't looked at. */
 export interface StrategyNews {
@@ -157,6 +158,30 @@ export class TradingFeed {
       // The office is restarting; whatever was fetched before stays.
     }
     return this.detail;
+  }
+
+  private jobs = new Map<string, { key: string; detail: JobDetail }>();
+
+  /** One research job in full, fetched again only when it has moved on. */
+  async farmJob(id: string): Promise<JobDetail | null> {
+    const j = this.snap?.propFarm?.jobs.find((x) => x.id === id);
+    const key = `${j?.status}:${j?.done}`;
+    const had = this.jobs.get(id);
+    if (had && had.key === key) return had.detail;
+    try {
+      const res = await fetch(`/api/trading/prop-farm/job?id=${encodeURIComponent(id)}`, { credentials: 'same-origin' });
+      if (!res.ok) return had?.detail ?? null;
+      const detail = (await res.json()) as JobDetail;
+      this.jobs.set(id, { key, detail });
+      return detail;
+    } catch {
+      return had?.detail ?? null;
+    }
+  }
+
+  /** One action on the prop farm (see PropFarm.act on the server). */
+  farm(body: object) {
+    return this.post('/api/trading/prop-farm', body);
   }
 
   toggleChecklist(id: string) {

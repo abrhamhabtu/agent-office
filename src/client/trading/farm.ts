@@ -1,326 +1,441 @@
-import type { BacktestDetail, PlaybookId } from '../../shared/trading';
-import { PLAYBOOK_BY_ID } from '../../shared/trading';
-import { weekdays } from '../../shared/evalsim';
-import { cleanSetup, FARM_CAVEATS, FARM_DEFAULTS, FARM_PROGRAM_BY_ID, FARM_PROGRAMS, farmDays, farmOdds, runFarm, strategyLabel, type FarmCell, type FarmEvent, type FarmOdds, type FarmRun, type FarmSetup, type FarmStage, type FarmStrategy } from '../../shared/farm';
-import { MANAGE } from '../../shared/manage';
-import { ACCOUNT_CATALOG } from '../../shared/prop-catalog';
+import type { BacktestDetail } from '../../shared/trading';
+import type { AccountCard, ForwardDecision, ForwardRunView, PayoutRow, PropFarmView, RuleSetView } from '../../shared/propfarm';
+import { FARM_CAVEATS, FARM_PROGRAM_BY_ID, strategyLabel } from '../../shared/farm';
+import { INSTRUMENTS, PLAYBOOK_BY_ID } from '../../shared/trading';
+import { COSTS, FILL_POLICIES } from '../../shared/fills';
 import { h, openModal } from '../ui/dom';
-import { openEvalSim } from './evalsim';
 import { trading } from './feed';
-import { chart, chip, dayLabel, howSheet, money, panel, pct, segmented, shortDay, signedMoney, stat, stored, TONE } from './labkit';
+import { badge, chart, chip, dayLabel, howSheet, money, panel, pct, segmented, shortDay, signedMoney, spark, stat, stored, TONE } from './labkit';
+import { mountBattle } from './farm-battle';
+import { drawCompare, drawResearch } from './farm-research';
+import './farm.css';
 
-// The Farm: a few prop accounts run through one firm's program, from the fee to the payout. Set it up in
-// four steps on the left; on the right the accounts move through their stages. The battle test replays
-// the setup over the backtest's month (drag the day, or press play) and over redraws of it for the odds;
-// "live on paper" runs the same setup forward a day at a time on what the playbooks really take.
+// The Prop Farm console: the Back Office's research and account-operations desk. Six views of one farm:
+//
+//   Overview   every account, by state: what it has, how far it is from failing, what it may trade, and why
+//   Research   the queue of experiments: what each sets out to test, on what data, and what it found
+//   Compare    a candidate against its baseline: training, validation, the locked holdout, costs, accounts
+//   Forward    runs recording decisions before their outcomes, and the adaptive lane in its shadow
+//   Payouts    eligible, requested and received, kept apart, with each rule checked
+//   Battle     plan a farm and replay it over the backtest's days before running it forward
+//
+// Everything in it is paper, or the owner's own bookkeeping. It places no order and buys nothing.
 
+export type TabId = 'overview' | 'research' | 'compare' | 'forward' | 'payouts' | 'battle';
 const ACCENT = '#7ee787';
-const STAGES: { id: FarmStage; title: string; sub: string }[] = [
-  { id: 'eval', title: 'Evaluations', sub: 'in play' },
-  { id: 'funded', title: 'Funded', sub: 'in the rotation' },
-  { id: 'parked', title: 'Payout ready', sub: 'parked until paid' },
-  { id: 'busted', title: 'Out', sub: 'busted or not bought' },
+const TABS: { id: TabId; label: string }[] = [
+  { id: 'overview', label: 'Overview' },
+  { id: 'research', label: 'Research' },
+  { id: 'compare', label: 'Compare' },
+  { id: 'forward', label: 'Forward' },
+  { id: 'payouts', label: 'Payouts' },
+  { id: 'battle', label: 'Battle test' },
 ];
-const EVENT_ICON: Record<FarmEvent['kind'], string> = { bought: '🧾', passed: '✅', busted: '💥', 'payout-ready': '💰', paid: '🏦', trade: '📈' };
 
-interface Preset {
-  id: string;
-  name: string;
-  strategy: FarmStrategy;
+/** What a view of the console is handed: the farm, a way to act on it, and the console's own controls. */
+export interface FarmShell {
+  view(): PropFarmView | null;
+  /** Does one action on the server; says what happened in the footer. True when it worked. */
+  act(body: object, ok?: string): Promise<boolean>;
+  go(tab: TabId): void;
+  redraw(): void;
+  /** Slides a sheet over the view (null: closes it). */
+  sheet(node: HTMLElement | null): void;
+  detail(): BacktestDetail | null;
+  /** What this console remembers while it's open: selections, filters, half-typed forms. */
+  ui: Record<string, string | number | boolean | undefined>;
+  say(text: string): void;
 }
-const ALL_MARKETS: FarmStrategy['markets'] = ['NQ', 'ES', 'GC'];
-const one = (p: PlaybookId): Preset => ({ id: p, name: PLAYBOOK_BY_ID[p].name, strategy: { playbooks: [p], mode: 'every', manage: 'written', markets: ALL_MARKETS } });
 
-export function openFarm() {
-  const save = stored<Partial<FarmSetup> & { tab?: 'battle' | 'live'; firm?: string }>('agent-office.farm', {});
-  const kept = save.get();
-  let setup: FarmSetup = cleanSetup({ ...FARM_DEFAULTS, ...kept });
-  let tab: 'battle' | 'live' = kept.tab === 'live' && trading.snap?.farm ? 'live' : 'battle';
-  let firm = FARM_PROGRAM_BY_ID[setup.programId]!.firm;
+const SOURCE_WORD: Record<AccountCard['source'], string> = { simulated: 'SIMULATED', manual: 'YOURS · BY HAND', connected: 'CONNECTED' };
+const HOW: Record<string, string> = { verified: 'Firm’s own page', reported: 'Public summary', assumed: 'Assumed' };
+const clock = (ts: number) => new Date(ts).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'America/Los_Angeles' });
+const ago = (ts: number) => {
+  const m = Math.max(0, Math.round((Date.now() - ts) / 60_000));
+  return m < 1 ? 'just now' : m < 60 ? `${m}m ago` : m < 1440 ? `${Math.floor(m / 60)}h ${m % 60}m ago` : `${Math.floor(m / 1440)}d ago`;
+};
+/** How long after its bar closed a decision was written down, in words. */
+const lag = (ms: number) => {
+  const sec = Math.max(0, Math.round(ms / 1000));
+  return sec < 120 ? `${sec}s` : sec < 7200 ? `${Math.round(sec / 60)}m` : sec < 172_800 ? `${Math.round(sec / 3600)}h` : `${Math.round(sec / 86_400)}d`;
+};
+const price = (symbol: keyof typeof INSTRUMENTS, v: number) => v.toFixed(INSTRUMENTS[symbol].decimals);
+const field = (label: string, input: HTMLElement) => h('label.pf-field', {}, h('span.tl-label', {}, label), input);
+
+/** One account: what it has, how far it is from failing, what it may trade, and why it is or isn't trading. */
+function accountCard(c: AccountCard, open: () => void): HTMLElement {
+  const span = Math.max(1, c.target - c.floor);
+  const at = Math.max(0, Math.min(1, (c.balance - c.floor) / span));
+  const start = Math.max(0, Math.min(1, (c.start - c.floor) / span));
+  const lost = c.status === 'breached' || c.status === 'retired';
+  return h('button.pf-card', { type: 'button', 'data-state': c.status, 'data-source': c.source, onclick: open, 'aria-label': `${c.label}: ${c.statusWord}` },
+    h('span.pf-card-top', {}, h('b', {}, c.label), badge(SOURCE_WORD[c.source], c.source, c.source === 'simulated' ? 'The office’s paper simulation: not a balance at a firm' : c.source === 'manual' ? 'Numbers you typed in: the office can’t see this account' : 'Balance and fills reported by ProjectX')),
+    c.runName ? h('span.pf-card-run', { title: c.runName }, c.runName) : null,
+    h('span.pf-card-sub', {}, `${c.firm} · ${c.program}`, c.verified ? badge('RULES VERIFIED', 'ok', 'Read on the firm’s own pages') : badge('WHAT-IF RULES', 'warn', 'Not the firm’s own numbers: every result on it is a what-if')),
+    h('span.pf-card-money', {}, h('span.pf-balance', {}, money(c.balance)), c.series.length > 1 ? (spark(c.series.map((v) => v - c.start), lost ? TONE.faint : c.balance >= c.start ? TONE.up : TONE.down, 92, 30) as unknown as Node) : null),
+    h('span.pf-risk', {},
+      h('span.pf-risk-head', {}, h('span', {}, 'Distance to failure'), h('b', { 'data-tone': lost ? 'down' : c.cushion < (c.start - c.floor) * 0.3 ? 'warn' : undefined }, lost ? '—' : money(c.cushion))),
+      h('span.fm-bar', {}, h('i', { style: `--at:${(at * 100).toFixed(1)}%` }), h('u', { style: `left:${start * 100}%` })),
+      h('span.pf-risk-ends', {}, h('span', {}, `floor ${money(c.floor)}`), h('span', {}, `${c.phase === 'eval' ? 'target' : 'payout at'} ${money(c.target)}`))),
+    h('span.pf-kv', {},
+      h('span', {}, h('small', {}, 'Today'), h('b', { 'data-tone': c.todayPnl > 0 ? 'up' : c.todayPnl < 0 ? 'down' : 'flat' }, signedMoney(c.todayPnl))),
+      h('span', {}, h('small', {}, 'Loss budget today'), h('b', {}, c.todayBudget == null || lost ? '—' : money(c.todayBudget))),
+      h('span', { title: 'The most it asks for on a trade, of what the firm allows it now' }, h('small', {}, c.source === 'simulated' ? 'Asks for up to' : 'Firm allows'), h('b', {}, lost ? '—' : c.source === 'simulated' ? `${c.cap} of ${c.allowedMicros} micros` : `${c.allowedMicros} micros`)),
+      h('span', {}, h('small', {}, c.phase === 'funded' ? 'Payout days' : 'Trading days'), h('b', {}, c.phase === 'funded' && c.profitDaysNeeded ? `${c.profitDays} of ${c.profitDaysNeeded}` : String(c.tradingDays)))),
+    h('span.pf-card-strategy', {}, h('small', {}, c.strategy), c.source === 'simulated' ? h('small', { title: c.version }, `Pinned: ${c.version}`) : null),
+    h('span.pf-why', { 'data-on': c.trading ? '1' : undefined }, h('i'), h('span', {}, c.trading ? `Trading · ${c.why}` : c.why)));
+}
+
+/** A rule set, a rule a line, each saying how it is known. */
+function ruleSheet(r: RuleSetView): HTMLElement {
+  return h('div.pf-rules', {},
+    h('div.pf-rules-head', {}, h('b', {}, `${r.firm} ${r.program}`), badge(r.phase === 'eval' ? 'EVALUATION' : 'FUNDED', r.phase), r.verified ? badge(`VERIFIED ${r.verifiedOn}`, 'ok') : badge('NOT VERIFIED', 'warn'), badge(r.automation === 'allowed' ? 'AUTOMATION PERMITTED' : r.automation === 'prohibited' ? 'MANUAL ONLY' : 'AUTOMATION UNKNOWN', r.automation === 'allowed' ? 'ok' : 'warn')),
+    h('table.tl-table.pf-rule-table', {}, h('tbody', {}, ...r.rows.map((row) => h('tr', {}, h('th', {}, row.label), h('td.l', {}, row.value), h('td', {}, badge(HOW[row.how]!.toUpperCase(), row.how === 'verified' ? 'ok' : row.how === 'reported' ? 'info' : 'warn')))))),
+    r.issues.length ? h('ul.pf-issues', {}, ...r.issues.map((i) => h('li', {}, i))) : null,
+    r.notes.length ? h('ul.pf-notes', {}, ...r.notes.map((n) => h('li', {}, n))) : null,
+    r.sources.length ? h('p.tl-fine', {}, `Cohort ${r.cohort} · sources: `, ...r.sources.flatMap((s, i) => [i ? ', ' : '', h('a', { href: s.url, target: '_blank', rel: 'noreferrer' }, s.label)])) : h('p.tl-fine', {}, `Cohort ${r.cohort} · no firm page was read for this one.`));
+}
+
+// ---- Overview ---------------------------------------------------------------------------------------------
+
+function drawOverview(sh: FarmShell, v: PropFarmView): Node[] {
+  const t = v.totals;
+  const size = (sh.ui.size as string) ?? 'all';
+  const source = (sh.ui.source as string) ?? 'all';
+  const shown = v.accounts.filter((a) => (size === 'all' || (size === 'other' ? a.size !== 25_000 && a.size !== 50_000 : a.size === Number(size))) && (source === 'all' || a.source === source));
+  const openAccount = (c: AccountCard) => sh.sheet(accountSheet(sh, v, c));
+  const cols: { id: string; title: string; sub: string; has: (a: AccountCard) => boolean }[] = [
+    { id: 'eval', title: 'Evaluations', sub: 'working toward a pass', has: (a) => a.phase === 'eval' && !['breached', 'retired', 'passed', 'review'].includes(a.status) },
+    { id: 'funded', title: 'Funded', sub: 'building a payout', has: (a) => a.phase === 'funded' && !['breached', 'retired', 'parked', 'review'].includes(a.status) },
+    { id: 'parked', title: 'Parked', sub: 'payout requested: no trades', has: (a) => a.status === 'parked' },
+    { id: 'out', title: 'Out', sub: 'breached, retired or under review', has: (a) => ['breached', 'retired', 'passed', 'review'].includes(a.status) },
+  ];
+  const tile = (kicker: string, value: string, sub: string, kind: string, tone?: string) => h('div.pf-tile', { 'data-kind': kind }, h('span.tl-kicker', {}, kicker), h('b', { 'data-tone': tone }, value), h('small', {}, sub));
+  const money$ = h('div.pf-ledger', {},
+    tile('On paper', signedMoney(t.simulatedProfit), 'Profit in simulated accounts. Not cash.', 'paper', t.simulatedProfit > 0 ? 'up' : t.simulatedProfit < 0 ? 'down' : undefined),
+    tile('Could be requested', money(t.eligible), 'What the rules would let you ask for now. An estimate.', 'eligible'),
+    tile('Requested, waiting', money(t.requested), 'Asked for and not yet reconciled. Those accounts are parked.', 'requested'),
+    tile('Cash received', money(t.confirmedReceived), `Confirmed by you. The simulation has “paid” ${money(t.simulatedReceived)} on paper: that is not this.`, 'cash', t.confirmedReceived ? 'up' : undefined),
+    tile('Fees', money(t.confirmedFees), `Entered by you. The simulation would have spent ${money(t.simulatedFees)}.`, 'fees', t.confirmedFees ? 'down' : undefined));
+
+  const bar = h('div.pf-filters', {},
+    h('div.tl-chips', {}, ...[['all', 'Every size'], ['25000', '25K'], ['50000', '50K'], ['other', 'Other']].map(([id, label]) => chip(label!, size === id, () => { sh.ui.size = id; sh.redraw(); }))),
+    h('div.tl-chips', {}, ...[['all', 'Every source'], ['simulated', 'Simulated'], ['manual', 'Yours, by hand'], ['connected', 'Connected']].map(([id, label]) => chip(label!, source === id, () => { sh.ui.source = id; sh.redraw(); }))),
+    h('span.grow'),
+    h('button.tl-btn', { type: 'button', onclick: () => sh.sheet(addAccountSheet(sh, v)) }, '＋ Track one of your accounts'),
+    h('button.tl-btn.primary', { type: 'button', onclick: () => sh.go('battle') }, 'Plan a farm'));
+
+  const board = v.accounts.length
+    ? h('div.fm-pipe.pf-pipe', {}, ...cols.map((c) => {
+        const mine = shown.filter(c.has);
+        // A column is as wide as what is in it: three evaluations and nothing funded doesn't leave three quarters of the board empty.
+        return h('section.fm-col', { 'data-stage': c.id === 'out' ? 'busted' : c.id, 'data-empty': mine.length ? undefined : '1', style: `--n:${Math.max(1, Math.min(4, mine.length))}` }, h('div.fm-col-head', {}, h('b', {}, c.title), h('span', {}, `${mine.length} · ${c.sub}`)), mine.length ? h('div.pf-col-cards', {}, ...mine.map((a) => accountCard(a, () => openAccount(a)))) : h('p.fm-none', {}, 'None'));
+      }))
+    : h('div.pf-empty', {},
+        h('div.pf-empty-art', {}, '🌾'),
+        h('b', {}, 'No accounts on the farm yet'),
+        h('p', {}, 'Plan a farm in the battle test and run it forward on paper: the office opens the accounts in a simulation and trades them as the playbooks call their setups. Or add an account you really hold, and keep its ledger here by hand.'),
+        h('div.pf-empty-acts', {}, h('button.tl-btn.primary', { type: 'button', onclick: () => sh.go('battle') }, 'Plan a farm'), h('button.tl-btn', { type: 'button', onclick: () => sh.sheet(addAccountSheet(sh, v)) }, '＋ Track one of your accounts')));
+
+  const ready = panel('Between paper and an order', 'Everything that has to be true first. Most of it isn’t, and that is the honest state.',
+    h('ul.pf-ready', {}, ...v.readiness.map((r) => h('li', { 'data-state': r.state }, h('i', {}, r.state === 'ready' ? '✓' : r.state === 'blocked' ? '✕' : '·'), h('div', {}, h('b', {}, r.label), h('small', {}, r.detail))))),
+    h('table.tl-table.pf-brokers', {}, h('thead', {}, h('tr', {}, h('th', {}, 'Connection'), h('th', {}, 'Data'), h('th', {}, 'Accounts'), h('th', {}, 'Orders'))),
+      h('tbody', {}, ...v.brokers.map((b) => h('tr', { title: b.note }, h('th', {}, b.name), ...[b.data, b.accounts, b.orders].map((s) => h('td', {}, badge(s === 'wired' ? 'WIRED' : s === 'sandbox' ? 'PAPER ONLY' : s === 'unverified' ? 'UNVERIFIED' : 'NONE', s === 'wired' ? 'ok' : s === 'none' ? 'dim' : 'warn'))))))));
+  const ops = panel('Operations', 'The observer: feeds, the worker, and anything it paused',
+    h('div.pf-feeds', {}, ...v.ops.feeds.map((f) => h('div.pf-feed', { 'data-stale': f.stale ? '1' : undefined }, h('b', {}, f.symbol), h('span', {}, f.source), badge(f.stale ? 'QUIET' : f.delayed ? 'DELAYED' : 'REAL-TIME', f.stale ? 'bad' : f.delayed ? 'warn' : 'ok'), h('small', {}, f.ageSec == null ? 'no bars yet' : `newest bar ${f.ageSec < 90 ? `${f.ageSec}s` : `${Math.round(f.ageSec / 60)}m`} old`)))),
+    h('p.tl-fine', {}, `Research worker: ${v.ops.worker.busy ? 'working' : 'idle'}. ${v.ops.worker.rest}.`),
+    v.ops.notes.length ? h('ul.pf-opsnotes', {}, ...v.ops.notes.slice(0, 6).map((n) => h('li', { 'data-level': n.level }, h('small', {}, ago(n.at)), n.text))) : h('p.tl-fine', {}, 'Nothing paused, nothing missed.'));
+  const rules = panel('Rule library', 'Each program, size and phase, with where every number came from',
+    h('div.pf-rulelist', {}, ...v.rules.map((r) => h('button.pf-rulerow', { type: 'button', onclick: () => sh.sheet(wrapSheet(sh, `${r.firm} ${r.program}`, 'THE RULES THIS ACCOUNT IS HELD TO', ruleSheet(r))) },
+      h('b', {}, `${r.firm} ${r.program}`), badge(r.phase === 'eval' ? 'EVAL' : 'FUNDED', r.phase), r.verified ? badge('VERIFIED', 'ok') : badge('WHAT-IF', 'warn'), r.automation === 'prohibited' ? badge('MANUAL ONLY', 'warn') : null))));
+  return [money$, bar, board, h('div.pf-cols3', {}, ready, h('div.tl-stack', {}, ops, rules))];
+}
+
+/** A sheet with a heading and a way back. */
+export function wrapSheet(sh: FarmShell, title: string, kicker: string, ...body: (Node | null)[]): HTMLElement {
+  return h('div.pf-sheet', {}, h('div.tl-how-head', {}, h('div', {}, h('span.tl-kicker', {}, kicker), h('h3', {}, title)), h('button.tl-btn', { type: 'button', onclick: () => sh.sheet(null) }, 'Back')), ...body.filter((b): b is Node => !!b));
+}
+
+function addAccountSheet(sh: FarmShell, v: PropFarmView): HTMLElement {
+  const rules = h('select.tl-input', { 'aria-label': 'Program, size and phase' }, ...v.rules.map((r) => h('option', { value: r.id, selected: r.id === sh.ui.addRule }, `${r.firm} ${r.program}${r.phase === 'eval' && !/eval/i.test(r.program) ? ' (evaluation)' : ''}${r.verified ? '' : ' · what-if rules'}`))) as HTMLSelectElement;
+  const label = h('input.tl-input.wide', { type: 'text', placeholder: 'e.g. Lucid 25K #2', maxlength: '40', 'aria-label': 'A name for it' }) as HTMLInputElement;
+  const fee = h('input.tl-input', { type: 'number', min: '0', step: '1', placeholder: '75', 'aria-label': 'What you paid for it' }) as HTMLInputElement;
+  const preview = h('div');
+  const show = () => {
+    sh.ui.addRule = rules.value;
+    const r = v.rules.find((x) => x.id === rules.value);
+    preview.replaceChildren(r ? ruleSheet(r) : '');
+  };
+  rules.addEventListener('change', show);
+  show();
+  return wrapSheet(sh, 'Track one of your accounts', 'KEPT BY HAND',
+    h('p.tl-how-lead', {}, 'An account you really hold at a firm. The office can’t see it: you log each day’s result, and the same ledger that runs the simulated accounts checks it against the rules it was bought on. Five accounts on one program are five entries here.'),
+    h('div.pf-form', {}, field('Program, size and phase', rules), field('A name for it', label), field('Fee you paid ($)', fee),
+      h('button.tl-btn.primary', { type: 'button', onclick: async () => { if (await sh.act({ action: 'account-add', ruleSet: rules.value, label: label.value, ...(fee.value ? { fee: Number(fee.value) } : {}) }, 'Account added')) sh.sheet(null); } }, 'Add the account')),
+    preview);
+}
+
+function accountSheet(sh: FarmShell, v: PropFarmView, c: AccountCard): HTMLElement {
+  const rules = v.rules.find((r) => r.id === c.ruleSet);
+  const run = c.run ? v.runs.find((r) => r.id === c.run) : undefined;
+  const slot = c.run ? Number(c.id.split(':')[1]) : -1;
+  const events = run ? run.run.events.filter((e) => e.slot === slot).slice(-40).reverse() : [];
+  const pnl = h('input.tl-input', { type: 'number', step: '1', placeholder: '+250', 'aria-label': 'The day’s result in dollars' }) as HTMLInputElement;
+  const trades = h('input.tl-input', { type: 'number', min: '0', step: '1', placeholder: '2', 'aria-label': 'Trades taken' }) as HTMLInputElement;
+  const worst = h('input.tl-input', { type: 'number', min: '0', step: '1', placeholder: 'optional', 'aria-label': 'The most it was down during the day' }) as HTMLInputElement;
+  const day = h('input.tl-input.wide', { type: 'date', 'aria-label': 'Which day' }) as HTMLInputElement;
+  const act = (body: object, ok: string) => async () => { if (await sh.act({ id: c.id, ...body }, ok)) sh.sheet(null); };
+  const manual = c.source === 'manual';
+  return wrapSheet(sh, c.label, `${SOURCE_WORD[c.source]} · ${c.statusWord.toUpperCase()}`,
+    h('div.pf-sheet-grid', {},
+      h('div.tl-stack', {},
+        h('div.pf-sheet-card', {}, accountCard(c, () => {})),
+        manual ? panel('Log a day', 'What the account made or lost, as the firm’s platform shows it',
+          h('div.pf-form', {}, field('Day', day), field('Result ($)', pnl), field('Trades', trades), field('Worst it stood ($ down)', worst),
+            h('button.tl-btn.primary', { type: 'button', onclick: act({ action: 'account-log', pnl: Number(pnl.value), ...(day.value ? { day: day.value } : {}), ...(trades.value ? { trades: Number(trades.value) } : {}), ...(worst.value ? { worst: Number(worst.value) } : {}) }, 'Day logged') }, 'Log it')),
+          h('p.tl-fine', {}, 'The worst it stood matters: an account that touched its floor during the day is breached, whatever it closed at.')) : null,
+        manual ? panel('This account', null, h('div.pf-acts', {},
+          c.status === 'pass-pending' ? h('button.tl-btn.primary', { type: 'button', onclick: act({ action: 'account-confirm' }, 'Pass confirmed: funded account opened') }, 'The firm confirmed the pass') : null,
+          c.status === 'review' ? h('button.tl-btn', { type: 'button', onclick: act({ action: 'account-status', status: 'active' }, 'Cleared') }, 'Clear the review') : h('button.tl-btn', { type: 'button', onclick: act({ action: 'account-status', status: 'review' }, 'Marked for review') }, 'Mark for review'),
+          h('button.tl-btn', { type: 'button', onclick: act({ action: 'account-status', status: 'retired' }, 'Retired') }, 'Retire it'),
+          h('button.tl-btn', { type: 'button', onclick: act({ action: 'account-status', status: 'removed' }, 'Removed') }, 'Remove from the list')),
+          c.phase === 'funded' ? h('button.tl-btn', { type: 'button', onclick: () => { sh.sheet(null); sh.go('payouts'); } }, 'Its payouts →') : null) : null,
+        run ? panel('Why this size, why no trade', 'The risk governor’s answer for every setup this account was offered, newest first',
+          h('div.fm-feed', {}, ...(events.length ? events.map((e) => h('div.fm-event', { 'data-kind': e.kind }, h('span.fm-event-icon', {}, e.kind === 'trade' ? '📈' : e.kind === 'skip' ? '⏭️' : e.kind === 'busted' ? '💥' : e.kind === 'paid' ? '🏦' : e.kind === 'passed' ? '✅' : e.kind === 'payout-ready' ? '💰' : '🧾'), h('div', {}, h('b', {}, e.kind === 'skip' ? 'NO TRADE' : e.kind === 'payout-ready' ? 'PAYOUT REQUESTED' : e.kind.toUpperCase()), h('p', {}, e.text), e.why ? h('p.pf-because', {}, e.why) : null, h('small', {}, dayLabel(run.run.days[e.day] ?? ''))), e.amount && e.kind === 'trade' ? h('span.fm-event-amt', { 'data-tone': e.amount > 0 ? 'up' : 'down' }, signedMoney(e.amount)) : null)) : [h('p.tl-fine', {}, 'Nothing offered to it yet.')]))) : null),
+      h('div.tl-stack', {}, rules ? panel('The rules it is held to', `Rule set ${rules.id}: it keeps these even if the firm’s site changes`, ruleSheet(rules)) : panel('The rules it is held to', null, h('p.tl-fine', {}, `Rule set ${c.ruleSet}, from the older catalog: a public summary, not the firm’s own page.`)))));
+}
+
+// ---- Forward ----------------------------------------------------------------------------------------------
+
+function decisionRow(d: ForwardDecision, open: () => void, on: boolean): HTMLElement {
+  const o = d.outcome;
+  return h('tr', { tabindex: '0', 'data-on': on ? '1' : undefined, onclick: open, onkeydown: (e: Event) => { if ((e as KeyboardEvent).key === 'Enter') open(); } },
+    h('th', {}, `${shortDay(d.day)} ${clock(d.signalAt)}`),
+    h('td.l', {}, badge(d.kind === 'forward' ? 'FORWARD' : 'LATE', d.kind === 'forward' ? 'ok' : 'dim', d.kind === 'forward' ? 'Written down while the trade was still open' : 'Reconstructed after it had finished: not forward evidence')),
+    h('td.l', {}, `${d.side === 'long' ? 'Long' : 'Short'} ${d.symbol} · ${PLAYBOOK_BY_ID[d.playbook].short}`),
+    h('td', {}, price(d.symbol, d.entry)), h('td', {}, price(d.symbol, d.stop)), h('td', {}, price(d.symbol, d.target)),
+    h('td', { title: 'How long after its bar closed the office wrote it down' }, d.kind === 'late' ? `${lag(d.recordedAt - d.signalAt)} after` : lag(d.recordedAt - d.signalAt)),
+    h('td', { 'data-tone': !o ? 'warn' : o.result === 'void' ? 'flat' : o.r > 0 ? 'up' : o.r < 0 ? 'down' : 'flat' }, !o ? 'open' : o.result === 'void' ? 'void' : `${o.r >= 0 ? '+' : '−'}${Math.abs(o.r).toFixed(2)}R${o.ambiguous ? ' ?' : ''}`));
+}
+
+function drawForward(sh: FarmShell, v: PropFarmView): (Node | null)[] {
+  if (!v.runs.length) {
+    return [h('div.pf-empty', {}, h('div.pf-empty-art', {}, '⏱️'), h('b', {}, 'No forward run yet'),
+      h('p', {}, 'A backtest asks whether it would have worked. A forward run asks whether it is working: every setup is written down the moment the office sees it, before anyone knows how it came out, and the accounts are played over those decisions. Plan a farm in the battle test, then run it forward.'),
+      h('div.pf-empty-acts', {}, h('button.tl-btn.primary', { type: 'button', onclick: () => sh.go('battle') }, 'Plan a farm')))];
+  }
+  const run = v.runs.find((r) => r.id === sh.ui.run) ?? v.runs[0]!;
+  const program = FARM_PROGRAM_BY_ID[run.setup.programId]!;
+  const picked = run.decisions.find((d) => d.id === sh.ui.decision);
+  const g = run.gate;
+  const meter = (label: string, n: number, need: number) => h('div.pf-gate', { 'data-ok': n >= need ? '1' : undefined }, h('span.tl-label', {}, label), h('b', {}, `${n} of ${need}`), h('span.tl-meter', {}, h('i', { style: `width:${Math.min(100, (n / need) * 100)}%` })));
+  const hook = h('input.tl-input.fm-hook', { type: 'url', placeholder: 'https://discord.com/api/webhooks/…', 'aria-label': 'Discord webhook address', autocomplete: 'off' }) as HTMLInputElement;
+  const cash = run.run.cash;
+  const cells = run.run.cells[run.run.cells.length - 1] ?? [];
+  const mine = v.accounts.filter((a) => a.run === run.id);
+  const head = h('div.tl-hero.pf-run', { 'data-result': run.net > 0 ? 'passed' : run.net < 0 ? 'busted' : 'running' },
+    h('div.tl-verdict', {},
+      h('div.pf-run-badges', {}, badge(run.feedLabel.toUpperCase(), run.delayed ? 'warn' : 'ok', run.delayed ? 'The bars run behind the exchange: this is a delayed replay, never an exchange-live test' : 'Bars arrive in real time'), badge(run.status === 'running' ? '● RECORDING' : run.status.toUpperCase(), run.status === 'running' ? 'ok' : run.status === 'paused' ? 'bad' : 'dim'), badge('DETERMINISTIC LANE', 'info', 'Exact rules: the same bars always give the same decisions')),
+      h('span.tl-kicker', {}, `${program.firm} · ${program.name} · ${run.setup.slots} account${run.setup.slots === 1 ? '' : 's'} · since ${shortDay(run.startDay)}`),
+      h('div.tl-verdict-word', { 'data-tone': run.net > 0 ? 'up' : run.net < 0 ? 'down' : 'warn' }, signedMoney(run.net), h('span', {}, 'net on paper: payouts less fees')),
+      run.pause ? h('p.pf-pause', {}, `Paused: ${run.pause}`) : h('p', {}, `${run.counts.forward} decision${run.counts.forward === 1 ? '' : 's'} written down before their outcomes${run.counts.late ? `, and ${run.counts.late} reconstructed afterwards, which count for nothing as evidence` : ''}. ${run.counts.open} open now.`),
+      h('div.tl-stats', {},
+        stat('Taken', String(run.run.taken), { sub: `${run.run.skipped} not taken` }),
+        stat('Per trade', `${run.baseline.avgR >= 0 ? '+' : '−'}${Math.abs(run.baseline.avgR).toFixed(2)}R`, { tone: run.baseline.avgR > 0 ? 'up' : run.baseline.avgR < 0 ? 'down' : undefined, sub: `${run.baseline.trades} closed, after costs` }),
+        stat('Costs paid', money(run.run.costs), { sub: COSTS[run.setup.cost].name.toLowerCase() }),
+        stat('Accounts lost', String(run.run.evalBusts + run.run.fundedBusts), { tone: run.run.evalBusts + run.run.fundedBusts ? 'down' : undefined, sub: `${run.run.passed} passed · ${run.run.payoutCount} paid` }))),
+    h('div.tl-odds', {},
+      h('span.tl-kicker', {}, 'THE RELEASE GATE'),
+      meter('Forward sessions', g.sessions, g.sessionsNeeded), meter('Closed forward trades', g.trades, g.tradesNeeded),
+      h('small', {}, g.met ? 'Cleared. That is where a review starts: it is not proof, and nothing is promoted by it.' : 'Planning thresholds before anything is even reviewed for promotion. Only decisions written down before their outcome count.'),
+      h('div.pf-pinned', {}, h('span.tl-kicker', {}, 'PINNED FOR THE LIFE OF THE RUN'),
+        h('small', {}, `Playbook settings ${run.pinned.tuning}: ${run.pinned.tuningLabel}`), h('small', {}, `Rules ${run.pinned.ruleSets.join(' → ')}`), h('small', {}, `${FILL_POLICIES[run.pinned.fills as 'realistic']?.name ?? run.pinned.fills} fills · ${COSTS[run.pinned.cost].name.toLowerCase()} costs · ${strategyLabel(run.setup.strategy)}`), h('small', {}, 'New settings are a new run. Nothing rewrites this one.'))));
+
+  const tape = panel('The decision tape', 'Each setup as it was written down, newest first. Click one for what every account did with it.',
+    run.decisions.length
+      ? h('div.tl-scroll.pf-tape', {}, h('table.tl-table', {}, h('thead', {}, h('tr', {}, ...['When (PT)', 'Recorded', 'Setup', 'Entry', 'Stop', 'Target', 'Written down', 'Result'].map((x, i) => h(i < 3 ? 'th.l' : 'th', {}, x)))), h('tbody', {}, ...run.decisions.map((d) => decisionRow(d, () => { sh.ui.decision = sh.ui.decision === d.id ? undefined : d.id; sh.redraw(); }, d.id === picked?.id)))))
+      : h('p.tl-fine', {}, 'Waiting for the first setup. Decisions appear here the moment a playbook calls one.'),
+    picked ? h('div.pf-picked', {}, h('b', {}, `${picked.side === 'long' ? 'Long' : 'Short'} ${picked.symbol} · ${PLAYBOOK_BY_ID[picked.playbook].name}`), h('p', {}, picked.why), h('small', {}, `Signal bar closed ${clock(picked.signalAt)} PT · written down ${clock(picked.recordedAt)} PT · bars from ${picked.feed}${picked.delayed ? ' (delayed)' : ''} · settings ${picked.tuning}`),
+      ...run.run.events.filter((e) => e.trade === picked.id).map((e) => h('div.pf-because-row', { 'data-kind': e.kind }, h('b', {}, e.account || `Slot ${e.slot + 1}`), h('span', {}, e.kind === 'skip' ? 'No trade' : e.text), h('small', {}, e.why ?? ''))),
+      !run.run.events.some((e) => e.trade === picked.id) ? h('small', {}, picked.outcome ? 'No account took it: each was done for the day, parked, or not open yet.' : 'Still open: it reaches the accounts’ ledgers when it closes.') : null) : null);
+
+  const s = v.shadow;
+  const lane = s ? panel('The adaptive lane, in the shadow', 'A model says take or abstain on every setup. It trades nothing and can change no limit.',
+    h('div.pf-lane', {},
+      h('div.tl-stats', {}, stat('Asked', String(s.summary.asked)), stat('Took', String(s.summary.taken), { sub: `${s.summary.abstained} abstained` }), stat('Invalid', String(s.summary.invalid), { tone: s.summary.invalid ? 'warn' : undefined, sub: 'counted as abstain' }), stat('Lane vs all', `${s.summary.shadow.avgR.toFixed(2)}R / ${s.summary.baseline.avgR.toFixed(2)}R`, { sub: `${s.summary.shadow.trades} / ${s.summary.baseline.trades} closed` })),
+      h('p', {}, s.summary.read),
+      h('small', {}, `Model: ${s.summary.model.id} v${s.summary.model.version} (${s.summary.model.kind}). ${s.adapter}`),
+      s.recent.length ? h('ul.pf-lane-list', {}, ...s.recent.slice(0, 6).map((r) => h('li', { 'data-action': r.decision.action }, badge(r.decision.action === 'take' ? 'TAKE' : 'ABSTAIN', r.decision.action === 'take' ? 'ok' : 'dim'), h('span', {}, `${r.request.side === 'long' ? 'Long' : 'Short'} ${r.request.symbol} · ${PLAYBOOK_BY_ID[r.request.playbook].short}`), h('small', {}, r.valid ? r.decision.reason : `Invalid: ${r.problems[0] ?? ''}`)))) : null)) : null;
+
+  return [
+    v.runs.length > 1 ? h('div.tl-chips', {}, ...v.runs.map((r) => chip(`${r.name}${r.status === 'stopped' ? ' (stopped)' : ''}`, r.id === run.id, () => { sh.ui.run = r.id; sh.ui.decision = undefined; sh.redraw(); }))) : null,
+    head,
+    h('div.tl-cols', {},
+      panel('The accounts', `${mine.length || cells.length} in this run`, h('div.pf-cards', {}, ...(mine.length ? mine.map((a) => accountCard(a, () => sh.sheet(accountSheet(sh, v, a)))) : [h('p.tl-fine', {}, 'Stopped: its accounts are closed.')]))),
+      h('div.tl-stack', {},
+        panel('Cash in and out', 'Payouts received less fees paid, after each day',
+          chart({ height: 260, width: 560, n: cash.length + 1, label: 'Net cash by day', series: [{ values: [0, ...cash], color: ACCENT, width: 3, area: { fill: 'rgba(126,231,135,.08)', to: 'bottom' } }], levels: [{ y: 0, color: TONE.faint, label: 'EVEN', dash: '2 6' }], xLabel: (k) => (k === 0 ? 'Start' : shortDay(run.run.days[k - 1]!)), yFmt: (x) => `${x < 0 ? '−' : ''}$${Math.abs(x) >= 1000 ? `${(Math.abs(x) / 1000).toFixed(1)}k` : Math.abs(x)}`, tip: (k) => (k === 0 ? [h('b', {}, 'Start')] : [h('b', {}, dayLabel(run.run.days[k - 1]!)), h('span', {}, `Net ${signedMoney(cash[k - 1]!)}`)]) })),
+        lane)),
+    tape,
+    panel('This run', null, h('div.pf-acts', {},
+      h('span.tl-fine', {}, run.discord ? 'Every fill, pass and payout goes to your Discord channel.' : 'Paste a Discord webhook address and the run posts every fill, pass and payout there.'),
+      hook, h('button.tl-btn', { type: 'button', onclick: () => void sh.act({ action: 'run-discord', id: run.id, url: hook.value }, hook.value ? 'Notices on' : 'Notices off') }, 'Save'),
+      h('span.grow'),
+      run.status !== 'stopped' ? h('button.tl-btn', { type: 'button', onclick: () => void sh.act({ action: 'run-stop', id: run.id }, 'Run stopped') }, 'Stop this run') : h('button.tl-btn', { type: 'button', onclick: () => void sh.act({ action: 'run-remove', id: run.id }, 'Run removed') }, 'Remove it'))),
+  ];
+}
+
+// ---- Payouts ----------------------------------------------------------------------------------------------
+
+function payoutCard(sh: FarmShell, r: PayoutRow): HTMLElement {
+  const amount = h('input.tl-input', { type: 'number', min: '0', step: '1', value: String(r.eligible || ''), 'aria-label': 'Amount to request' }) as HTMLInputElement;
+  const got = h('input.tl-input', { type: 'number', min: '0', step: '1', value: String(r.requested ?? ''), 'aria-label': 'What was actually withdrawn' }) as HTMLInputElement;
+  const why = h('input.tl-input.wide', { type: 'text', placeholder: 'reason', maxlength: '120', 'aria-label': 'Why it was denied' }) as HTMLInputElement;
+  const manual = r.source === 'manual';
+  const state = r.status === 'parked' ? 'requested' : r.eligible ? 'eligible' : 'building';
+  return h('section.pf-payout', { 'data-state': state },
+    h('div.pf-payout-head', {}, h('b', {}, r.label), badge(SOURCE_WORD[r.source], r.source), h('span.grow'), badge(state === 'requested' ? 'REQUESTED · PARKED' : state === 'eligible' ? 'ELIGIBLE' : 'NOT YET', state === 'requested' ? 'warn' : state === 'eligible' ? 'ok' : 'dim')),
+    h('small', {}, `${r.firm} · ${r.program}${r.payoutsAllowed ? ` · payout ${Math.min(r.payouts + 1, r.payoutsAllowed)} of ${r.payoutsAllowed}` : ''}`),
+    h('ul.pf-checklist', {}, ...r.checks.map((c) => h('li', { 'data-ok': c.ok ? '1' : undefined }, h('i', {}, c.ok ? '✓' : '·'), h('span', {}, c.label), h('small', {}, c.detail)))),
+    h('div.pf-payout-nums', {},
+      stat('Eligible now', money(r.eligible), { tone: r.eligible ? 'up' : undefined, sub: 'an estimate' }),
+      stat('Requested', r.requested == null ? '—' : money(r.requested), { tone: r.requested ? 'warn' : undefined, sub: r.requestedOn ? `on ${shortDay(r.requestedOn)}` : 'not requested' }),
+      stat('You’d receive', r.requested != null || r.eligible ? money((r.requested ?? r.eligible) * r.split) : '—', { sub: `${Math.round(r.split * 100)}% is yours` }),
+      stat('Received so far', money(r.received), { tone: r.received ? 'up' : undefined, sub: manual ? 'confirmed by you' : 'on paper only' })),
+    h('div.pf-after', {}, h('span.tl-label', {}, 'After it is paid'), h('span', {}, `floor ${money(r.floorAfter)}`), h('span', {}, `cushion ${money(r.cushionAfter)}`), h('span', {}, `${r.microsAfter} micros allowed`), h('span', {}, `trades again: ${r.next.toLowerCase()}`)),
+    manual
+      ? h('div.pf-acts', {},
+          state === 'eligible' ? h('span.pf-inline', {}, '$', amount, h('button.tl-btn.primary', { type: 'button', onclick: () => void sh.act({ action: 'payout-request', id: r.account, amount: Number(amount.value) }, 'Requested: the account is parked') }, 'I requested it')) : null,
+          state === 'requested' ? h('span.pf-inline', {}, 'Withdrawn $', got, h('button.tl-btn.primary', { type: 'button', onclick: () => void sh.act({ action: 'payout-received', id: r.account, withdrawn: Number(got.value) }, 'Reconciled: back in the rotation') }, 'It arrived')) : null,
+          state === 'requested' ? h('span.pf-inline', {}, why, h('button.tl-btn', { type: 'button', onclick: () => void sh.act({ action: 'payout-denied', id: r.account, reason: why.value }, 'Marked denied') }, 'It was denied')) : null,
+          state === 'building' ? h('small', {}, 'Nothing to request yet: the conditions above aren’t all met.') : null)
+      : h('small', {}, 'A simulated account: the simulation requests and pays it on schedule. Nothing was really requested.'));
+}
+
+function drawPayouts(sh: FarmShell, v: PropFarmView): Node[] {
+  const t = v.totals;
+  const head = h('div.pf-ledger', {},
+    h('div.pf-tile', { 'data-kind': 'eligible' }, h('span.tl-kicker', {}, 'Eligible'), h('b', {}, money(t.eligible)), h('small', {}, 'The rules say a request could be made. An estimate, not money.')),
+    h('div.pf-tile', { 'data-kind': 'requested' }, h('span.tl-kicker', {}, 'Requested'), h('b', {}, money(t.requested)), h('small', {}, 'Asked for. The account is parked until it is reconciled.')),
+    h('div.pf-tile', { 'data-kind': 'cash' }, h('span.tl-kicker', {}, 'Received'), h('b', { 'data-tone': t.confirmedReceived ? 'up' : undefined }, money(t.confirmedReceived)), h('small', {}, 'You said it arrived. Only this is cash.')),
+    h('div.pf-tile', { 'data-kind': 'paper' }, h('span.tl-kicker', {}, 'Paid on paper'), h('b', {}, money(t.simulatedReceived)), h('small', {}, 'What the simulation paid its own accounts. Not cash, and never added to the above.')));
+  const rows = v.payouts;
+  return [
+    head,
+    rows.length ? h('div.pf-payouts', {}, ...rows.map((r) => payoutCard(sh, r))) : h('div.pf-empty', {}, h('div.pf-empty-art', {}, '🏦'), h('b', {}, 'No funded accounts yet'), h('p', {}, 'When an evaluation is passed and a funded account opens, it appears here with every payout condition checked: the days that count, the profit it needs, what could be requested, and where the floor and the contract limit land afterwards.')),
+    panel('The payout ledger', 'Every request, payment and denial, newest first. A winning trade is none of these.',
+      v.payoutLog.length
+        ? h('div.tl-scroll', {}, h('table.tl-table', {}, h('thead', {}, h('tr', {}, ...['Day', 'Account', 'What', 'Amount', 'Source', 'Note'].map((x, i) => h(i === 3 ? 'th' : 'th.l', {}, x)))),
+            h('tbody', {}, ...v.payoutLog.map((e) => h('tr', {}, h('th', {}, shortDay(e.day)), h('td.l', {}, e.account), h('td.l', {}, e.kind === 'paid' ? 'Received' : e.kind === 'requested' ? 'Requested' : 'Denied'), h('td', { 'data-tone': e.kind === 'paid' ? 'up' : e.kind === 'denied' ? 'down' : 'warn' }, money(e.amount)), h('td.l', {}, badge(SOURCE_WORD[e.source], e.source)), h('td.l.why', {}, e.note))))))
+        : h('p.tl-fine', {}, 'Nothing requested yet.')),
+  ];
+}
+
+// ---- The console ------------------------------------------------------------------------------------------
+
+export function openFarm(first?: TabId) {
+  const save = stored<{ tab?: TabId }>('agent-office.prop-farm', {});
+  let tab: TabId = first ?? save.get().tab ?? 'overview';
+  let how = false;
+  let note = '';
+  let custom: HTMLElement | null = null;
   let detail: BacktestDetail | null = null;
   let loadedFor = '';
-  let how = false;
-  let day = 0;
-  let playing = 0;
-  let note = '';
-  let feedAll = false;
-  const persist = () => save.set({ ...setup, tab, firm });
+  let drawn = '';
+  let off = () => {};
+  const ui: FarmShell['ui'] = {};
 
+  const tabs = h('div');
   const rail = h('aside.tl-rail.fm-rail');
-  const money$ = h('div');
-  const pipeline = h('div.fm-pipe');
-  const lower = h('div.tl-cols');
-  const dayRead = h('span.fm-day');
-  const slider = h('input.tl-range.fm-scrub', { type: 'range', min: '0', max: '0', step: '1', 'aria-label': 'Day of the run' }) as HTMLInputElement;
-  const play = h('button.tl-btn.fm-play', { type: 'button', 'aria-label': 'Replay the run day by day' }, '▶ Replay') as HTMLButtonElement;
-  const timeline = h('div.fm-timeline', {}, play, slider, dayRead);
+  const main = h('div.tl-main');
   const sheet = h('div.tl-sheet');
   const status = h('span.grow');
-  const liveBtn = h('button.tl-btn.primary', { type: 'button' }) as HTMLButtonElement;
-  const stopBtn = h('button.tl-btn', { type: 'button' }, 'Stop the live farm') as HTMLButtonElement;
-  const tabs = h('div');
-  const close = h('button.btn.close', { type: 'button', 'aria-label': 'Close the Farm', title: 'Close (Esc)' }, '✕');
-  const main = h('div.tl-main', {}, money$, timeline, pipeline, lower);
-  const el = h('div.modal.tl.tl-farm', { role: 'dialog', 'aria-label': 'The Farm', style: `--tl-accent:${ACCENT}` },
+  const close = h('button.btn.close', { type: 'button', 'aria-label': 'Close the Prop Farm', title: 'Close (Esc)' }, '✕');
+  const body = h('div.tl-body', {}, rail, main, sheet);
+  const el = h('div.modal.tl.tl-farm', { role: 'dialog', 'aria-label': 'Prop Farm', style: `--tl-accent:${ACCENT}` },
     h('header.tl-header', {},
-      h('div.tl-title', {}, h('span.tl-kicker', {}, 'BACK OFFICE · PROP FARM'), h('h2', {}, '🌾 The Farm')),
+      h('div.tl-title', {}, h('span.tl-kicker', {}, 'BACK OFFICE · PAPER ONLY · NO ORDERS'), h('h2', {}, '🌾 Prop Farm')),
       tabs,
-      h('button.tl-btn', { type: 'button', onclick: () => { how = !how; render(); } }, 'How it works'),
-      h('button.tl-btn', { type: 'button', title: 'Test one account in detail', onclick: () => { modal.close(); openEvalSim({ playbooks: setup.strategy.playbooks, plan: setup.strategy.mode, manage: setup.strategy.manage }); } }, '🏦 Eval simulator'),
+      h('button.tl-btn', { type: 'button', onclick: () => { how = !how; custom = null; render(true); } }, 'How it works'),
       close),
-    h('div.tl-body', {}, rail, main, sheet),
-    h('footer.tl-footer', {}, status, stopBtn, liveBtn));
-  let off = () => {};
-  const hook = h('input.tl-input.fm-hook', { type: 'url', placeholder: 'https://discord.com/api/webhooks/…', 'aria-label': 'Discord webhook address', autocomplete: 'off' }) as HTMLInputElement;
-  const stopPlay = () => {
-    if (playing) clearInterval(playing);
-    playing = 0;
-    play.textContent = '▶ Replay';
+    body,
+    h('footer.tl-footer', {}, status));
+
+  const shell: FarmShell = {
+    view: () => trading.snap?.propFarm ?? null,
+    async act(b, ok) {
+      const why = await trading.farm(b);
+      note = why ?? ok ?? '';
+      render(true);
+      return !why;
+    },
+    go(t) {
+      if (t !== tab) main.scrollTop = 0;
+      tab = t;
+      how = false;
+      custom = null;
+      save.set({ tab });
+      render(true);
+    },
+    redraw: () => render(true),
+    sheet(node) {
+      custom = node;
+      how = false;
+      render(true);
+    },
+    detail: () => detail,
+    ui,
+    say(text) {
+      note = text;
+      status.textContent = footer();
+    },
   };
-  const modal = openModal(el, { doing: 'running the prop farm', onClose: () => { stopPlay(); off(); } });
+  const battle = mountBattle(shell, rail, main);
+  const modal = openModal(el, { doing: 'running the prop farm', onClose: () => { battle.dispose(); off(); } });
   close.addEventListener('click', () => modal.close());
 
-  const change = (patch: Partial<FarmSetup>) => {
-    setup = cleanSetup({ ...setup, ...patch });
-    persist();
-    compute();
-    render();
+  const footer = () => {
+    const v = shell.view();
+    const d = v?.dataset;
+    return `${d ? `Research data ${d.hash.slice(0, 8)}: ${d.days} days, ${d.trades} trades` : 'Waiting for the backtest'} · everything here is paper or your own bookkeeping${note ? ` · ${note}` : ''}`;
   };
 
-  // ---- The numbers: worked out when the setup or the data changes, not on every drag of the day ----
-  let lists: ReturnType<typeof farmDays> = [];
-  let days: string[] = [];
-  let battle: FarmRun | null = null;
-  let odds: FarmOdds | null = null;
-  let perProgram = new Map<string, FarmOdds>();
-  let evalLadder: { micros: number; odds: FarmOdds }[] = [];
-  let fundedLadder: { micros: number; odds: FarmOdds }[] = [];
-  let presets: Preset[] = [];
-  const limits = (s: FarmSetup) => {
-    const p = FARM_PROGRAM_BY_ID[s.programId]!;
-    const rules = (id: string | null) => ACCOUNT_CATALOG.find((a) => a.id === id);
-    return { evalMax: rules(p.evalId)?.maxMicros ?? 0, fundedMax: rules(p.fundedId)!.maxMicros };
-  };
-  function compute() {
-    if (!detail?.trades.length) return;
-    days = weekdays(detail.days);
-    lists = farmDays(detail.trades, setup.strategy, days);
-    battle = runFarm(lists, setup, days);
-    odds = farmOdds(lists, setup, { runs: 300, horizon: 60 });
-    perProgram = new Map(FARM_PROGRAMS.map((p) => [p.id, farmOdds(lists, { ...setup, programId: p.id, fee: null }, { runs: 120, horizon: 60 })]));
-    const { evalMax, fundedMax } = limits(setup);
-    const ladder = (max: number, key: 'evalMicros' | 'fundedMicros') => [...new Set([1, 2, 3, 5, 10, 20, max].filter((n) => n >= 1 && n <= max))].sort((a, b) => a - b).map((micros) => ({ micros, odds: farmOdds(lists, { ...setup, [key]: micros }, { runs: 120, horizon: 60 }) }));
-    evalLadder = evalMax ? ladder(evalMax, 'evalMicros') : [];
-    fundedLadder = ladder(fundedMax, 'fundedMicros');
-    const mix = trading.snap?.backtest?.mixes?.find((m) => m.order.length > 1 && m.mode !== 'every' && m.trades >= 20);
-    presets = [
-      ...(mix ? [{ id: 'mix', name: 'The lab’s best mix', strategy: { playbooks: mix.order, mode: mix.mode, manage: 'written' as const, markets: ALL_MARKETS } }] : []),
-      one('support-resistance'), one('failed-auction'), one('vwap-pullback'), one('double-break'),
-    ];
-    if (tab === 'battle') day = battle.days.length - 1;
-  }
-  const shown = (): FarmRun | null => (tab === 'live' ? trading.snap?.farm?.run ?? null : battle);
-
-  // ---- Drawing ---------------------------------------------------------------------------------------
-  const stepper = (value: number, min: number, max: number, set: (v: number) => void, label: string) =>
-    h('div.fm-stepper', { role: 'group', 'aria-label': label },
-      h('button', { type: 'button', disabled: value <= min, 'aria-label': `Fewer: ${label}`, onclick: () => set(value - 1) }, '−'),
-      h('b', {}, String(value)),
-      h('button', { type: 'button', disabled: value >= max, 'aria-label': `More: ${label}`, onclick: () => set(value + 1) }, '+'));
-  const ladderRow = (rows: { micros: number; odds: FarmOdds }[], now: number, pick: (n: number) => void) => {
-    if (!rows.length) return null;
-    const best = rows.reduce((a, b) => (b.odds.p50 > a.odds.p50 ? b : a), rows[0]!);
-    return h('div.fm-ladder', {}, ...rows.map((r) => h('button', { type: 'button', 'aria-pressed': String(r.micros === now), 'data-best': r === best ? '1' : undefined, title: `${r.micros} micros: typically ${signedMoney(r.odds.p50)} over ${r.odds.horizon} days, ahead in ${pct(r.odds.ahead)} of redraws`, onclick: () => pick(r.micros) },
-      h('b', {}, String(r.micros)), h('small', { 'data-tone': r.odds.p50 >= 0 ? 'up' : 'down' }, `${r.odds.p50 >= 0 ? '+' : '−'}$${Math.abs(r.odds.p50) >= 1000 ? `${(Math.abs(r.odds.p50) / 1000).toFixed(1)}k` : Math.abs(r.odds.p50)}`), r === best ? h('i', {}, '★') : null)));
+  /** What the open view depends on: it is redrawn when this changes, not on every price tick. */
+  const signature = (v: PropFarmView | null): string => {
+    if (!v) return 'none';
+    if (tab === 'overview') return JSON.stringify([v.accounts.map((a) => [a.id, a.status, a.balance, a.todayPnl, a.allowedMicros, a.trading]), v.totals, v.ops.notes.length, v.ops.feeds.map((f) => [f.stale, f.delayed, f.ageSec == null ? null : Math.round(f.ageSec / 60)]), v.ops.worker.busy]);
+    if (tab === 'research' || tab === 'compare') return JSON.stringify([v.jobs.map((j) => [j.id, j.status, j.done]), v.holdout, v.dataset?.hash, v.presets.map((p) => p.cells)]);
+    if (tab === 'forward') return JSON.stringify([v.runs.map((r) => [r.id, r.status, r.pause, r.counts, r.net, r.run.events.length]), v.shadow?.summary.asked, v.accounts.map((a) => [a.id, a.balance, a.status])]);
+    if (tab === 'payouts') return JSON.stringify([v.payouts.map((p) => [p.account, p.status, p.eligible, p.requested, p.checks.map((c) => c.ok)]), v.payoutLog.length, v.totals]);
+    return 'battle';
   };
 
-  function drawRail() {
-    const program = FARM_PROGRAM_BY_ID[setup.programId]!;
-    const firms = [...new Set(FARM_PROGRAMS.map((p) => p.firm))];
-    const { evalMax, fundedMax } = limits(setup);
-    const fee = h('input.tl-input', { type: 'number', min: '0', step: '1', value: String(setup.fee ?? program.fee), 'aria-label': 'What one attempt costs', onchange: (e: Event) => change({ fee: Number((e.target as HTMLInputElement).value) }) });
-    const samePreset = (p: Preset) => p.strategy.mode === setup.strategy.mode && p.strategy.playbooks.length === setup.strategy.playbooks.length && p.strategy.playbooks.every((x, i) => x === setup.strategy.playbooks[i]);
-    const step = (n: number, title: string, ...kids: (Node | null)[]) => h('section.fm-step', {}, h('div.fm-step-head', {}, h('span', {}, String(n)), h('b', {}, title)), ...kids.filter((k): k is Node => !!k));
-    rail.replaceChildren(
-      step(1, 'Pick the firm and the program',
-        h('div.tl-seg.fm-firms', { role: 'group' }, ...firms.map((f) => h('button', { type: 'button', 'aria-pressed': String(f === firm), onclick: () => { firm = f; if (FARM_PROGRAM_BY_ID[setup.programId]!.firm !== f) change({ programId: FARM_PROGRAMS.find((p) => p.firm === f)!.id, fee: null }); else { persist(); render(); } } }, f))),
-        ...FARM_PROGRAMS.filter((p) => p.firm === firm).map((p) => {
-          const o = perProgram.get(p.id);
-          return h('button.fm-program', { type: 'button', 'aria-pressed': String(p.id === setup.programId), onclick: () => change({ programId: p.id, fee: null }) },
-            h('span.fm-program-top', {}, h('b', {}, p.name), h('span.tl-tag', { 'data-kind': p.evalId ? 'eval' : 'funded' }, p.evalId ? 'EVAL → FUNDED' : 'STRAIGHT TO FUNDED')),
-            h('small', {}, p.note),
-            o?.runs ? h('span.fm-program-odds', { 'data-tone': o.p50 >= 0 ? 'up' : 'down' }, `Typically ${signedMoney(o.p50)} in ${o.horizon} days · ahead ${pct(o.ahead)}`) : null);
-        }),
-        h('label.tl-inline.fm-fee', {}, 'One attempt costs $', fee, program.feeEstimated && setup.fee == null ? h('em', {}, 'a guess: set yours') : null)),
-      step(2, 'How many accounts',
-        h('div.fm-row', {}, stepper(setup.slots, 1, 5, (v) => change({ slots: v }), 'accounts side by side'), h('small', {}, 'side by side')),
-        h('div.fm-row', {}, stepper(setup.maxAttempts, 1, 60, (v) => change({ maxAttempts: v }), 'attempts in all'), h('small', {}, `attempts in all (${money(setup.maxAttempts * (setup.fee ?? program.fee))} of fees at most)`)),
-        segmented<FarmSetup['share']>([{ id: 'rotate', label: 'Take turns' }, { id: 'copy', label: 'All take every trade' }], setup.share, (v) => change({ share: v })),
-        h('small', {}, setup.share === 'rotate' ? 'Each signal goes to the next account in turn, so no two are ever on opposite sides.' : 'Every account takes every signal: allowed between your own accounts, but they win and lose together.')),
-      step(3, 'What they trade',
-        h('div.fm-presets', {}, ...presets.map((p) => chip(p.name, samePreset(p), () => change({ strategy: { ...p.strategy, manage: setup.strategy.manage } }), { color: PLAYBOOK_BY_ID[p.strategy.playbooks[0]!].color }))),
-        h('small', {}, strategyLabel(setup.strategy)),
-        h('label.tl-inline', {}, 'Managed', h('select.tl-input', { 'aria-label': 'How a trade is managed', onchange: (e: Event) => change({ strategy: { ...setup.strategy, manage: (e.target as HTMLSelectElement).value as FarmStrategy['manage'] } }) }, ...MANAGE.map((m) => h('option', { value: m.id, selected: m.id === setup.strategy.manage }, m.short))))),
-      step(4, 'How big',
-        evalMax ? h('div.fm-size', {}, h('span.tl-label', {}, `Evaluation · ${setup.evalMicros} micros (limit ${evalMax})`), ladderRow(evalLadder, setup.evalMicros, (n) => change({ evalMicros: n }))) : h('small', {}, 'No evaluation in this program: it starts funded.'),
-        h('div.fm-size', {}, h('span.tl-label', {}, `Funded · ${setup.fundedMicros} micros (limit ${fundedMax})`), ladderRow(fundedLadder, setup.fundedMicros, (n) => change({ fundedMicros: n }))),
-        h('small', {}, 'Under each size: what the farm typically nets in 60 days at it. ★ is the best of them on these days.'),
-        h('button.tl-toggle', { type: 'button', role: 'switch', 'aria-checked': String(setup.fundedOneAndDone), onclick: () => change({ fundedOneAndDone: !setup.fundedOneAndDone }) }, h('i'), h('span', {}, h('b', {}, 'Funded: one winner and done'), h('small', {}, 'Keeps each day small, which the consistency rules want')))),
-      step(5, 'Get the notices',
-        h('small', {}, trading.snap?.farm ? (trading.snap.farm.discord ? 'Every fill, pass and payout of the live farm goes to your Discord channel.' : 'Paste a Discord webhook address and the live farm posts every fill, pass and payout there.') : 'Once the farm is live, it can post every fill, pass and payout to a Discord channel.'),
-        trading.snap?.farm ? h('div.fm-row', {}, hook, h('button.tl-btn', { type: 'button', onclick: async () => { note = (await trading.post('/api/trading/farm', { action: 'discord', url: hook.value })) ?? (hook.value ? 'Notices on' : 'Notices off'); hook.value = ''; render(); } }, 'Save')) : null));
-  }
-
-  const card = (c: FarmCell, slot: number) => {
-    const span = Math.max(1, c.target - c.floor);
-    const at = Math.max(0, Math.min(1, (c.balance - c.floor) / span));
-    const start = Math.max(0, Math.min(1, (c.size - c.floor) / span));
-    return h('div.fm-card', { 'data-stage': c.stage },
-      h('div.fm-card-top', {}, h('b', {}, c.account || `Slot ${slot + 1}`), h('span.fm-chip', {}, c.stage === 'eval' ? 'IN PLAY' : c.stage === 'funded' ? 'TRADING' : c.stage === 'parked' ? 'PAYOUT READY' : c.stage === 'busted' ? 'BUSTED' : 'WAITING')),
-      c.stage === 'empty'
-        ? h('small', {}, 'No attempts left to buy')
-        : h('div', {},
-            h('div.fm-balance', {}, money(c.balance)),
-            h('div.fm-card-line', {}, h('span', { 'data-tone': c.pnl > 0 ? 'up' : c.pnl < 0 ? 'down' : 'flat' }, `today ${signedMoney(c.pnl)}`), h('span', {}, `to date ${signedMoney(c.balance - c.size)}`)),
-            h('div.fm-bar', {}, h('i', { style: `--at:${(at * 100).toFixed(1)}%` }), h('u', { style: `left:${start * 100}%` })),
-            h('div.fm-card-line.dim', {}, h('span', {}, `floor ${money(c.floor)}`), h('span', {}, `${c.stage === 'eval' ? 'target' : 'payout at'} ${money(c.target)}`)),
-            c.last ? h('small', {}, `last: ${c.last}`) : h('small', {}, 'no trade yet'),
-            c.stage === 'funded' || c.stage === 'parked' ? h('small', {}, `${c.tradingDays} day${c.tradingDays === 1 ? '' : 's'} traded${c.bestShare != null ? ` · best day ${pct(c.bestShare)} of profit` : ''}`) : null));
-  };
-
-  function drawDay(run: FarmRun) {
-    const i = Math.max(0, Math.min(run.days.length - 1, day));
-    dayRead.replaceChildren(h('b', {}, `Day ${i + 1} of ${run.days.length}`), ` · ${dayLabel(run.days[i]!)}`);
-    const cells = run.cells[i] ?? [];
-    pipeline.replaceChildren(...STAGES.map((st) => {
-      const mine = cells.map((c, slot) => ({ c, slot })).filter((x) => (st.id === 'busted' ? x.c.stage === 'busted' || x.c.stage === 'empty' : x.c.stage === st.id));
-      return h('section.fm-col', { 'data-stage': st.id },
-        h('div.fm-col-head', {}, h('b', {}, st.title), h('span', {}, `${mine.length} ${st.sub}`)),
-        ...(mine.length ? mine.map((x) => card(x.c, x.slot)) : [h('p.fm-none', {}, '—')]));
-    }));
-    // The feed up to this day, and the cash line with this day marked.
-    const upTo = run.events.filter((e) => e.day <= i);
-    const feed = [...(feedAll ? upTo : upTo.filter((e) => e.kind !== 'trade'))].reverse().slice(0, 40);
-    const cash = run.cash;
-    const untilNow = cash[i] ?? 0;
-    lower.replaceChildren(
-      panel('What happened', `Up to ${shortDay(run.days[i]!)}, newest first`,
-        h('div.tl-chips', {}, chip('Milestones', !feedAll, () => { feedAll = false; drawDay(run); }), chip('Every trade too', feedAll, () => { feedAll = true; drawDay(run); })),
-        h('div.fm-feed', {}, ...(feed.length ? feed.map((e) => h('div.fm-event', { 'data-kind': e.kind }, h('span.fm-event-icon', {}, EVENT_ICON[e.kind]), h('div', {}, h('b', {}, `${e.account || `Slot ${e.slot + 1}`} · ${e.kind === 'payout-ready' ? 'PAYOUT READY' : e.kind.toUpperCase()}`), h('p', {}, e.text), h('small', {}, dayLabel(run.days[e.day]!))), e.amount && e.kind !== 'trade' ? h('span.fm-event-amt', { 'data-tone': e.amount > 0 ? 'up' : 'down' }, signedMoney(e.amount)) : null)) : [h('p.tl-fine', {}, 'Nothing yet.')]))),
-      panel('Cash in and out', 'Payouts received less fees paid, after each day',
-        chart({
-          height: 330,
-          width: 560,
-          n: cash.length + 1,
-          label: 'Net cash by day',
-          series: [{ values: [0, ...cash], color: ACCENT, width: 3, area: { fill: 'rgba(126,231,135,.08)', to: 'bottom' }, dot: (k) => (k === i + 1 ? '#fff' : null) }],
-          levels: [{ y: 0, color: TONE.faint, label: 'EVEN', dash: '2 6' }],
-          xLabel: (k) => (k === 0 ? 'Start' : shortDay(run.days[k - 1]!)),
-          yFmt: (v) => `${v < 0 ? '−' : ''}$${Math.abs(v) >= 1000 ? `${(Math.abs(v) / 1000).toFixed(1)}k` : Math.abs(v)}`,
-          tip: (k) => (k === 0 ? [h('b', {}, 'Start')] : [h('b', {}, dayLabel(run.days[k - 1]!)), h('span', { 'data-tone': cash[k - 1]! >= 0 ? 'up' : 'down' }, `Net ${signedMoney(cash[k - 1]!)}`), ...run.events.filter((e) => e.day === k - 1 && e.kind !== 'trade').slice(0, 4).map((e) => h('span', {}, `${EVENT_ICON[e.kind]} ${e.account}: ${e.kind}`))]),
-        }),
-        h('p.tl-fine', {}, `By ${shortDay(run.days[i]!)}: ${signedMoney(untilNow)} net.`)));
-  }
-
-  function render() {
-    const s = trading.snap;
-    const bt = s?.backtest;
-    const live = s?.farm ?? null;
-    el.classList.toggle('tl-how-open', how);
-    tabs.replaceChildren(segmented<'battle' | 'live'>([{ id: 'battle', label: 'Battle test' }, { id: 'live', label: live ? '● Live on paper' : 'Live on paper' }], tab, (v) => { tab = v; stopPlay(); const r = shown(); day = r ? r.days.length - 1 : 0; persist(); render(); }));
-    const program = FARM_PROGRAM_BY_ID[setup.programId]!;
-    status.textContent = !detail?.trades.length ? (bt?.running || !bt ? 'Replaying the month on real bars…' : 'No backtest trades yet') : tab === 'battle' ? `${days.length} real trading days (${shortDay(days[0]!)} to ${shortDay(days[days.length - 1]!)}) · ${program.firm} ${program.name} · paper evidence, never a promise${note ? ` · ${note}` : ''}` : live ? `Live on paper since ${shortDay(live.startDay)} · ${FARM_PROGRAM_BY_ID[live.setup.programId]!.firm} ${FARM_PROGRAM_BY_ID[live.setup.programId]!.name} · ${strategyLabel(live.setup.strategy)}${live.discord ? ' · notices to Discord' : ''}${note ? ` · ${note}` : ''}` : 'No farm is running live';
-    liveBtn.textContent = live ? 'Switch the live farm to this setup' : 'Run this farm live on paper';
-    stopBtn.hidden = !live;
-    if (!detail?.trades.length) {
-      rail.replaceChildren(h('span.tl-kicker', {}, 'SET IT UP'));
-      money$.replaceChildren(h('div.tl-waiting', {}, h('span.tl-spin'), h('b', {}, bt?.running || !bt ? 'Replaying the month on real bars…' : 'No backtest trades yet'), h('p', {}, 'The farm runs on the backtest’s trades. It fills in the moment the backtest finishes.')));
-      timeline.hidden = true;
-      pipeline.replaceChildren();
-      lower.replaceChildren();
-      return;
+  function render(force = false) {
+    const v = shell.view();
+    tabs.replaceChildren(segmented<TabId>(TABS.map((t) => {
+      const n = !v ? 0 : t.id === 'overview' ? v.accounts.filter((a) => a.trading).length : t.id === 'research' ? v.jobs.filter((j) => j.status === 'running' || j.status === 'queued').length : t.id === 'forward' ? v.runs.filter((r) => r.status === 'running').length : t.id === 'payouts' ? v.payouts.filter((p) => p.eligible || p.requested).length : 0;
+      return { id: t.id, label: n ? `${t.label} · ${n}` : t.label };
+    }), tab, (t) => shell.go(t)));
+    status.textContent = footer();
+    el.classList.toggle('tl-how-open', how || !!custom);
+    el.classList.toggle('pf-wide', tab !== 'battle');
+    const sig = `${tab}:${signature(v)}:${how}:${custom ? 1 : 0}`;
+    if (tab === 'battle') {
+      if (drawn.split(':')[0] !== 'battle' || force) battle.show();
+      drawn = sig;
+    } else if (force || sig !== drawn) {
+      drawn = sig;
+      battle.hide();
+      if (!v) main.replaceChildren(h('div.tl-waiting', {}, h('span.tl-spin'), h('b', {}, 'Opening the farm…')));
+      else {
+        const top = main.scrollTop;
+        main.replaceChildren(...(tab === 'overview' ? drawOverview(shell, v) : tab === 'research' ? drawResearch(shell, v) : tab === 'compare' ? drawCompare(shell, v) : tab === 'forward' ? drawForward(shell, v) : drawPayouts(shell, v)).filter((n): n is Node => !!n));
+        main.scrollTop = top;
+      }
     }
-    drawRail();
-    const run = shown();
-    timeline.hidden = !run;
-    if (!run) {
-      money$.replaceChildren(h('div.tl-hero', { 'data-result': 'running' }, h('div.tl-verdict', {}, h('span.tl-kicker', {}, 'LIVE ON PAPER'), h('div.tl-verdict-word', { 'data-size': 'm', 'data-tone': 'warn' }, 'NOT RUNNING YET'), h('p', {}, 'Set the farm up on the left, check it in the battle test, then run it live: the office buys the accounts on paper and trades them forward a day at a time as the playbooks call their setups. Nothing is bought and no order is placed.')), h('div.tl-odds', {}, h('span.tl-kicker', {}, 'WHAT YOU’LL SEE'), h('p', {}, 'Each account moving from evaluation to funded to payout-ready, every fill and milestone in the feed, and the cash line. Add a Discord webhook to get the notices on your phone.'))));
-      pipeline.replaceChildren();
-      lower.replaceChildren();
-      return;
-    }
-    slider.max = String(run.days.length - 1);
-    day = Math.max(0, Math.min(run.days.length - 1, day));
-    slider.value = String(day);
-    const net = run.cash[run.cash.length - 1] ?? 0;
-    const usedSetup = tab === 'live' && live ? live.setup : setup;
-    const usedProgram = FARM_PROGRAM_BY_ID[usedSetup.programId]!;
-    money$.replaceChildren(h('div.tl-hero', { 'data-result': net > 0 ? 'passed' : net < 0 ? 'busted' : 'running' },
-      h('div.tl-verdict', {},
-        h('span.tl-kicker', {}, `${usedProgram.firm} · ${usedProgram.name} · ${usedSetup.slots} account${usedSetup.slots === 1 ? '' : 's'} · ${strategyLabel(usedSetup.strategy)}`.toUpperCase()),
-        h('div.tl-verdict-word', { 'data-tone': net > 0 ? 'up' : net < 0 ? 'down' : 'warn' }, signedMoney(net), h('span', {}, tab === 'live' ? `net on paper since ${shortDay(run.days[0]!)}` : `net over the ${run.days.length} days`)),
-        h('p', {}, `${run.attempts} attempt${run.attempts === 1 ? '' : 's'} bought for ${money(run.fees)}. ${usedProgram.evalId ? `${run.passed} passed, ${run.evalBusts} busted in the evaluation. ` : ''}${run.payoutCount} payout${run.payoutCount === 1 ? '' : 's'} worth ${money(run.payouts)}${run.fundedBusts ? `, and ${run.fundedBusts} funded account${run.fundedBusts === 1 ? '' : 's'} lost` : ''}.`),
-        h('div.tl-stats', {},
-          stat('Fees paid', money(run.fees), { tone: 'down', sub: `${run.attempts} × ${money(usedSetup.fee ?? usedProgram.fee)}` }),
-          stat('Payouts', money(run.payouts), { tone: run.payouts ? 'up' : undefined, sub: `${run.payoutCount} received` }),
-          stat(usedProgram.evalId ? 'Passed' : 'Reached a payout', usedProgram.evalId ? `${run.passed} of ${run.attempts}` : `${Math.min(run.attempts, run.payoutCount)} of ${run.attempts}`, { sub: usedProgram.evalId ? 'evaluations' : 'accounts' }),
-          stat('Accounts lost', String(run.evalBusts + run.fundedBusts), { tone: run.evalBusts + run.fundedBusts ? 'down' : undefined, sub: 'hit the floor' }))),
-      h('div.tl-odds', {},
-        h('span.tl-kicker', {}, tab === 'live' ? 'THE BATTLE TEST SAID, FOR THE SETUP ON THE LEFT' : 'THE ODDS, OVER 60 TRADING DAYS'),
-        odds?.runs
-          ? h('div.tl-odds-main', {},
-              h('div.tl-odds-big', {}, h('b', { 'data-tone': odds.p50 >= 0 ? 'up' : 'down' }, signedMoney(odds.p50)), h('span', {}, 'is the typical net')),
-              h('div.tl-odds-meter', {}, h('i', { 'data-k': 'pass', style: `width:${odds.ahead * 100}%` }), h('i', { 'data-k': 'bust', style: `width:${(1 - odds.ahead) * 100}%` })),
-              h('div.tl-odds-legend', {}, h('span', { 'data-k': 'pass' }, `${pct(odds.ahead)} end ahead`), h('span', { 'data-k': 'bust' }, `${pct(1 - odds.ahead)} end behind`)),
-              h('small', {}, `${odds.runs} redraws of your real days. A bad run nets ${signedMoney(odds.p10)}, a good one ${signedMoney(odds.p90)}. On average ${odds.attempts.toFixed(1)} attempts, ${pct(odds.passRate)} of them ${FARM_PROGRAM_BY_ID[setup.programId]!.evalId ? 'pass' : 'reach a payout'}, ${odds.payouts.toFixed(1)} payouts. One month of paper trades, and a withdrawal is assumed to leave the full drawdown: read it as a lead, not a forecast.`))
-          : h('p', {}, 'No trades to draw from for this strategy.'))));
-    drawDay(run);
-    if (how) {
-      sheet.replaceChildren(howSheet('The Farm',
-        'A prop account costs a fee, not the drawdown. So the question a farm asks is: over many attempts, do the payouts come to more than the fees? This runs that for your playbooks, on real bars.',
-        [
-          { title: 'It buys the accounts', body: `Each slot buys an attempt at the program you picked${program.evalId ? ': an evaluation first, a funded account when it passes' : ', which starts funded'}. When one busts, the slot buys the next, until the attempts run out.`, fact: `${run.attempts} bought · ${money(run.fees)} in fees` },
-          { title: 'It hands out the signals', body: 'Every setup your strategy calls goes to an account. Taking turns sends each one to the next account in line, so they hold different trades and are never on opposite sides. Copying sends it to all of them.', fact: strategyLabel(usedSetup.strategy) },
-          { title: 'It sizes by stage', body: 'An evaluation trades the evaluation size; a funded account trades the funded size, which is smaller, because a funded account is worth protecting and its payout rule punishes one big day.', fact: `${usedSetup.evalMicros} micros in the evaluation · ${usedSetup.fundedMicros} funded` },
-          { title: 'It checks the firm’s rules every close', body: 'The floor trails the way that firm trails it. An evaluation passes on its target, its days and its consistency rule. A funded account is payout-ready on its own three, and then it parks: no trades until it is paid.', fact: `${run.passed} passed · ${run.payoutCount} payouts · ${run.evalBusts + run.fundedBusts} lost` },
-          { title: 'It counts the cash', body: `Fees go out when an attempt is bought. A payout comes in the day after an account parks, at your ${Math.round(usedProgram.split * 100)}% share${usedProgram.payoutCap ? ` and capped at ${money(usedProgram.payoutCap)}` : ''}.`, fact: `${signedMoney(net)} net` },
-          { title: 'It redraws the days for the odds', body: 'The month is one path. The same farm is run over 300 redraws of your real days, 60 at a time, to see what it typically nets and how often it ends ahead.', fact: odds?.runs ? `${signedMoney(odds.p50)} typical · ahead ${pct(odds.ahead)}` : undefined },
-        ],
-        [...FARM_CAVEATS, 'It is one month of history. A strategy that happened to fit September will look better here than it is.'],
-        () => { how = false; render(); }));
-    }
+    if (custom) sheet.replaceChildren(custom);
+    else if (how) sheet.replaceChildren(howIt(() => { how = false; render(true); }));
   }
-
-  slider.addEventListener('input', () => { stopPlay(); day = Number(slider.value); const r = shown(); if (r) drawDay(r); });
-  play.addEventListener('click', () => {
-    const r = shown();
-    if (!r) return;
-    if (playing) return stopPlay();
-    day = 0;
-    play.textContent = '❚❚ Pause';
-    playing = window.setInterval(() => {
-      const run = shown();
-      if (!run || day >= run.days.length - 1) return stopPlay();
-      day++;
-      slider.value = String(day);
-      drawDay(run);
-    }, 420);
-    slider.value = '0';
-    drawDay(r);
-  });
-  liveBtn.addEventListener('click', async () => {
-    note = (await trading.post('/api/trading/farm', { action: 'start', setup, from: 'today' })) ?? 'Running live on paper from today';
-    tab = 'live';
-    day = 0;
-    persist();
-    render();
-  });
-  stopBtn.addEventListener('click', async () => {
-    note = (await trading.post('/api/trading/farm', { action: 'stop' })) ?? 'The live farm is stopped';
-    tab = 'battle';
-    compute();
-    render();
-  });
 
   const load = async () => {
     const bt = trading.snap?.backtest;
@@ -328,22 +443,34 @@ export function openFarm() {
     if (!bt || bt.running || key === loadedFor) return;
     loadedFor = key;
     detail = await trading.backtestDetail();
-    compute();
-    render();
+    battle.data(detail);
+    render(tab === 'compare');
   };
-  // Prices tick every second; the page only redraws when the backtest or the live farm moves on.
-  let was = '';
   off = trading.on(() => {
-    const s = trading.snap;
-    const f = s?.farm;
-    const now = `${!!s?.backtest?.running}:${f ? `${f.startDay}:${f.run.events.length}:${f.run.cash[f.run.cash.length - 1]}:${f.run.days.length}` : ''}`;
-    if (now !== was) {
-      was = now;
-      if (tab === 'live' && f) day = f.run.days.length - 1;
-      render();
-    }
+    // A sheet with a form in it is left alone while it is open.
+    if (!custom) render();
     void load();
   });
-  render();
+  render(true);
   void load();
 }
+
+function howIt(onClose: () => void): HTMLElement {
+  return howSheet('The Prop Farm',
+    'A prop account costs a fee, not its drawdown. So the question is never “did this trade win” but “over many accounts and many months, do the payouts that actually arrive come to more than everything spent getting them”. This desk is built to answer that honestly, on paper, before any of it is real.',
+    [
+      { title: 'The rules are written down, with where they came from', body: 'Each program, size and phase is a rule set: its target, how its floor trails and locks, its contract limit and how that steps, its consistency and payout rules. Every number says whether it was read on the firm’s own page, taken from a summary, or assumed. An account keeps the rule set it was opened on.', fact: 'LucidFlex 25K and 50K: read on the firm’s pages, 2 October 2026' },
+      { title: 'Every fill is counted one way', body: 'One fill policy for the whole office: the stop is taken before the target when a bar touches both, a gap through the stop fills at the open, and every fill pays commission and slippage. A result that rests on a guess inside one bar says so.', fact: `${FILL_POLICIES.realistic.what}` },
+      { title: 'Each account is a ledger', body: 'An account’s equity is followed through every trade, including how far a trade went against it before it came back, and across trades that overlap. It is breached the moment its equity touches the floor, whatever the trade went on to do.' },
+      { title: 'One governor sizes everything', body: 'The size is the smallest of the cap asked for, what the firm still allows, and what the cushion and the day’s allowance can carry. Every trade says which decided, and a setup that can’t fit one micro is skipped with the reason.' },
+      { title: 'Research is a queue of bounded jobs', body: 'An experiment states what it is testing and what would count as support before it runs. One worker, resting between runs. Failed and inconclusive results are kept beside the winners.' },
+      { title: 'A candidate is judged on days it never saw', body: 'Training days, validation days, and a holdout that is opened once for one chosen candidate. The more variants were tried, the more a candidate has to show, because the best of many tries is mostly luck.' },
+      { title: 'Forward runs write the decision down first', body: 'Every setup is recorded when the office sees it, before its outcome. Decisions reconstructed afterwards are kept and marked late: they count for nothing as evidence. On delayed bars it is called a delayed forward replay, never a live test.' },
+      { title: 'A payout is cash only when you say it arrived', body: 'Eligible, requested and received are three columns. A parked account takes no trades until its withdrawal is reconciled, and what it looks like afterwards (floor, cushion, contract limit) is worked out before you ask.' },
+    ],
+    [...FARM_CAVEATS, 'About a month of history. A strategy that happened to fit that month looks better here than it is: that is what the holdout and the forward runs are for.'],
+    onClose);
+}
+
+export type { ForwardRunView };
+export { pct };

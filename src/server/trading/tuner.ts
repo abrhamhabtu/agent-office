@@ -99,14 +99,20 @@ export class Tuner {
    * Tries every single change to each tuned playbook's live version. `baseline` is the backtest's own
    * trades (already made with the live versions), `days` every day it replayed.
    */
-  async run(history: History, baseline: PaperTrade[], days: string[], now = Date.now()): Promise<void> {
+  async run(history: History, baseline: PaperTrade[], days: string[], now = Date.now(), judgeOn?: string[]): Promise<void> {
     if (this.running) return;
     this.running = true;
     const started = Date.now();
     let replays = 0;
     const today = pacific(now).date;
+    // `judgeOn`: the days a change may be judged on. The rest (the prop farm's holdout) are replayed, so a
+    // version's trades cover them, but nothing is ever picked or scored on them.
+    const allDays = days;
+    if (judgeOn?.length) days = judgeOn;
+    const seen = judgeOn?.length ? new Set(judgeOn) : null;
+    const judged = (trades: PaperTrade[]) => testOf(seen ? trades.filter((t) => seen.has(t.day)) : trades, days);
     try {
-      const key = `${days[0] ?? ''}:${days[days.length - 1] ?? ''}:${days.length}:${JSON.stringify(this.liveTuning())}`;
+      const key = `${allDays[0] ?? ''}:${allDays[allDays.length - 1] ?? ''}:${allDays.length}:${days.length}:${JSON.stringify(this.liveTuning())}`;
       const fresh = this.data.last?.key !== key;
       const tried: Partial<Record<PlaybookId, TuneTry[]>> = fresh ? {} : this.data.last!.tried;
       const found: string[] = [];
@@ -116,7 +122,7 @@ export class Tuner {
       for (const p of TUNED_PLAYBOOKS) {
         const live = this.live(p);
         const name = PLAYBOOK_BY_ID[p].name;
-        const base = testOf(baseline.filter((t) => t.playbook === p && t.outcome !== 'open'), days);
+        const base = judged(baseline.filter((t) => t.playbook === p && t.outcome !== 'open'));
         live.test = base.test;
         live.vs = null;
         if (fresh) {
@@ -126,7 +132,7 @@ export class Tuner {
             this.stage = `${name}: trying change ${i + 1} of ${variants.length}`;
             const trades = await this.replay(history, p, variants[i]!);
             replays++;
-            const t = testOf(trades, days);
+            const t = judged(trades);
             results.push({ settings: variants[i]!, change: describeSettings(p, live.settings, variants[i]!), t, j: judgeTune(base, t), trades });
           }
           const better = results.filter((r) => r.j.verdict === 'better').sort((a, b) => b.t.later.avgR - a.t.later.avgR || b.t.all.totalR - a.t.all.totalR);
@@ -143,7 +149,7 @@ export class Tuner {
               this.stage = `${name}: trying the two best changes together`;
               const trades = await this.replay(history, p, combo);
               replays++;
-              const t = testOf(trades, days);
+              const t = judged(trades);
               const j = judgeTune(base, t);
               const r = { settings: combo, change: describeSettings(p, live.settings, combo), t, j, trades };
               results.push(r);
@@ -169,7 +175,7 @@ export class Tuner {
           this.stage = `${name}: re-testing v${v.version}`;
           const trades = await this.replay(history, p, v.settings);
           replays++;
-          const t = testOf(trades, days);
+          const t = judged(trades);
           v.test = t.test;
           v.vs = { ...judgeTune(base, t), version: live.version };
           v.change = describeSettings(p, this.versions(p).find((x) => x.version === v.parent)?.settings ?? {}, v.settings);
