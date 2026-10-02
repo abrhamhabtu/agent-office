@@ -2,6 +2,7 @@ import type { Bar, Levels, PaperTrade, PlaybookId, ProposalStage, Symbol, Zone }
 import { INSTRUMENTS, PLAYBOOK_BY_ID } from '../../shared/trading.js';
 import { settingsOf, type Tuning } from '../../shared/tuning.js';
 import type { ManagedR, ManageId } from '../../shared/manage.js';
+import { exitOnBar, REALISTIC } from '../../shared/fills.js';
 
 // The playbooks as code. A trading day's one-minute bars are replayed in order through four scanners,
 // one per playbook, the way you'd sit through the session watching them: that one replay is what the
@@ -924,17 +925,41 @@ export function replayDay(symbol: Symbol, bars: Bar[], prior: Bar[], opts: { liv
     o.t.dollars = Math.round((price - o.t.entry) * d * pv * 100) / 100;
     open.delete(id);
   };
+  /** How far the trade has been against and for it, with when: what an account's equity did inside the trade. */
+  const excursion = (t: PaperTrade, at: number, worst: number, best: number) => {
+    const d = t.side === 'long' ? 1 : -1;
+    const adverse = Math.round(Math.max(0, (t.entry - worst) * d) * 100) / 100;
+    const favourable = Math.round(Math.max(0, (best - t.entry) * d) * 100) / 100;
+    if (adverse > (t.mae ?? 0)) {
+      t.mae = adverse;
+      t.maeAt = at;
+    }
+    if (favourable > (t.mfe ?? 0)) {
+      t.mfe = favourable;
+      t.mfeAt = at;
+    }
+  };
 
   for (let i = 0; i < bars.length; i++) {
     const b = bars[i]!;
     const m = sessionMinute(b.ts);
-    // Manage what's open first: a bar that tags both the stop and the target counts as the stop.
+    // Manage what's open first, by the office's one fill policy (see shared/fills.ts): a bar that tags both
+    // the stop and the target counts as the stop, and a bar that opens past the stop fills at its open.
     for (const [id, o] of open) {
       if (o.idx === i) continue;
       const long = o.t.side === 'long';
-      if (long ? b.low <= o.t.stop : b.high >= o.t.stop) close(id, b.ts, o.t.stop, 'loss');
-      else if (long ? b.high >= o.t.target : b.low <= o.t.target) close(id, b.ts, o.t.target, 'win');
-      else if (m >= RTH_CLOSE) close(id, b.ts, b.close, 'time');
+      const fill = exitOnBar(o.t.side, o.t.stop, o.t.target, b, REALISTIC);
+      if (fill) {
+        // Inside the bar that ends it, only what the exit itself proves is counted for certain.
+        const worst = fill.outcome === 'loss' ? fill.price : long ? Math.max(b.low, o.t.stop) : Math.min(b.high, o.t.stop);
+        excursion(o.t, b.ts, worst, fill.outcome === 'win' ? fill.price : o.t.entry);
+        if (fill.ambiguous) o.t.ambiguous = true;
+        if (fill.gapped) o.t.gapped = true;
+        close(id, b.ts, fill.price, fill.outcome);
+      } else {
+        excursion(o.t, b.ts, long ? b.low : b.high, long ? b.high : b.low);
+        if (m >= RTH_CLOSE) close(id, b.ts, b.close, 'time');
+      }
     }
     for (const s of shadows) if (s.idx !== i) for (const sh of s.list) if (!sh.done) stepShadow(sh, s.t, b, m >= RTH_CLOSE);
     if (m < RTH_OPEN) {

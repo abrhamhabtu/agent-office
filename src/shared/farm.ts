@@ -1,17 +1,24 @@
-import type { PaperTrade, PlaybookId, PropRules, Symbol } from './trading.js';
+import type { PaperTrade, PlaybookId, Symbol } from './trading.js';
 import { DAILY_STOP, PLAYBOOK_BY_ID } from './trading.js';
 import { applyPlan, planLabel, type PlanMode } from './dayplan.js';
 import { MANAGE_BY_ID, managed, type ManageId } from './manage.js';
 import { ACCOUNT_CATALOG } from './prop-catalog.js';
+import { COSTS, type CostId } from './fills.js';
+import { fromPropRules, isVerified, ruleSetFor, type RuleSet } from './prop-rules.js';
+import { canTrade, confirmPass, cushionOf, DaySession, fillOf, floorOf, openAccount, payoutCheck, requestPayout, settlePayout, type Account, type AccountStatus } from './account-ledger.js';
+import { capPolicy, crossAccountConflict, CUSHION_BASELINE, policyProblem, sizeTrade, type RiskPolicy } from './risk-policy.js';
 
 // The prop farm. A farm is a few account slots run through one firm's program: buy an evaluation, pass
 // it, trade the funded account small until it's ready for a payout, park it, get paid, go again; and when
-// an account busts, buy the next one. The same run does two jobs: the battle test replays it over the
-// backtest's month (and over redraws of that month, for the odds), and the live farm runs it forward a
-// day at a time on what the playbooks really take on paper.
+// an account is breached, buy the next one. The same run does two jobs: the battle test replays it over
+// the backtest's month (and over redraws of that month, for the odds), and a forward run plays it a day
+// at a time on what the playbooks really take on paper.
 //
-// It is a model. What it leaves out is listed in FARM_CAVEATS, and the fees and payout terms are the
-// firms' public ones, to be checked before any money is spent on them.
+// Each account is a ledger of its own (shared/account-ledger.ts): its equity is followed through every
+// trade against the firm's rules as that rule set states them (shared/prop-rules.ts), every order is
+// sized by the risk governor (shared/risk-policy.ts), and every fill pays costs (shared/fills.ts).
+//
+// It is a model. What it leaves out is listed in FARM_CAVEATS.
 
 /** One firm's route from paying a fee to being paid. */
 export interface FarmProgram {
@@ -19,39 +26,46 @@ export interface FarmProgram {
   firm: string;
   name: string;
   /** The evaluation's rules, or null when the program is straight to funded. */
-  evalId: string | null;
-  fundedId: string;
-  /** What an attempt costs, and what turning a pass into a funded account costs. */
+  evalRules: RuleSet | null;
+  fundedRules: RuleSet;
+  /** What an attempt costs. */
   fee: number;
-  activation: number;
-  /** The owner's share of a payout. */
-  split: number;
-  /** The most one payout may be (null: no cap). */
-  payoutCap: number | null;
-  /** What to know about it, in a line. */
-  note: string;
   /** The fee is a guess, not a published price: the owner should set it. */
   feeEstimated?: boolean;
+  /** What to know about it, in a line. */
+  note: string;
 }
 
+const catalog = (id: string) => ACCOUNT_CATALOG.find((a) => a.id === id)!;
+const lucid = (size: '25k' | '50k', fee: number, feeEstimated: boolean, note: string): FarmProgram => ({ id: `lucidflex-${size}`, firm: 'Lucid', name: `LucidFlex ${size.toUpperCase()}`, evalRules: ruleSetFor(`lucidflex-${size}`, 'eval')!, fundedRules: ruleSetFor(`lucidflex-${size}`, 'funded')!, fee, feeEstimated, note });
+const reported = (id: string, firm: string, name: string, evalId: string | null, fundedId: string, fee: number, payoutCap: number, note: string, o: { feeEstimated?: boolean; automation?: 'allowed' | 'prohibited' | 'unknown' } = {}): FarmProgram => ({
+  id, firm, name, fee, note, feeEstimated: o.feeEstimated,
+  evalRules: evalId ? fromPropRules(catalog(evalId), { template: id, automation: o.automation, fee }) : null,
+  fundedRules: fromPropRules(catalog(fundedId), { template: id, payoutCap, automation: o.automation, fee: evalId ? null : fee }),
+});
+
 export const FARM_PROGRAMS: FarmProgram[] = [
-  { id: 'lucidflex-25k', firm: 'Lucid', name: 'LucidFlex 25K', evalId: 'lucidflex-25k', fundedId: 'lucidflex-funded-25k', fee: 75, activation: 0, split: 0.9, payoutCap: 1000, note: 'Evaluation with a 50% consistency rule, then five profit days a payout.' },
-  { id: 'lucidflex-50k', firm: 'Lucid', name: 'LucidFlex 50K', evalId: 'lucidflex-50k', fundedId: 'lucidflex-funded-50k', fee: 130, activation: 0, split: 0.9, payoutCap: 2000, note: 'The same, twice the size.', feeEstimated: true },
-  { id: 'luciddirect-25k', firm: 'Lucid', name: 'LucidDirect 25K', evalId: null, fundedId: 'luciddirect-25k', fee: 199, activation: 0, split: 0.9, payoutCap: 1000, note: 'Straight to funded. A 20% consistency rule, so a payout takes at least five even days.' },
-  { id: 'tof-ignite-25k', firm: 'Top One', name: 'Ignite 25K', evalId: null, fundedId: 'tof-25k', fee: 218, activation: 0, split: 0.9, payoutCap: 500, note: 'Straight to funded. A 15% consistency rule, the strictest here: seven even days or more.' },
-  { id: 'tof-ignite-50k', firm: 'Top One', name: 'Ignite 50K', evalId: null, fundedId: 'tof-50k', fee: 398, activation: 0, split: 0.9, payoutCap: 1000, note: 'Straight to funded, the size you already follow.' },
-  { id: 'fundednext-rapid-25k', firm: 'FundedNext', name: 'Rapid 25K', evalId: 'fundednext-rapid-25k', fundedId: 'fundednext-funded-25k', fee: 80, activation: 0, split: 0.9, payoutCap: 800, note: 'No consistency rule or minimum days in the challenge: one trade can pass it. The one in the screenshots.' },
-  { id: 'fundednext-rapid-50k', firm: 'FundedNext', name: 'Rapid 50K', evalId: 'fundednext-rapid-50k', fundedId: 'fundednext-funded-50k', fee: 150, activation: 0, split: 0.9, payoutCap: 1500, note: 'The same, twice the size.', feeEstimated: true },
+  lucid('25k', 75, true, 'A 50% consistency rule in the evaluation. Funded starts at 10 micros; a payout takes five $100 days and $1,000 of profit, and half of it can be taken.'),
+  lucid('50k', 130, true, 'The same, twice the size. Funded starts at 20 micros and steps to 40.'),
+  reported('luciddirect-25k', 'Lucid', 'LucidDirect 25K', null, 'luciddirect-25k', 199, 1000, 'Straight to funded. A 20% consistency rule, so a payout takes at least five even days.'),
+  reported('tof-ignite-25k', 'Top One', 'Ignite 25K', null, 'tof-25k', 218, 500, 'Straight to funded. A 15% consistency rule, the strictest here. Top One prohibits bots: manual only.', { automation: 'prohibited' }),
+  reported('tof-ignite-50k', 'Top One', 'Ignite 50K', null, 'tof-50k', 398, 1000, 'Straight to funded, the size you already follow. Manual only.', { automation: 'prohibited' }),
+  reported('fundednext-rapid-25k', 'FundedNext', 'Rapid 25K', 'fundednext-rapid-25k', 'fundednext-funded-25k', 80, 800, 'No consistency rule or minimum days in the challenge: one trade can pass it. The one in the screenshots.'),
+  reported('fundednext-rapid-50k', 'FundedNext', 'Rapid 50K', 'fundednext-rapid-50k', 'fundednext-funded-50k', 150, 1500, 'The same, twice the size.', { feeEstimated: true }),
 ];
 export const FARM_PROGRAM_BY_ID = Object.fromEntries(FARM_PROGRAMS.map((p) => [p.id, p])) as Record<string, FarmProgram>;
 
+/** Whether a program's numbers are the firm's own, checked on its pages (the rest are from public summaries). */
+export const programVerified = (p: FarmProgram) => isVerified(p.fundedRules) && (!p.evalRules || isVerified(p.evalRules));
+
 /** What the model leaves out. */
 export const FARM_CAVEATS = [
-  'After a payout the account starts again at its opening balance with its full drawdown. Firms differ on what cushion a withdrawal leaves, and some are stricter.',
-  'Fees, splits and payout caps are from public summaries (September 2026). The LucidFlex 50K and FundedNext 50K fees are guesses: set your real ones.',
-  'A program’s limit on how many payouts an account may take, and its move to a live account after them, isn’t modelled.',
-  'Paper fills: no commissions or slippage, and a floor that trails intraday is checked when a trade closes.',
-  'Firms prohibit opposite positions across your accounts and deliberately blowing evaluations. Rotation avoids the first; the second is a judgment the firm makes.',
+  'Minute bars can’t say which price inside a bar came first. A trade’s worst and best prices are marked on the bars they happened on; a result that rests on a guess inside one bar is counted, and the stop is always taken first.',
+  'Only the LucidFlex 25K and 50K rules were read on the firm’s own pages (2 October 2026). The other programs are from public summaries: treat every number on them as a what-if.',
+  'Fees are not on the firms’ pages: set what you actually pay. Commission and slippage are assumptions too, which is why there are three cost settings to compare.',
+  'A pass is confirmed and a payout arrives on schedule here. In life the firm reviews both, and can refuse.',
+  'After its last allowed payout a funded account is moved to a live one by the firm: that is outside this simulation, and the slot buys a new attempt.',
+  'Firms prohibit opposite positions across your accounts and deliberately failing evaluations. The farm refuses the first; the second is a judgment the firm makes.',
 ];
 
 /** What every account in the farm trades, and how. */
@@ -68,15 +82,19 @@ export interface FarmSetup {
   fee: number | null;
   /** How many accounts run side by side. */
   slots: number;
-  /** Micros on every trade, by stage. */
+  /** The most micros to ask for on a trade, by stage: a cap, not an order size. */
   evalMicros: number;
   fundedMicros: number;
+  /** `cap`: ask for the cap every time, as far as the cushion carries it. `cushion`: a tenth of the cushion a trade (the Law of 10), up to the cap. */
+  sizing: 'cap' | 'cushion';
+  /** What every fill pays (see shared/fills.ts). */
+  cost: CostId;
   strategy: FarmStrategy;
   /** Rotate: each signal goes to the next account in turn. Copy: every account takes every signal. */
   share: 'rotate' | 'copy';
   /** A funded account stops for the day at its first winner. */
   fundedOneAndDone: boolean;
-  /** Buy the next attempt when one busts, up to this many attempts in all. */
+  /** Buy the next attempt when one is breached, up to this many attempts in all. */
   maxAttempts: number;
 }
 
@@ -85,7 +103,9 @@ export const FARM_DEFAULTS: FarmSetup = {
   fee: null,
   slots: 3,
   evalMicros: 5,
-  fundedMicros: 2,
+  fundedMicros: 3,
+  sizing: 'cap',
+  cost: 'base',
   strategy: { playbooks: ['support-resistance'], mode: 'every', manage: 'written', markets: ['NQ', 'ES', 'GC'] },
   share: 'rotate',
   fundedOneAndDone: true,
@@ -110,6 +130,8 @@ export function cleanSetup(raw: unknown): FarmSetup {
     slots: int(r.slots, 1, 10, FARM_DEFAULTS.slots),
     evalMicros: int(r.evalMicros, 1, 200, FARM_DEFAULTS.evalMicros),
     fundedMicros: int(r.fundedMicros, 1, 200, FARM_DEFAULTS.fundedMicros),
+    sizing: r.sizing === 'cushion' ? 'cushion' : 'cap',
+    cost: r.cost === 'gross' || r.cost === 'stressed' ? r.cost : 'base',
     strategy: {
       playbooks: playbooks.length ? [...new Set(playbooks)] : [...FARM_DEFAULTS.strategy.playbooks],
       mode: s.mode === 'fallback' || s.mode === 'by-day' ? s.mode : 'every',
@@ -122,10 +144,23 @@ export function cleanSetup(raw: unknown): FarmSetup {
   };
 }
 
+/** The risk policy a setup runs a stage on. */
+export function policyOf(setup: FarmSetup, phase: 'eval' | 'funded'): RiskPolicy {
+  const cap = phase === 'eval' ? setup.evalMicros : setup.fundedMicros;
+  return setup.sizing === 'cushion' ? { ...CUSHION_BASELINE, id: `cushion-${cap}`, name: `Cushion-based, up to ${cap}`, cap } : capPolicy(cap);
+}
+
+/** Why a setup can't be run at all (null: it can): a cap over the firm's ceiling is refused, not quietly shrunk. */
+export function setupProblem(setup: FarmSetup): string | null {
+  const program = FARM_PROGRAM_BY_ID[setup.programId];
+  if (!program) return 'No such program';
+  return (program.evalRules ? policyProblem(policyOf(setup, 'eval'), program.evalRules) : null) ?? policyProblem(policyOf(setup, 'funded'), program.fundedRules);
+}
+
 // ---- The run ---------------------------------------------------------------------------------------------
 
 export type FarmStage = 'empty' | 'eval' | 'funded' | 'parked' | 'busted';
-export type FarmEventKind = 'bought' | 'passed' | 'busted' | 'payout-ready' | 'paid' | 'trade';
+export type FarmEventKind = 'bought' | 'passed' | 'busted' | 'payout-ready' | 'paid' | 'trade' | 'skip' | 'note';
 
 export interface FarmEvent {
   /** Index into the run's days. */
@@ -138,11 +173,16 @@ export interface FarmEvent {
   text: string;
   /** Money in (a payout) or out (a fee), or a trade's result. */
   amount: number;
+  /** For a trade or a skip: why the size was what it was. */
+  why?: string;
+  /** The signal it came from. */
+  trade?: string;
 }
 
 /** One slot at the end of one day. */
 export interface FarmCell {
   stage: FarmStage;
+  status: AccountStatus | 'empty';
   account: string;
   balance: number;
   /** Where it started this account, where it fails, and what it's aiming for. */
@@ -157,6 +197,14 @@ export interface FarmCell {
   /** Days traded and best day share on this account, for its payout or pass rule. */
   tradingDays: number;
   bestShare: number | null;
+  /** Micros the firm allows it next session, and the lowest its cushion stood today, open trades included. */
+  allowed: number;
+  lowCushion: number;
+  /** Days that counted toward the payout this cycle, of how many it needs (funded accounts). */
+  profitDays: number;
+  profitDaysNeeded: number;
+  /** Why it is where it is. */
+  why: string;
 }
 
 export interface FarmRun {
@@ -173,25 +221,31 @@ export interface FarmRun {
   evalBusts: number;
   fundedBusts: number;
   payoutCount: number;
+  /** Trades taken, signals nothing could take, and what the fills paid in commission and slippage. */
+  taken: number;
+  skipped: number;
+  costs: number;
+  /** The day (index) the first payout was requested, and the cushion that account had left once it was paid. */
+  firstPayoutDay: number | null;
+  cushionAfterPayout: number | null;
+  /** The worst run of losing days in a row across the farm, in dollars. */
+  worstStreak: number;
+  /** Why the run couldn't start, when the setup is refused. */
+  refused: string | null;
 }
 
 interface Slot {
-  stage: FarmStage;
-  rules: PropRules | null;
+  account: Account | null;
+  rules: RuleSet | null;
   no: number;
-  balance: number;
-  peak: number;
-  bestDay: number;
-  tradingDays: number;
   last: string;
-  /** Becomes funded at the next open. */
-  promote: boolean;
+  /** The day (index) a requested payout arrives. */
+  due: number;
 }
 
-const rulesOf = (id: string | null) => (id ? (ACCOUNT_CATALOG.find((a) => a.id === id) ?? null) : null);
 const money = (n: number) => `${n < 0 ? '−' : ''}$${Math.abs(Math.round(n)).toLocaleString('en-US')}`;
-const floorOf = (s: Slot) => (s.rules ? Math.min(s.peak - s.rules.drawdown, s.rules.lockProfit == null ? Infinity : s.rules.size + s.rules.lockProfit) : 0);
-const tag = (s: Slot) => `${s.stage === 'eval' ? 'EVAL' : 'FUNDED'}-${s.no}`;
+const stageOf = (a: Account | null): FarmStage => (!a ? 'empty' : a.status === 'breached' || a.status === 'retired' || a.status === 'passed' ? 'busted' : a.status === 'parked' ? 'parked' : a.phase === 'eval' ? 'eval' : 'funded');
+const tag = (s: Slot) => (s.account ? `${s.account.phase === 'eval' ? 'EVAL' : 'FUNDED'}-${s.no}` : '');
 
 /** The trades the strategy takes on a day, out of everything the playbooks called. */
 export function farmTrades(trades: PaperTrade[], s: FarmStrategy): PaperTrade[] {
@@ -201,131 +255,167 @@ export function farmTrades(trades: PaperTrade[], s: FarmStrategy): PaperTrade[] 
 
 /**
  * Runs the farm over `dayLists` (one list of the strategy's trades a day, in order). `labels` names the
- * days. Deterministic: the same days in give the same farm out.
+ * days. Deterministic: the same days in give the same farm out. `quiet` leaves out the feed and the
+ * day-by-day cells, for the odds, which only need the totals.
  */
-export function runFarm(dayLists: PaperTrade[][], setup: FarmSetup, labels?: string[]): FarmRun {
+export function runFarm(dayLists: PaperTrade[][], setup: FarmSetup, labels?: string[], o: { quiet?: boolean } = {}): FarmRun {
   const program = FARM_PROGRAM_BY_ID[setup.programId] ?? FARM_PROGRAMS[0]!;
-  const evalRules = rulesOf(program.evalId);
-  const fundedRules = rulesOf(program.fundedId)!;
   const fee = setup.fee ?? program.fee;
-  const slots: Slot[] = Array.from({ length: setup.slots }, () => ({ stage: 'empty' as FarmStage, rules: null, no: 0, balance: 0, peak: 0, bestDay: 0, tradingDays: 0, last: '', promote: false }));
-  const run: FarmRun = { days: labels ?? dayLists.map((_, i) => String(i + 1)), cells: [], events: [], cash: [], fees: 0, payouts: 0, attempts: 0, passed: 0, evalBusts: 0, fundedBusts: 0, payoutCount: 0 };
+  const cost = COSTS[setup.cost] ?? COSTS.base;
+  const isManaged = setup.strategy.manage !== 'written';
+  const run: FarmRun = { days: labels ?? dayLists.map((_, i) => String(i + 1)), cells: [], events: [], cash: [], fees: 0, payouts: 0, attempts: 0, passed: 0, evalBusts: 0, fundedBusts: 0, payoutCount: 0, taken: 0, skipped: 0, costs: 0, firstPayoutDay: null, cushionAfterPayout: null, worstStreak: 0, refused: setupProblem(setup) };
+  if (run.refused) return run;
+  const slots: Slot[] = Array.from({ length: setup.slots }, () => ({ account: null, rules: null, no: 0, last: '', due: 0 }));
+  const policies = { eval: policyOf(setup, 'eval'), funded: policyOf(setup, 'funded') };
   let cash = 0;
   let turn = 0;
-  const open = (s: Slot, rules: PropRules, stage: FarmStage) => {
-    s.stage = stage;
-    s.rules = rules;
-    s.balance = rules.size;
-    s.peak = rules.size;
-    s.bestDay = 0;
-    s.tradingDays = 0;
-    s.last = '';
-  };
-  const steady = (s: Slot) => {
-    const r = s.rules!;
-    const profit = s.balance - r.size;
-    if (r.consistencyPercent >= 100) return true;
-    const base = r.consistencyBasis === 'profitTarget' ? r.profitTarget : profit;
-    return base > 0 && s.bestDay / base <= r.consistencyPercent / 100 + 1e-9;
-  };
+  let streak = 0;
 
   for (let d = 0; d < dayLists.length; d++) {
-    const event = (slot: number, kind: FarmEventKind, text: string, amount = 0) => run.events.push({ day: d, slot, kind, account: slots[slot]!.stage === 'empty' ? '' : tag(slots[slot]!), text, amount });
+    const label = run.days[d] ?? String(d + 1);
+    const event = (slot: number, kind: FarmEventKind, text: string, amount = 0, extra: Partial<FarmEvent> = {}) => {
+      if (!o.quiet) run.events.push({ day: d, slot, kind, account: tag(slots[slot]!), text, amount, ...extra });
+    };
+    const openOn = (s: Slot, rules: RuleSet, linked: string | null = null) => {
+      s.rules = rules;
+      s.account = openAccount(rules, { id: `${rules.phase === 'eval' ? 'EVAL' : 'FUNDED'}-${s.no}`, day: label, linked });
+      s.last = '';
+    };
     // The open: payouts land, passes become funded accounts, empty slots buy their next attempt.
     /** Paid today: back in the rotation tomorrow. */
     const resting = new Set<number>();
     slots.forEach((s, i) => {
-      if (s.stage === 'parked') {
-        const profit = s.balance - s.rules!.size;
-        const paid = Math.round(Math.min(profit, program.payoutCap ?? Infinity) * program.split);
-        cash += paid;
-        run.payouts += paid;
+      const a = s.account;
+      if (a?.status === 'parked' && d >= s.due) {
+        const paid = settlePayout(a, s.rules!, label);
+        if ('error' in paid) return;
+        cash += paid.received;
+        run.payouts += paid.received;
         run.payoutCount++;
-        s.stage = 'funded';
-        event(i, 'paid', `Paid ${money(paid)} (${Math.round(program.split * 100)}% of ${money(Math.min(profit, program.payoutCap ?? Infinity))}). Back in the rotation tomorrow.`, paid);
-        open(s, s.rules!, 'funded');
+        run.cushionAfterPayout ??= Math.round(cushionOf(a, s.rules!));
+        event(i, 'paid', `Paid ${money(paid.received)} (${Math.round(s.rules!.payout!.split * 100)}% of ${money(paid.withdrawn)}). ${(a.status as AccountStatus) === 'retired' ? 'That was its last payout: the firm moves it on.' : `Back in the rotation tomorrow with ${money(cushionOf(a, s.rules!))} of cushion.`}`, paid.received);
         resting.add(i);
-      } else if (s.promote) {
-        s.promote = false;
-        cash -= program.activation;
-        run.fees += program.activation;
-        open(s, fundedRules, 'funded');
-        event(i, 'bought', `Funded account opened${program.activation ? ` (${money(program.activation)} activation)` : ''}.`, -program.activation);
-      } else if ((s.stage === 'empty' || s.stage === 'busted') && run.attempts < setup.maxAttempts) {
+      } else if (a?.status === 'pass-pending') {
+        confirmPass(a, label);
+        const from = a.id;
+        openOn(s, program.fundedRules, from);
+        event(i, 'bought', `Pass confirmed: funded account opened at ${s.account!.allowedMicros} micros.`, 0);
+      }
+      const now = s.account;
+      if ((!now || now.status === 'breached' || now.status === 'retired') && run.attempts < setup.maxAttempts) {
         run.attempts++;
         s.no = run.attempts;
         cash -= fee;
         run.fees += fee;
-        open(s, evalRules ?? fundedRules, evalRules ? 'eval' : 'funded');
-        event(i, 'bought', `${evalRules ? 'Evaluation' : 'Funded account'} bought for ${money(fee)}.`, -fee);
+        openOn(s, program.evalRules ?? program.fundedRules);
+        s.account!.fees = fee;
+        event(i, 'bought', `${program.evalRules ? 'Evaluation' : 'Funded account'} bought for ${money(fee)}.`, -fee);
       }
     });
 
     // The session: each signal goes to the next account in turn, or to all of them.
-    const active = slots.map((s, i) => ({ s, i })).filter((x) => !resting.has(x.i) && (x.s.stage === 'eval' || x.s.stage === 'funded'));
-    const dayPnl = new Map<number, number>();
-    const dayTrades = new Map<number, number>();
-    const losses = new Map<number, number>();
-    const done = new Set<number>();
-    const take = (x: { s: Slot; i: number }, t: PaperTrade) => {
-      const { s, i } = x;
-      if (done.has(i) || (s.stage !== 'eval' && s.stage !== 'funded')) return;
-      const r = s.rules!;
-      const n = Math.min(s.stage === 'eval' ? setup.evalMicros : setup.fundedMicros, r.maxMicros);
-      const pnl = Math.round(n * t.dollars * 100) / 100;
-      s.balance += pnl;
-      dayPnl.set(i, (dayPnl.get(i) ?? 0) + pnl);
-      dayTrades.set(i, (dayTrades.get(i) ?? 0) + 1);
-      s.last = `${t.side === 'long' ? 'LONG' : 'SHORT'} ${n} ${t.symbol} · ${pnl >= 0 ? '+' : '−'}$${Math.abs(Math.round(pnl))}`;
-      event(i, 'trade', `${t.side === 'long' ? 'Long' : 'Short'} ${n} micro ${t.symbol} (${PLAYBOOK_BY_ID[t.playbook].short}): ${pnl >= 0 ? '+' : '−'}$${Math.abs(Math.round(pnl))}`, pnl);
-      if (r.drawdownType === 'trailing-intraday') s.peak = Math.max(s.peak, s.balance);
-      if (s.balance <= floorOf(s)) {
-        if (s.stage === 'eval') run.evalBusts++;
-        else run.fundedBusts++;
-        event(i, 'busted', `Hit the drawdown floor at ${money(s.balance)}.`, 0);
-        s.stage = 'busted';
-        done.add(i);
-        return;
-      }
-      if (pnl < 0) losses.set(i, (losses.get(i) ?? 0) + 1);
-      const today = dayPnl.get(i)!;
-      if ((losses.get(i) ?? 0) >= DAILY_STOP.losses || (r.dailyLossLimit != null && today <= -r.dailyLossLimit) || (s.stage === 'funded' && setup.fundedOneAndDone && pnl > 0)) done.add(i);
+    const sessions = slots.map((s, i) => (s.account && canTrade(s.account.status) && !resting.has(i) ? new DaySession(s.account, s.rules!, label) : null));
+    const openCushion = slots.map((s) => (s.account ? cushionOf(s.account, s.rules!) : 0));
+    const done = (i: number) => {
+      const s = sessions[i]!;
+      const a = slots[i]!.account!;
+      return !canTrade(a.status) || !!s.stopped || s.lossesToday >= DAILY_STOP.losses || (a.phase === 'funded' && setup.fundedOneAndDone && s.winsToday > 0);
     };
     for (const t of dayLists[d]!) {
-      const ready = active.filter((x) => !done.has(x.i) && (x.s.stage === 'eval' || x.s.stage === 'funded'));
+      const at = t.entryAt + 60_000;
+      for (const s of sessions) s?.advance(at);
+      const ready = sessions.map((_, i) => i).filter((i) => sessions[i] && !done(i));
       if (!ready.length) break;
-      if (setup.share === 'copy') ready.forEach((x) => take(x, t));
-      else take(ready[turn++ % ready.length]!, t);
+      const order = setup.share === 'copy' ? ready : ready.map((_, k) => ready[(turn + k) % ready.length]!);
+      let placed = false;
+      let lastWhy = '';
+      for (const i of order) {
+        const s = sessions[i]!;
+        const a = slots[i]!.account!;
+        const rules = slots[i]!.rules!;
+        const held = sessions.flatMap((x, j) => (x ? x.positions.map((p) => ({ account: tag(slots[j]!), ...p })) : []));
+        const conflict = crossAccountConflict(t.symbol, t.side, held, tag(slots[i]!));
+        const decision = conflict
+          ? null
+          : sizeTrade({ symbol: t.symbol, stopPoints: Math.abs(t.entry - t.stop), policy: policies[a.phase], cost, allowedMicros: a.allowedMicros, openMicros: s.openMicros, cushion: cushionOf(a, rules), openRisk: s.openRisk, dayStartCushion: openCushion[i]!, dayLoss: Math.max(0, -s.dayPnl), dailyLossLimit: rules.dailyLossLimit });
+        if (!decision?.micros) {
+          lastWhy ||= conflict ?? decision!.why;
+          if (setup.share === 'copy') {
+            run.skipped++;
+            event(i, 'skip', `${t.side === 'long' ? 'Long' : 'Short'} ${t.symbol} (${PLAYBOOK_BY_ID[t.playbook].short}) not taken.`, 0, { why: conflict ?? decision!.why, trade: t.id });
+          }
+          continue;
+        }
+        const fill = fillOf(t, decision.micros, cost, { managed: isManaged, id: `${t.id}#${i}` });
+        if (s.add(fill)) continue;
+        placed = true;
+        run.taken++;
+        run.costs += fill.costs;
+        const pnl = Math.round(fill.pnlPoints * fill.pointValue * fill.micros - fill.costs);
+        slots[i]!.last = `${t.side === 'long' ? 'LONG' : 'SHORT'} ${decision.micros} ${t.symbol} · ${pnl >= 0 ? '+' : '−'}$${Math.abs(pnl)}`;
+        event(i, 'trade', `${t.side === 'long' ? 'Long' : 'Short'} ${decision.micros} micro ${t.symbol} (${PLAYBOOK_BY_ID[t.playbook].short}): ${pnl >= 0 ? '+' : '−'}$${Math.abs(pnl)}`, pnl, { why: decision.why, trade: t.id });
+        if (setup.share !== 'copy') break;
+      }
+      if (setup.share !== 'copy') {
+        if (placed) turn++;
+        else {
+          run.skipped++;
+          event(order[0]!, 'skip', `${t.side === 'long' ? 'Long' : 'Short'} ${t.symbol} (${PLAYBOOK_BY_ID[t.playbook].short}) not taken by any account.`, 0, { why: lastWhy, trade: t.id });
+        }
+      }
     }
 
     // The close: the floor trails, and each account is checked against its pass or payout rule.
+    const reports = sessions.map((s) => s?.close() ?? null);
     slots.forEach((s, i) => {
-      if (s.stage !== 'eval' && s.stage !== 'funded') return;
-      const r = s.rules!;
-      const today = dayPnl.get(i) ?? 0;
-      if (dayTrades.get(i)) s.tradingDays++;
-      s.bestDay = Math.max(s.bestDay, today);
-      if (r.drawdownType === 'trailing-eod') s.peak = Math.max(s.peak, s.balance);
-      const profit = s.balance - r.size;
-      if (profit >= r.profitTarget && s.tradingDays >= r.minTradingDays && steady(s)) {
-        if (s.stage === 'eval') {
-          run.passed++;
-          s.promote = true;
-          event(i, 'passed', `Passed: ${money(s.balance)} is at or above the ${money(r.size + r.profitTarget)} target.`, 0);
-        } else {
-          event(i, 'payout-ready', `Payout ready: ${money(profit)} of profit over ${s.tradingDays} days. Parked until paid.`, 0);
-          s.stage = 'parked';
+      const a = s.account;
+      const rep = reports[i];
+      if (!a || !rep) return;
+      const rules = s.rules!;
+      if (a.status === 'breached') {
+        if (a.phase === 'eval') run.evalBusts++;
+        else run.fundedBusts++;
+        event(i, 'busted', `${a.why} (${money(a.balance)}).`, 0);
+      } else if (a.status === 'pass-pending') {
+        run.passed++;
+        event(i, 'passed', `Passed: ${money(a.balance)} with every rule met. Waiting for the firm to confirm.`, 0);
+      } else if (a.status === 'payout-eligible') {
+        const amount = payoutCheck(a, rules).amount;
+        if (!requestPayout(a, rules, label, { key: `${a.id}:${a.payouts + 1}` })) {
+          s.due = d + rules.payout!.processingDays;
+          run.firstPayoutDay ??= d;
+          event(i, 'payout-ready', `Payout of ${money(amount)} requested. Parked until it is paid${rules.payout!.floorOnRequest != null ? `; the floor is now ${money(floorOf(a, rules))}` : ''}.`, 0);
         }
       }
     });
-    run.cells.push(slots.map((s, i) => {
-      const r = s.rules;
-      const profit = r ? s.balance - r.size : 0;
-      const base = r ? (r.consistencyBasis === 'profitTarget' ? r.profitTarget : profit) : 0;
-      return { stage: s.stage, account: s.stage === 'empty' ? '' : s.stage === 'busted' ? `#${s.no}` : `${s.promote || s.stage === 'eval' ? 'EVAL' : 'FUNDED'}-${s.no}`, balance: Math.round(s.balance), size: r?.size ?? 0, floor: r ? Math.round(floorOf(s)) : 0, target: r ? r.size + r.profitTarget : 0, pnl: Math.round(dayPnl.get(i) ?? 0), trades: dayTrades.get(i) ?? 0, last: s.last, tradingDays: s.tradingDays, bestShare: base > 0 ? s.bestDay / base : null };
-    }));
+    cash = Math.round(cash * 100) / 100;
+    if (!o.quiet) {
+      run.cells.push(slots.map((s, i) => {
+        const a = s.account;
+        const r = s.rules;
+        const rep = reports[i];
+        if (!a || !r) return { stage: 'empty', status: 'empty', account: '', balance: 0, size: 0, floor: 0, target: 0, pnl: 0, trades: 0, last: '', tradingDays: 0, bestShare: null, allowed: 0, lowCushion: 0, profitDays: 0, profitDaysNeeded: 0, why: 'No attempts left to buy' };
+        const profit = a.balance - a.start;
+        const funded = a.phase === 'funded';
+        const base = funded ? a.balance - a.cycle.startBalance : r.consistencyBasis === 'profitTarget' ? r.profitTarget : profit;
+        const best = funded ? a.cycle.bestDay : a.bestDay;
+        const stage = stageOf(a);
+        return {
+          stage, status: a.status, account: stage === 'busted' ? `#${s.no}` : a.id, balance: Math.round(a.balance), size: a.start, floor: Math.round(floorOf(a, r)),
+          target: funded ? a.start + (r.payout?.minProfit ?? 0) : a.start + r.profitTarget, pnl: Math.round(rep?.pnl ?? 0), trades: rep?.fills ?? 0, last: s.last,
+          tradingDays: funded ? a.cycle.tradingDays : a.tradingDays, bestShare: base > 0 ? best / base : null, allowed: a.allowedMicros, lowCushion: Math.round(rep?.lowCushion ?? cushionOf(a, r)),
+          profitDays: a.cycle.profitDays, profitDaysNeeded: r.payout?.profitDays ?? 0, why: a.why,
+        };
+      }));
+    }
+    // The worst run of losing days in a row, across every account.
+    const dayMove = reports.reduce((sum, r) => sum + (r?.pnl ?? 0), 0);
+    streak = dayMove < 0 ? streak + dayMove : 0;
+    run.worstStreak = Math.min(run.worstStreak, streak);
     run.cash.push(Math.round(cash));
   }
+  run.costs = Math.round(run.costs);
+  run.worstStreak = Math.round(run.worstStreak);
   return run;
 }
 
@@ -343,8 +433,9 @@ export interface FarmOdds {
   p10: number;
   p50: number;
   p90: number;
-  /** The share of runs that ended with more paid out than spent on fees. */
+  /** The share of runs that ended with more paid out than spent on fees, with the range that share could really be (95%). */
   ahead: number;
+  aheadRange: [number, number];
   /** Averages over the runs. */
   attempts: number;
   passed: number;
@@ -353,9 +444,21 @@ export interface FarmOdds {
   paid: number;
   /** Of the attempts made, the share that passed (or, straight to funded, reached a payout). */
   passRate: number;
+  /** The share of runs that reached a first payout, and the days it took in the middle one that did. */
+  payoutRate: number;
+  daysToPayout: number | null;
+  /** The cushion an account had left after its first payout, in the middle run. */
+  cushionAfterPayout: number | null;
+  /** The worst run of losing days in a row, in the middle run and in a bad one. */
+  worstStreak: number;
+  worstStreakBad: number;
+  /** What the redraws were drawn from: real days, and the trades on them. */
+  sampleDays: number;
+  sampleTrades: number;
+  refused: string | null;
 }
 
-function rng(seed: number) {
+export function rng(seed: number) {
   let a = seed >>> 0;
   return () => {
     a = (a + 0x6d2b79f5) >>> 0;
@@ -366,29 +469,61 @@ function rng(seed: number) {
   };
 }
 
+/** The range a share measured on `n` tries could really be (Wilson, 95%). */
+export function shareRange(share: number, n: number): [number, number] {
+  if (!n) return [0, 1];
+  const z = 1.96;
+  const mid = (share + (z * z) / (2 * n)) / (1 + (z * z) / n);
+  const half = (z * Math.sqrt((share * (1 - share)) / n + (z * z) / (4 * n * n))) / (1 + (z * z) / n);
+  return [Math.max(0, mid - half), Math.min(1, mid + half)];
+}
+
+/** `horizon` days drawn from the real ones in runs of `block` days in a row, so what carries from one day to the next is kept. */
+export function drawDays<X>(pool: X[], horizon: number, rand: () => number, block = 1): X[] {
+  const out: X[] = [];
+  while (out.length < horizon) {
+    const start = Math.floor(rand() * pool.length);
+    for (let k = 0; k < block && out.length < horizon; k++) out.push(pool[(start + k) % pool.length]!);
+  }
+  return out;
+}
+
 /** The same farm over many redraws of the real days: what it nets, and how often it ends ahead. */
-export function farmOdds(dayLists: PaperTrade[][], setup: FarmSetup, cfg: { runs?: number; horizon?: number; seed?: number } = {}): FarmOdds {
+export function farmOdds(dayLists: PaperTrade[][], setup: FarmSetup, cfg: { runs?: number; horizon?: number; seed?: number; block?: number } = {}): FarmOdds {
   const runs = cfg.runs ?? 300;
   const horizon = cfg.horizon ?? 60;
-  const empty: FarmOdds = { runs: 0, horizon, p10: 0, p50: 0, p90: 0, ahead: 0, attempts: 0, passed: 0, payouts: 0, fees: 0, paid: 0, passRate: 0 };
-  if (!dayLists.length || !dayLists.some((l) => l.length)) return empty;
+  const sampleTrades = dayLists.reduce((a, l) => a + l.length, 0);
+  const empty: FarmOdds = { runs: 0, horizon, p10: 0, p50: 0, p90: 0, ahead: 0, aheadRange: [0, 1], attempts: 0, passed: 0, payouts: 0, fees: 0, paid: 0, passRate: 0, payoutRate: 0, daysToPayout: null, cushionAfterPayout: null, worstStreak: 0, worstStreakBad: 0, sampleDays: dayLists.length, sampleTrades, refused: setupProblem(setup) };
+  if (empty.refused || !dayLists.length || !sampleTrades) return empty;
   const rand = rng(cfg.seed ?? 11);
   const nets: number[] = [];
+  const firsts: number[] = [];
+  const cushions: number[] = [];
+  const streaks: number[] = [];
   const sum = { attempts: 0, passed: 0, payouts: 0, fees: 0, paid: 0 };
-  const straight = !FARM_PROGRAM_BY_ID[setup.programId]?.evalId;
+  const straight = !FARM_PROGRAM_BY_ID[setup.programId]?.evalRules;
   for (let r = 0; r < runs; r++) {
-    const draw = Array.from({ length: horizon }, () => dayLists[Math.floor(rand() * dayLists.length)]!);
-    const f = runFarm(draw, setup);
+    const f = runFarm(drawDays(dayLists, horizon, rand, cfg.block ?? 1), setup, undefined, { quiet: true });
     nets.push(f.cash[f.cash.length - 1] ?? 0);
+    if (f.firstPayoutDay != null) firsts.push(f.firstPayoutDay + 1);
+    if (f.cushionAfterPayout != null) cushions.push(f.cushionAfterPayout);
+    streaks.push(f.worstStreak);
     sum.attempts += f.attempts;
     sum.passed += straight ? Math.min(f.attempts, f.payoutCount) : f.passed;
     sum.payouts += f.payoutCount;
     sum.fees += f.fees;
     sum.paid += f.payouts;
   }
-  nets.sort((a, b) => a - b);
-  const at = (q: number) => nets[Math.min(nets.length - 1, Math.floor(q * nets.length))]!;
-  return { runs, horizon, p10: at(0.1), p50: at(0.5), p90: at(0.9), ahead: nets.filter((n) => n > 0).length / runs, attempts: sum.attempts / runs, passed: sum.passed / runs, payouts: sum.payouts / runs, fees: sum.fees / runs, paid: sum.paid / runs, passRate: sum.attempts ? sum.passed / sum.attempts : 0 };
+  const sorted = (xs: number[]) => [...xs].sort((a, b) => a - b);
+  const at = (xs: number[], q: number) => xs[Math.min(xs.length - 1, Math.floor(q * xs.length))]!;
+  const n = sorted(nets);
+  const ahead = nets.filter((x) => x > 0).length / runs;
+  return {
+    runs, horizon, p10: at(n, 0.1), p50: at(n, 0.5), p90: at(n, 0.9), ahead, aheadRange: shareRange(ahead, runs),
+    attempts: sum.attempts / runs, passed: sum.passed / runs, payouts: sum.payouts / runs, fees: sum.fees / runs, paid: sum.paid / runs, passRate: sum.attempts ? sum.passed / sum.attempts : 0,
+    payoutRate: firsts.length / runs, daysToPayout: firsts.length ? at(sorted(firsts), 0.5) : null, cushionAfterPayout: cushions.length ? at(sorted(cushions), 0.5) : null,
+    worstStreak: at(sorted(streaks), 0.5), worstStreakBad: at(sorted(streaks), 0.1), sampleDays: dayLists.length, sampleTrades, refused: null,
+  };
 }
 
 /** The live farm as the boards show it: the setup, when it started, and the run so far on the paper book. */

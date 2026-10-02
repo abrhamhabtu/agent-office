@@ -1,5 +1,6 @@
 import type { PropRules } from './trading.js';
 import { PROP_ACCOUNTS } from './trading.js';
+import { ruleSetFor, toPropRules } from './prop-rules.js';
 
 // More accounts for the eval simulator to try a strategy on: the other sizes of the firms the desk already
 // trades, and the straight-to-funded programs. They are for simulating only: the risk guard, the proposals'
@@ -24,10 +25,11 @@ const MORE: PropRules[] = [
   funded('fundednext-funded-25k', 'FundedNext', 'Rapid 25K (funded)', 25_000, 500, 1000, { lockProfit: 0, maxMicros: 15, consistencyPercent: 40, minTradingDays: 3 }),
   funded('fundednext-funded-50k', 'FundedNext', 'Rapid 50K (funded)', 50_000, 500, 2000, { lockProfit: 0, maxMicros: 25, consistencyPercent: 40, minTradingDays: 3 }),
   // The 25K sizes of the firms already here.
-  // A LucidFlex account once its evaluation is passed: five profit days and $500 for a payout, no consistency rule.
-  funded('lucidflex-funded-25k', 'Lucid', 'LucidFlex 25K (funded)', 25_000, 500, 1000, { consistencyPercent: 100, minTradingDays: 5 }),
-  funded('lucidflex-funded-50k', 'Lucid', 'LucidFlex 50K (funded)', 50_000, 500, 2000, { consistencyPercent: 100, minTradingDays: 5 }),
-  eval_('lucidflex-25k', 'Lucid', 'LucidFlex 25K', 25_000, 1250, 1000, { minTradingDays: 5 }),
+  // LucidFlex 25K and the funded accounts come from the versioned rule sets (shared/prop-rules.ts), which
+  // were read on the firm's own pages: these are those rules as the older simulators read an account.
+  toPropRules(ruleSetFor('lucidflex-25k', 'eval')!),
+  toPropRules(ruleSetFor('lucidflex-25k', 'funded')!),
+  toPropRules(ruleSetFor('lucidflex-50k', 'funded')!),
   funded('luciddirect-25k', 'Lucid', 'LucidDirect 25K', 25_000, 1500, 1000, { consistencyPercent: 20, minTradingDays: 5 }),
   eval_('apex-eod-25k', 'Apex', 'Apex 4.0 EOD 25K', 25_000, 1500, 1000, { lockProfit: 100, dailyLossLimit: 500, maxMicros: 40, consistencyPercent: 100 }),
   funded('tof-25k', 'Top One', 'Ignite 25K (funded)', 25_000, 1250, 1000, { dailyLossLimit: 500, maxMicros: 10, consistencyPercent: 15 }),

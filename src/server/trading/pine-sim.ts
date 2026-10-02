@@ -1,11 +1,16 @@
 import type { Bar, PineMetrics, PineParams, Symbol } from '../../shared/trading.js';
 import { INSTRUMENTS } from '../../shared/trading.js';
+import { costPerMicro, exitOnBar, PINE_PARITY, type CostModel, type FillPolicy } from '../../shared/fills.js';
 
 // A faithful replay of the owner's "VWAP Double Break Suite" Pine script on real bars, so a change to it
 // can be tested before it's ever run live. It follows the script statement by statement: NY VWAP from the
 // 09:30 ET open, the opening range, the window, the trap then the close back through NY VWAP (the DB),
 // the stop at the far side of the range (pulled in to the micro's dollar cap), the target at 2R, and one
 // re-entry (DB2) after a stop. It runs on the chart's timeframe (5 minutes), built from 1-minute bars.
+//
+// By default it fills the way the script does on the chart (Pine parity: the target is looked at first),
+// so the replay can be checked against TradingView. Given the realistic policy it fills the way the rest
+// of the office does (stop first, a gap through the stop fills at the open): that is the one to judge by.
 
 export type { PineParams };
 export const V1_PARAMS: PineParams = { orMinutes: 15, stopBuffer: 1, maxLoss: 325, rMultiple: 2, window: '1000-1200', recovery: true };
@@ -25,6 +30,8 @@ export interface SimTrade {
   /** Result in R, and in dollars for one micro. */
   r: number;
   dollars: number;
+  /** One bar touched both the stop and the target: which came first is the fill policy's guess. */
+  ambiguous?: boolean;
 }
 
 const etFormat = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
@@ -61,7 +68,7 @@ const OPEN = 9 * 60 + 30;
 const CLOSE = 16 * 60;
 
 /** One New York session of bars through the script. */
-function simDay(day: string, symbol: Symbol, bars: Bar[], p: PineParams, tick: number): SimTrade[] {
+function simDay(day: string, symbol: Symbol, bars: Bar[], p: PineParams, tick: number, policy: FillPolicy): SimTrade[] {
   const pv = INSTRUMENTS[symbol].microPointValue;
   const [winFrom, winTo] = session(p.window);
   const capPts = p.maxLoss / pv;
@@ -88,10 +95,11 @@ function simDay(day: string, symbol: Symbol, bars: Bar[], p: PineParams, tick: n
   let prevClose = NaN;
   let prevVwap = NaN;
 
-  const settle = (outcome: SimTrade['outcome'], exit: number) => {
+  const settle = (outcome: SimTrade['outcome'], exit: number, ambiguous = false) => {
     const risk = Math.abs(entry - sl);
-    const r = outcome === 'win' ? p.rMultiple : outcome === 'loss' ? -1 : (tradeDir * (exit - entry)) / risk;
-    trades.push({ day, symbol, dir: tradeDir as 1 | -1, ts: tradeTs, entry, stop: sl, target: tp, second: tradeIs2, outcome, r, dollars: r * risk * pv });
+    // A stop filled at its own price is exactly one risk; one filled past it (a gap) is what it was.
+    const r = outcome === 'win' ? p.rMultiple : outcome === 'loss' && exit === sl ? -1 : (tradeDir * (exit - entry)) / risk;
+    trades.push({ day, symbol, dir: tradeDir as 1 | -1, ts: tradeTs, entry, stop: sl, target: tp, second: tradeIs2, outcome, r, dollars: r * risk * pv, ...(ambiguous ? { ambiguous } : {}) });
   };
 
   bars.forEach((b, i) => {
@@ -169,17 +177,17 @@ function simDay(day: string, symbol: Symbol, bars: Bar[], p: PineParams, tick: n
       if (db2Short) db2Used = true;
       else shortFired = true;
     }
-    // A trade already open is checked on the bars after its entry; the target is looked at first, as in the script.
-    if (tradeDir !== 0 && i > tradeIdx) {
-      const hitTp = tradeDir === 1 ? b.high >= tp : b.low <= tp;
-      const hitSl = tradeDir === 1 ? b.low <= sl : b.high >= sl;
-      if (hitTp) {
-        settle('win', tp);
+    // A trade already open is checked on the bars after its entry, by the fill policy: under Pine parity the
+    // target is looked at first, as in the script.
+    const fill = tradeDir !== 0 && i > tradeIdx ? exitOnBar(tradeDir === 1 ? 'long' : 'short', sl, tp, b, policy) : null;
+    if (fill) {
+      if (fill.outcome === 'win') {
+        settle('win', fill.price, fill.ambiguous);
         dayDone = true;
         recoverDir = 0;
         tradeDir = 0;
-      } else if (hitSl) {
-        settle('loss', sl);
+      } else {
+        settle('loss', fill.price, fill.ambiguous);
         if (p.recovery && !tradeIs2 && !db2Used && inWindow) recoverDir = tradeDir === 1 ? 1 : -1;
         else {
           dayDone = true;
@@ -211,10 +219,19 @@ export function sessionsOf(bars1m: Bar[], minutes = 5): Map<string, Bar[]> {
   return days;
 }
 
-export function simulate(sessions: Map<string, Bar[]>, symbol: Symbol, p: PineParams, only?: Set<string>): SimTrade[] {
+export function simulate(sessions: Map<string, Bar[]>, symbol: Symbol, p: PineParams, only?: Set<string>, policy: FillPolicy = PINE_PARITY): SimTrade[] {
   const out: SimTrade[] = [];
-  for (const [day, bars] of [...sessions].sort(([a], [b]) => (a < b ? -1 : 1))) if (!only || only.has(day)) out.push(...simDay(day, symbol, bars, p, INSTRUMENTS[symbol].tick));
+  for (const [day, bars] of [...sessions].sort(([a], [b]) => (a < b ? -1 : 1))) if (!only || only.has(day)) out.push(...simDay(day, symbol, bars, p, INSTRUMENTS[symbol].tick, policy));
   return out;
+}
+
+/** The same trades after a cost model: each one's dollars and R less its round trip. */
+export function afterCosts(trades: SimTrade[], cost: CostModel): SimTrade[] {
+  return trades.map((t) => {
+    const risk = Math.abs(t.entry - t.stop) * INSTRUMENTS[t.symbol].microPointValue;
+    const dollars = t.dollars - costPerMicro(t.symbol, t.outcome, cost);
+    return { ...t, dollars, r: risk > 0 ? dollars / risk : t.r };
+  });
 }
 
 export function metrics(trades: SimTrade[]): PineMetrics {

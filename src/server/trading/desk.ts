@@ -607,7 +607,7 @@ export class TradingDesk {
     f.notified = events.length;
     this.save();
     if (!f.discord) return;
-    const icon = { bought: '🧾', passed: '✅', busted: '💥', 'payout-ready': '💰', paid: '🏦', trade: '📈' } as const;
+    const icon = { bought: '🧾', passed: '✅', busted: '💥', 'payout-ready': '💰', paid: '🏦', trade: '📈', skip: '⏭️', note: '📝' } as const;
     for (const e of fresh.slice(-10)) {
       try {
         await fetch(f.discord, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ username: 'Prop Farm (paper)', content: `${icon[e.kind]} **${e.account || `Slot ${e.slot + 1}`}** · ${e.text}` }), signal: AbortSignal.timeout(5000) });

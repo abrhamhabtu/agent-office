@@ -289,6 +289,15 @@ export interface PaperTrade {
   ind?: TradeInd;
   /** How it would have come out managed other ways (stop to breakeven, half off, trailed, added to), in R. */
   alt?: ManagedR;
+  /** The furthest it went against and for the trade while open, in points, and when: what an account's equity did inside it. */
+  mae?: number;
+  mfe?: number;
+  maeAt?: number;
+  mfeAt?: number;
+  /** One bar touched both its stop and its target: which came first is the fill policy's guess (see shared/fills.ts). */
+  ambiguous?: boolean;
+  /** A bar opened past its stop, so it lost more than one risk. */
+  gapped?: boolean;
 }
 
 export interface PlaybookStats {
@@ -419,8 +428,11 @@ export interface PropRules {
 
 /** The firms Abe is trying out, with the rules Trade Pilot keeps for them (verify at checkout: firms change them). */
 export const PROP_ACCOUNTS: PropRules[] = [
-  { id: 'lucidflex-50k', firm: 'Lucid', program: 'LucidFlex 50K', size: 50_000, profitTarget: 3000, drawdown: 2000, drawdownType: 'trailing-eod', lockProfit: 0, dailyLossLimit: null, maxMicros: 50, consistencyPercent: 50, consistencyBasis: 'totalProfit', minTradingDays: 5, kind: 'eval' },
-  { id: 'lucidflex-100k', firm: 'Lucid', program: 'LucidFlex 100K', size: 100_000, profitTarget: 6000, drawdown: 3000, drawdownType: 'trailing-eod', lockProfit: 0, dailyLossLimit: null, maxMicros: 100, consistencyPercent: 50, consistencyBasis: 'totalProfit', minTradingDays: 5, kind: 'eval' },
+  // LucidFlex: 40 and 60 micros, a floor that locks at $100 over the start, and no published minimum days
+  // (two is the least its 50% consistency rule allows), as read on the firm's pages on 2 October 2026.
+  // The 50K agrees with its rule set in shared/prop-rules.ts.
+  { id: 'lucidflex-50k', firm: 'Lucid', program: 'LucidFlex 50K', size: 50_000, profitTarget: 3000, drawdown: 2000, drawdownType: 'trailing-eod', lockProfit: 100, dailyLossLimit: null, maxMicros: 40, consistencyPercent: 50, consistencyBasis: 'totalProfit', minTradingDays: 2, kind: 'eval' },
+  { id: 'lucidflex-100k', firm: 'Lucid', program: 'LucidFlex 100K', size: 100_000, profitTarget: 6000, drawdown: 3000, drawdownType: 'trailing-eod', lockProfit: 100, dailyLossLimit: null, maxMicros: 60, consistencyPercent: 50, consistencyBasis: 'totalProfit', minTradingDays: 2, kind: 'eval' },
   { id: 'topstep-50k', firm: 'Topstep', program: 'Combine 50K', size: 50_000, profitTarget: 3000, drawdown: 2000, drawdownType: 'trailing-eod', lockProfit: 0, dailyLossLimit: null, maxMicros: 50, consistencyPercent: 50, consistencyBasis: 'profitTarget', minTradingDays: 2, kind: 'eval' },
   { id: 'tof-50k', firm: 'Top One', program: 'Ignite 50K (funded)', size: 50_000, profitTarget: 3000, drawdown: 2000, drawdownType: 'trailing-eod', lockProfit: 100, dailyLossLimit: null, maxMicros: 70, consistencyPercent: 15, consistencyBasis: 'totalProfit', minTradingDays: 5, kind: 'funded' },
   { id: 'apex-50k', firm: 'Apex', program: 'Apex 4.0 50K', size: 50_000, profitTarget: 3000, drawdown: 2500, drawdownType: 'trailing-intraday', lockProfit: 100, dailyLossLimit: null, maxMicros: 100, consistencyPercent: 50, consistencyBasis: 'totalProfit', minTradingDays: 8, kind: 'eval' },
@@ -606,6 +618,12 @@ export interface PineTest {
   inSample: PineMetrics;
   outSample: PineMetrics;
   bySymbol: Partial<Record<Symbol, PineMetrics>>;
+  /**
+   * The same replay under the office's realistic fill policy and after ordinary costs. Everything above is
+   * Pine parity (gross, target before stop inside a bar), which is what TradingView shows; this is what an
+   * order would have got. `ambiguous` counts the trades whose result rests on a guess inside one bar.
+   */
+  realistic?: { all: PineMetrics; ambiguous: number; policy: string; cost: string };
   params: PineParams;
   /** Against the version it was made from, when the lab made it. */
   vs: { version: string; dAvgR: number; dTotalR: number; verdict: 'better' | 'same' | 'worse' | 'unproven'; reason: string; /** How sure: the gap against the noise in this many trades. */ confidence: 'low' | 'medium' | 'high' } | null;
