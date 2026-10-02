@@ -930,6 +930,8 @@ export async function startServer(cfg: Config) {
       case '/api/trading/backtest':
         void desk.runBacktest();
         return done(undefined);
+      case '/api/trading/farm':
+        return done(desk.setFarm(b));
       case '/api/trading/live-eval':
         return done(desk.setLiveEval(b));
       case '/api/trading/tuner':

@@ -7,6 +7,7 @@
 
 import type { ManagedR } from './manage.js';
 import type { TunerView } from './tuning.js';
+import type { FarmView } from './farm.js';
 
 export const SYMBOLS = ['NQ', 'ES', 'GC', 'BTC'] as const;
 export type Symbol = (typeof SYMBOLS)[number];
@@ -700,6 +701,8 @@ export interface TradingSnapshot {
   backtest: BacktestSummary | null;
   /** The eval being run forward day by day on the paper book, beside the owner's own result (null: none running). */
   liveEval?: LiveEvalView | null;
+  /** The prop farm being run forward on the paper book (null: none). */
+  farm?: FarmView | null;
   playbook: PlaybookItem[];
   bias: Bias[];
   accounts: AccountState[];

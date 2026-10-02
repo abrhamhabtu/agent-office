@@ -1,5 +1,6 @@
 import type { FloorRole, PlaybookId, TradingSnapshot } from '../../shared/trading';
 import { INSTRUMENTS, PLAYBOOK_BY_ID, PLAYBOOKS, PROP_ACCOUNTS } from '../../shared/trading';
+import { FARM_PROGRAM_BY_ID, strategyLabel } from '../../shared/farm';
 import { clip, fmt, INK, money, Screen } from './screens';
 
 // The Back Office's three wall displays: the backtest, the eval simulator and the paper book. They're read
@@ -549,5 +550,99 @@ export class LiveEvalBoard extends Board {
       g.fillText(d.slice(5), X(i + 1), py0 + ph + 26);
     });
     g.textAlign = 'left';
+  }
+}
+
+// ---- 🌾 The farm: every account by its stage. With no farm running, the wall shows the live eval ----------
+const STAGE_INK: Record<string, string> = { eval: '#5cc8ff', funded: '#2ee6a6', parked: '#ffd166', busted: '#566385', empty: '#566385' };
+const STAGE_WORD: Record<string, string> = { eval: 'IN PLAY', funded: 'TRADING', parked: 'PAYOUT READY', busted: 'BUSTED', empty: 'WAITING' };
+
+export class FarmBoard extends LiveEvalBoard {
+  draw(s: TradingSnapshot) {
+    const farm = s.farm;
+    if (!farm) return super.draw(s);
+    const g = this.g;
+    const ACCENT = '#7ee787';
+    const program = FARM_PROGRAM_BY_ID[farm.setup.programId];
+    const run = farm.run;
+    const cells = run.cells[run.cells.length - 1] ?? [];
+    const net = run.cash[run.cash.length - 1] ?? 0;
+    this.frame(s, 'The Farm', `${program?.firm ?? ''} ${program?.name ?? ''} · on paper since ${farm.startDay.slice(5)}`, ACCENT, clip(g, `Trading: ${strategyLabel(farm.setup.strategy)}`, 700), 'Click to run it');
+
+    card(g, 24, 94, 330, 250, C.card2);
+    kicker(g, 'Payouts less fees', 46, 128, ACCENT);
+    glow(g, money(net), 44, 206, 60, tone(net));
+    g.fillStyle = C.dim;
+    g.font = `700 16px ${SANS}`;
+    g.fillText(`${money(run.payouts)} paid · ${money(run.fees)} in fees`, 46, 246);
+    g.fillText(`${run.attempts} bought · ${run.passed} passed · ${run.payoutCount} payout${run.payoutCount === 1 ? '' : 's'}`, 46, 272);
+    const count = (st: string) => cells.filter((c) => c.stage === st).length;
+    let px = 46;
+    for (const st of ['eval', 'funded', 'parked'] as const) px += pill(g, `${count(st)} ${st === 'eval' ? 'EVAL' : st === 'funded' ? 'FUNDED' : 'READY'}`, px, 296, `${STAGE_INK[st]}2a`, STAGE_INK[st]!, 13) + 8;
+
+    // The last few things that happened.
+    card(g, 24, 356, 330, 198);
+    kicker(g, 'Latest', 46, 388);
+    const feed = run.events.filter((e) => e.kind !== 'trade').slice(-4).reverse();
+    if (!feed.length) {
+      g.fillStyle = C.dim;
+      g.font = `700 15px ${SANS}`;
+      g.fillText('Waiting for the first setup…', 46, 424);
+    }
+    feed.forEach((e, i) => {
+      const y = 414 + i * 36;
+      g.fillStyle = e.kind === 'busted' ? INK.down : e.kind === 'paid' || e.kind === 'passed' ? INK.up : e.kind === 'payout-ready' ? INK.warn : C.text;
+      g.font = `900 13px ${MONO}`;
+      g.fillText(clip(g, `${e.account} · ${e.kind === 'payout-ready' ? 'PAYOUT READY' : e.kind.toUpperCase()}`, 290), 46, y);
+      g.fillStyle = C.dim;
+      g.font = `700 12px ${SANS}`;
+      g.fillText(clip(g, e.text, 290), 46, y + 16);
+    });
+
+    // The accounts.
+    const x0 = 374;
+    const cols = cells.length > 4 ? 3 : cells.length > 1 ? 2 : 1;
+    const rows = Math.ceil(cells.length / cols);
+    const cw = (this.W - x0 - 24 - (cols - 1) * 12) / cols;
+    const ch = (460 - (rows - 1) * 12) / rows;
+    cells.forEach((c, i) => {
+      const x = x0 + (i % cols) * (cw + 12);
+      const y = 94 + Math.floor(i / cols) * (ch + 12);
+      const ink = STAGE_INK[c.stage]!;
+      card(g, x, y, cw, ch, c.stage === 'parked' ? '#2a2616' : C.card);
+      g.strokeStyle = `${ink}88`;
+      g.lineWidth = 2;
+      g.beginPath();
+      g.roundRect(x, y, cw, ch, 16);
+      g.stroke();
+      g.fillStyle = C.text;
+      g.font = `900 18px ${MONO}`;
+      g.fillText(c.account || `SLOT ${i + 1}`, x + 18, y + 34);
+      pill(g, STAGE_WORD[c.stage]!, x + cw - 16, y + 14, `${ink}2a`, ink, 12, true);
+      if (c.stage === 'empty') return;
+      glow(g, money(c.balance), x + 16, y + Math.min(92, ch * 0.46), Math.min(40, ch * 0.2), ink);
+      g.fillStyle = tone(c.pnl);
+      g.font = `800 14px ${MONO}`;
+      g.fillText(`today ${money(c.pnl)}`, x + 18, y + Math.min(92, ch * 0.46) + 26);
+      g.fillStyle = C.dim;
+      g.fillText(`to date ${money(c.balance - c.size)}`, x + 18 + cw * 0.42, y + Math.min(92, ch * 0.46) + 26);
+      const by = y + ch - 46;
+      const grad = g.createLinearGradient(x + 18, 0, x + cw - 18, 0);
+      grad.addColorStop(0, `${INK.down}99`);
+      grad.addColorStop(0.5, `${INK.warn}77`);
+      grad.addColorStop(1, `${INK.up}99`);
+      g.fillStyle = grad;
+      g.beginPath();
+      g.roundRect(x + 18, by, cw - 36, 8, 4);
+      g.fill();
+      const at = Math.max(0, Math.min(1, (c.balance - c.floor) / Math.max(1, c.target - c.floor)));
+      g.fillStyle = '#fff';
+      g.beginPath();
+      g.roundRect(x + 18 + (cw - 36) * at - 3, by - 4, 6, 16, 3);
+      g.fill();
+      g.fillStyle = C.faint;
+      g.font = `700 12px ${MONO}`;
+      g.fillText(clip(g, c.last ? `last: ${c.last}` : 'no trade yet', cw - 36), x + 18, y + ch - 14);
+    });
   }
 }

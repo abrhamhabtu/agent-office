@@ -126,6 +126,35 @@ The wall displays lead with one answer each: the best edge and best mix, how eac
 of your accounts (**TARGET HIT** means the money is there but a rule is still pending), today's
 paper result, and the live eval's race.
 
+### The Farm
+
+**🌾 Prop farm** (the fourth wall display on Back Office, the ☰ menu, or the command palette) runs a few
+prop accounts through one firm's program on paper, from the fee to the payout. Set it up in the steps on
+the left:
+
+1. **The firm and the program**: Lucid (LucidFlex 25K and 50K, LucidDirect 25K), Top One (Ignite 25K and
+   50K, straight to funded) or FundedNext (Rapid 25K and 50K). Each card shows what that program typically
+   nets with your setup. Set what an attempt really costs you; two of the fees are guesses and say so.
+2. **How many accounts** side by side (up to five), how many attempts in all, and whether they **take
+   turns** (each signal goes to the next account, so no two are on opposite sides) or all take every trade.
+3. **What they trade**: a playbook, or the lab's best mix, and how a trade is managed.
+4. **How big**: micros in the evaluation and micros funded. Under each size is what the farm typically
+   nets at it; ★ is the best on these days.
+5. **Notices**: once the farm is live, a Discord webhook address gets every fill, pass and payout.
+
+**Battle test** replays the setup over the backtest's month: accounts move from *Evaluations* to *Funded*
+to *Payout ready* (parked until paid) or *Out*. Drag the day or press **Replay** to watch it happen; the
+feed lists every milestone and the chart is payouts less fees. The odds beside the headline run the same
+farm over 300 redraws of your real days, 60 at a time. **Live on paper** runs it forward on what the
+playbooks really take, a day at a time, and the wall display shows every account. Nothing is bought and
+no order is placed.
+
+A payout lands the day after an account parks, and the account rests that day. The model assumes an
+account starts again at its opening balance with its full drawdown after a payout, which some firms are
+stricter about, and it does not model a program's limit on payouts per account. Fees, splits and payout
+caps are from public summaries: check them with the firm. [The prop farm plan](prop-farm-plan.md) has the
+rest, including what each firm says about automation.
+
 ## Session Desk and cleaner desks
 
 Press **J**, click **Session Desk** in the top bar, or search for it in the command palette.

@@ -70,6 +70,8 @@ export interface Series {
 export interface ChartOpts {
   /** The drawing's height for a width of 1000: it scales with the window. */
   height: number;
+  /** The drawing's own width (1000 unless set): a chart in half a row is drawn narrower so its lettering stays readable. */
+  width?: number;
   /** How many points along the bottom. */
   n: number;
   series: Series[];
@@ -97,7 +99,7 @@ function niceTicks(lo: number, hi: number, want = 4): number[] {
 
 /** A line chart you can run the pointer along: it snaps to the nearest point and says what happened there. */
 export function chart(o: ChartOpts): HTMLElement {
-  const W = 1000;
+  const W = o.width ?? 1000;
   const H = o.height;
   const pad = { l: 64, r: 96, t: 14, b: 26 };
   const pw = W - pad.l - pad.r;
@@ -126,7 +128,7 @@ export function chart(o: ChartOpts): HTMLElement {
     label.textContent = o.yFmt(t);
     root.append(label);
   }
-  const every = Math.max(1, Math.ceil(n / 7));
+  const every = Math.max(1, Math.ceil(n / (W < 700 ? 4 : 7)));
   for (let i = 0; i < n; i += every) {
     const label = svg('text', { x: x(i), y: H - 6, 'text-anchor': i === 0 ? 'start' : 'middle', class: 'tl-axis' });
     label.textContent = o.xLabel(i);

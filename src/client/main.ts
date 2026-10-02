@@ -79,7 +79,8 @@ import { BossScreen, MarketMap, NewsBoard, PlaybookBoard, ProposalsBoard, TAPE_S
 import { buildTradingDesks, deskDetailsTab } from './trading/desks';
 import { openScreenPreview } from './trading/preview';
 import { openStrategyDesk } from './trading/strategy';
-import { BacktestBoard, EvalBoard, LiveEvalBoard, PaperBoard } from './trading/backoffice-boards';
+import { BacktestBoard, EvalBoard, FarmBoard, PaperBoard } from './trading/backoffice-boards';
+import { openFarm } from './trading/farm';
 import { openBacktestLab } from './trading/backtestlab';
 import { openEvalSim } from './trading/evalsim';
 import { openQueue } from './ui/queue';
@@ -306,7 +307,8 @@ const BOARD_SET: Record<FloorRole, Record<'issues' | 'queue' | 'pulls' | 'servic
       queue: { screen: new EvalBoard(), label: '🏦 Prop eval simulator', tab: 'backtest', open: () => openEvalSim() },
       pulls: { screen: new PaperBoard(), label: '📒 Paper book', tab: 'paper' },
       // The market is on every desk's monitor and the tape: this wall has the eval that's being run forward instead.
-      services: { screen: new LiveEvalBoard(), label: '🏁 Live eval', tab: 'backtest', open: () => openEvalSim({ live: true }) },
+      // (It shows the farm when one is running, and the live eval when not.)
+      services: { screen: new FarmBoard(), label: '🌾 Prop farm', tab: 'backtest', open: () => openFarm() },
     },
   };
 })();
@@ -4828,6 +4830,7 @@ const hud = mountHud(
     { id: 'pulls', icon: '📰', label: 'News', section: 'Open', count: () => trading.snap?.news.filter((n) => n.kind === 'calendar' && n.impact === 'high' && n.at > Date.now()).length ?? 0, title: () => 'The calendar and the wire', run: () => openTrading(tradingRole(), 'news') },
     { id: 'queue', icon: '🛡️', label: 'Prop accounts', section: 'Open', title: () => 'Prop accounts and Law-of-10 risk', run: () => openTrading(tradingRole(), 'accounts') },
     { id: 'services', icon: '🧪', label: 'Backtest lab', section: 'Open', title: () => 'What every playbook did on real bars, and which indicators help', run: () => openBacktestLab() },
+    { id: 'prop-farm', icon: '🌾', label: 'Prop farm', section: 'Open', count: () => trading.snap?.farm?.run.cells.at(-1)?.filter((c) => c.stage === 'parked').length ?? 0, title: () => 'Run a farm of prop accounts on paper: evaluations, funded, payouts', run: () => openFarm() },
     { id: 'eval-sim', icon: '🏦', label: 'Eval simulator', section: 'Open', title: () => 'Play a strategy through a prop account’s rules', run: () => openEvalSim() },
     { id: 'trading-connections', icon: '🔌', label: 'Connections', section: 'Open', title: () => 'TradingView alerts, ProjectX, Trade Pilot and the feeds', run: () => openTrading(tradingRole(), 'connections') },
     { id: 'whiteboard', icon: '📝', label: 'Whiteboard', section: 'Open', title: () => 'Draw together, live', run: () => openWhiteboard(net) },

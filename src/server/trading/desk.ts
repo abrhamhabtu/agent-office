@@ -12,6 +12,7 @@ import { TUNED_PLAYBOOKS } from '../../shared/tuning.js';
 import { rankPlans } from '../../shared/dayplan.js';
 import { Tuner, type History } from './tuner.js';
 import { liveEvalView, readLiveEval, type LiveEvalConfig } from './live-eval.js';
+import { cleanSetup, farmDays, runFarm, type FarmSetup, type FarmView } from '../../shared/farm.js';
 import { Market, parseTradingViewBar } from './market.js';
 import { readParams, reportOf, runLab, testVersions } from './lab.js';
 import { Vault } from './vault.js';
@@ -34,6 +35,8 @@ interface Saved {
   markets: Symbol[];
   /** The eval being run forward live, when there is one (see live-eval.ts). */
   liveEval?: LiveEvalConfig | null;
+  /** The prop farm being run forward on the paper book, when there is one (see shared/farm.ts). */
+  farm?: { setup: FarmSetup; startDay: string; discord: string | null; notified: number } | null;
 }
 
 const DEFAULT_ACTIVE = new Set(['lucidflex-50k', 'lucidflex-100k', 'topstep-50k', 'tof-50k', 'apex-50k']);
@@ -219,6 +222,7 @@ export class TradingDesk {
       alerts: Array.isArray(s.alerts) ? s.alerts.slice(-30) : [],
       markets: Array.isArray(s.markets) && s.markets.every((m) => (SYMBOLS as readonly string[]).includes(m)) && s.markets.length ? s.markets : ['NQ', 'GC', 'BTC'],
       liveEval: s.liveEval && typeof s.liveEval === 'object' && s.liveEval.rules && Array.isArray(s.liveEval.playbooks) ? s.liveEval : null,
+      farm: s.farm && typeof s.farm === 'object' && typeof s.farm.startDay === 'string' ? { setup: cleanSetup(s.farm.setup), startDay: s.farm.startDay, discord: typeof s.farm.discord === 'string' ? s.farm.discord : null, notified: Number(s.farm.notified) || 0 } : null,
     };
     for (const a of PROP_ACCOUNTS) this.saved.accounts[a.id] ??= { active: DEFAULT_ACTIVE.has(a.id), balance: a.size, peak: a.size };
     try {
@@ -248,6 +252,7 @@ export class TradingDesk {
     this.timers.push(setInterval(() => SYMBOLS.forEach((s) => this.replay(s)), LIVE_EVERY));
     this.timers.push(setInterval(() => this.writeLive(), 15_000));
     this.timers.push(setInterval(() => this.noteMine(), 20_000));
+    this.timers.push(setInterval(() => void this.notifyFarm(), 20_000));
     // The month's backtest: once the bars are in, then again after every close.
     setTimeout(() => void this.runBacktest(), 8000);
     // The Strategy lab after the backtest has fetched the history, then again after every close.
@@ -561,6 +566,57 @@ export class TradingDesk {
     return out.sort((a, b) => (order[a.stage] ?? 9) - (order[b.stage] ?? 9));
   }
 
+  /** Starts the farm on the paper book (from today, or from as far back as the book goes), stops it, or sets where its notices go. */
+  setFarm(b: Record<string, unknown>): string | undefined {
+    if (b.action === 'stop') this.saved.farm = null;
+    else if (b.action === 'discord') {
+      if (!this.saved.farm) return 'Start the farm first';
+      const url = typeof b.url === 'string' ? b.url.trim() : '';
+      if (url && !/^https:\/\/(discord\.com|discordapp\.com)\/api\/webhooks\/\d+\/[\w-]+$/.test(url)) return 'That isn’t a Discord webhook address';
+      this.saved.farm.discord = url || null;
+    } else {
+      const today = tradingDay(Date.now());
+      const first = [...this.paperHistory.values()].reduce<string | null>((a, t) => (a == null || t.day < a ? t.day : a), null);
+      const monthAgo = new Date(Date.parse(`${today}T12:00:00Z`) - 31 * 86_400_000).toISOString().slice(0, 10);
+      const startDay = b.from === 'back' && first ? (first > monthAgo ? first : monthAgo) : today;
+      this.saved.farm = { setup: cleanSetup(b.setup), startDay, discord: this.saved.farm?.discord ?? null, notified: 0 };
+      // What already happened on the days it's counting isn't news.
+      this.saved.farm.notified = this.farmView()?.run.events.length ?? 0;
+    }
+    this.save();
+    return undefined;
+  }
+
+  /** The farm so far: its setup run over the paper book's days since it started. */
+  private farmView(): FarmView | null {
+    const f = this.saved.farm;
+    if (!f) return null;
+    const today = tradingDay(Date.now());
+    const days = weekdays(Array.from({ length: 400 }, (_, i) => new Date(Date.parse(`${f.startDay}T12:00:00Z`) + i * 86_400_000).toISOString().slice(0, 10)).filter((d) => d <= today));
+    const paper = [...this.paperHistory.values()].filter((t) => t.day >= f.startDay);
+    return { setup: f.setup, startDay: f.startDay, run: runFarm(farmDays(paper, f.setup.strategy, days), f.setup, days), discord: !!f.discord };
+  }
+
+  /** Sends what has happened on the farm since the last look to its Discord webhook, in order. */
+  private async notifyFarm() {
+    const f = this.saved.farm;
+    if (!f) return;
+    const events = this.farmView()?.run.events ?? [];
+    if (events.length <= f.notified) return;
+    const fresh = events.slice(f.notified);
+    f.notified = events.length;
+    this.save();
+    if (!f.discord) return;
+    const icon = { bought: '🧾', passed: '✅', busted: '💥', 'payout-ready': '💰', paid: '🏦', trade: '📈' } as const;
+    for (const e of fresh.slice(-10)) {
+      try {
+        await fetch(f.discord, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ username: 'Prop Farm (paper)', content: `${icon[e.kind]} **${e.account || `Slot ${e.slot + 1}`}** · ${e.text}` }), signal: AbortSignal.timeout(5000) });
+      } catch {
+        // Discord is unreachable; the farm carries on.
+      }
+    }
+  }
+
   /** Starts a live eval from what the simulator has on screen, or stops the one that's running. */
   setLiveEval(b: Record<string, unknown>): string | undefined {
     if (b.action === 'stop') this.saved.liveEval = null;
@@ -860,6 +916,7 @@ export class TradingDesk {
       guard,
       paper: this.paperBook(),
       backtest: this.backtest ? { ...this.backtest, tuner: this.tuner.view() } : null,
+      farm: this.farmView(),
       liveEval: this.saved.liveEval ? liveEvalView(this.saved.liveEval, [...this.paperHistory.values()], tradingDay(now)) : null,
       playbook: this.checklist(),
       bias: this.bias(),

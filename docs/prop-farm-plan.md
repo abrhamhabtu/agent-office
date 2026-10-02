@@ -159,8 +159,8 @@ routes, cheapest first:
 
 | Phase | What ships | Proves |
 | --- | --- | --- |
-| **0. Foundations** (this branch) | 25K accounts and FundedNext in the catalog; fixed-contract sizing with a contracts ladder; this plan. | The idea can be simulated with your own trades. |
-| **1. The farm on paper** | Registry, stage machine, per-stage policy, consistency guard, rotation, the farm board and console, the calculator. Runs forward on the paper book every day. | Whether a farm of your playbooks passes evals and reaches payouts, day by day. |
+| **0. Foundations** (built) | 25K accounts and FundedNext in the catalog; fixed-contract sizing with a contracts ladder; this plan. | The idea can be simulated with your own trades. |
+| **1. The farm on paper** (built: registry of slots, stage machine, sizes by stage, rotation, the console, the wall display, Discord notices; still to do: a per-account strategy and the consistency guard) | Registry, stage machine, per-stage policy, consistency guard, rotation, the farm board and console, the calculator. Runs forward on the paper book every day. | Whether a farm of your playbooks passes evals and reaches payouts, day by day. |
 | **2. Research agents and the judged strategy** | Queue jobs for backtests and tuner runs; the agent filter with its paired paper accounts; Discord notices. | Whether an agent's judgment beats the plain rules. |
 | **3. More history** | Months of bars instead of one. | Whether any of the above holds outside September. |
 | **4. Practice orders** | The adapter, the guards, the bridge or API route, on a simulated account. | The plumbing, with no money. |
@@ -169,10 +169,43 @@ routes, cheapest first:
 Phases 1 and 2 need nothing from outside. Phase 3 needs a data source. Phases 4 and 5 need the
 decisions below.
 
+### 3.6 The firms you mean to use
+
+None of this needs an account yet: the farm runs on paper for all three. What their public pages and
+summaries say about running it for real (each to be checked with the firm before any money goes in):
+
+| Firm | Automation | Across your own accounts | What it means for the farm |
+| --- | --- | --- | --- |
+| **Lucid** | Automated systems and trade copiers are permitted on evaluation and funded accounts. High-frequency trading, microscalping and hedging across accounts are not. | Copying across your own accounts is allowed; up to five funded accounts. | Fits. LucidFlex needs five profit days a payout; LucidDirect has a 20% consistency rule. |
+| **Top One Futures** | Varies by account type: some may restrict a bot being attached or require manual trading. | Copying between your own accounts is allowed; opposing positions across accounts are not. | Ask support about Ignite before automating it. On paper, its 15% consistency rule makes it the hardest of the three. |
+| **FundedNext Futures** | Bots and fully automated strategies are permitted on challenge and funded accounts. | Copying between your own accounts is allowed; reverse hedging and account rolling are not. | Fits, with the account-rolling rule as the thing to stay clear of. |
+
+On the month here, three accounts trading Support & Resistance at 5 micros in the evaluation and 2 funded
+typically net, over 60 days of redraws: LucidFlex 25K about +$6,900, FundedNext Rapid 25K about +$4,400,
+LucidDirect 25K about +$1,900, and Top One Ignite 25K about −$190. Those figures lean on one good month
+for that playbook and on the payout assumption in section 5, so they rank the programs more reliably than
+they price them.
+
+### 3.7 TradingView
+
+There is no official TradingView connector, and TradingView has no API for running its Strategy Tester
+from outside. Three ways to bring your real TradingView strategies in, in the order they are worth doing:
+
+1. **Alerts into the farm** (next to build). Your Pine strategies already can post to the office's
+   webhook. Each alert that carries an entry, a stop and a target becomes a paper trade, followed on the
+   office's bars to its stop or target, and that stream of trades becomes a strategy the farm can run
+   beside the office's own playbooks. This is live testing of exactly what your chart does, with nothing
+   re-implemented.
+2. **Your scripts in the Strategy Desk.** Added there, a script's exact rules are replayed by the office
+   so it can be backtested and tuned on history, as the VWAP Double Break Suite already is.
+3. **Driving TradingView itself.** Community tools exist that run Pine backtests outside TradingView or
+   operate its desktop app. None is official, and each would have to be vetted before it is trusted with
+   your account, so this comes last.
+
 ## 4. What is needed from you
 
-- **Which firm and program first.** FundedNext Rapid 25K is what he farms; your own accounts are
-  Lucid, Topstep, Top One and Apex.
+- **Which program first** among Lucid, Top One and FundedNext. The Farm's battle test is there to help
+  choose.
 - **The real fees** for the evals and any activation, for the calculator.
 - **A Discord webhook URL**, if you want the notices there.
 - **A bridge account or API access** for phase 4: TradersPost or PickMyTrade, or TopstepX API access.
