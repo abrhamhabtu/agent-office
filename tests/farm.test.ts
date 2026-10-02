@@ -19,7 +19,7 @@ test('every farm program has its rules, and only the ones read on the firm’s p
     assert.ok(p.fee > 0 && p.fundedRules.payout!.split > 0 && p.fundedRules.payout!.split <= 1, p.id);
   }
   // The three firms the owner means to use are all there.
-  assert.deepEqual([...new Set(FARM_PROGRAMS.map((p) => p.firm))], ['Lucid', 'Top One', 'FundedNext']);
+  assert.deepEqual([...new Set(FARM_PROGRAMS.map((p) => p.firm))].sort(), ['FundedNext', 'Lucid', 'Top One']);
   assert.deepEqual(FARM_PROGRAMS.filter(programVerified).map((p) => p.id), ['lucidflex-25k', 'lucidflex-50k']);
   assert.deepEqual(FARM_PROGRAMS.filter((p) => p.fundedRules.automation === 'prohibited').map((p) => p.firm), ['Top One', 'Top One']);
 });

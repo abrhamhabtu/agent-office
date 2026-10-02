@@ -424,7 +424,7 @@ export function payoutCheck(a: Account, r: RuleSet): { eligible: boolean; amount
   const checks: RuleCheck[] = [
     { label: p.profitDayMin ? `Days of ${money(p.profitDayMin)} or more` : 'Trading days', ok: (p.profitDayMin ? a.cycle.profitDays : a.cycle.tradingDays) >= p.profitDays, detail: `${p.profitDayMin ? a.cycle.profitDays : a.cycle.tradingDays} of ${p.profitDays} this cycle` },
     { label: 'Profit in the account', ok: profit >= p.minProfit - 1e-9, detail: profit >= p.minProfit ? `${money(profit)} (needs ${money(p.minProfit)})` : `${money(p.minProfit - profit)} more to reach ${money(p.minProfit)}` },
-    { label: 'Net profit this cycle', ok: cycleProfit > 0, detail: cycleProfit > 0 ? money(cycleProfit) : 'The cycle isn’t in profit' },
+    { label: 'Net profit this cycle', ok: cycleProfit > 0 && cycleProfit >= (p.minCycleProfit ?? 0), detail: `${money(cycleProfit)} this cycle${p.minCycleProfit ? `; ${money(p.minCycleProfit)} required` : ''}` },
     { label: 'Request size', ok: amount >= p.minRequest && amount > 0, detail: `${money(amount)} available${p.minRequest ? ` (least ${money(p.minRequest)}${p.maxRequest ? `, most ${money(p.maxRequest)}` : ''})` : ''}` },
   ];
   if (p.consistencyPercent < 100) checks.push({ label: 'Consistency', ok: steady, detail: share == null ? `Best day at most ${p.consistencyPercent}% of the cycle’s profit` : `Best day is ${Math.round(share * 100)}% of the cycle’s profit (at most ${p.consistencyPercent}%)` });

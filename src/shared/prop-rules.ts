@@ -1,3 +1,4 @@
+import { FUNDEDNEXT_RULESETS } from './fundednext-rules.js';
 import type { PropRules } from './trading.js';
 
 // Versioned prop-firm rules. A rule set is one firm's program at one size in one phase, as it was sold
@@ -21,6 +22,8 @@ export interface PayoutRule {
   profitDayMin: number;
   /** Profit over the opening balance the account needs before a request. */
   minProfit: number;
+  /** Required new profit since the last withdrawal, separate from retained balance. */
+  minCycleProfit?: number;
   /** The least and the most one request may be (null: no cap). */
   minRequest: number;
   maxRequest: number | null;
@@ -138,7 +141,7 @@ function topOneElite(size: 25_000 | 50_000): RuleSet {
   };
 }
 
-export const RULESETS: RuleSet[] = [lucidEval(25_000), lucidFunded(25_000), lucidEval(50_000), lucidFunded(50_000), topOneElite(25_000), topOneElite(50_000)];
+export const RULESETS: RuleSet[] = [lucidEval(25_000), lucidFunded(25_000), lucidEval(50_000), lucidFunded(50_000), topOneElite(25_000), topOneElite(50_000), ...FUNDEDNEXT_RULESETS];
 const BY_ID = new Map(RULESETS.map((r) => [r.id, r]));
 
 export const ruleSetById = (id: string): RuleSet | undefined => BY_ID.get(id);

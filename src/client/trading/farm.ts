@@ -102,7 +102,7 @@ function drawOverview(sh: FarmShell, v: PropFarmView): Node[] {
   const t = v.totals;
   const size = (sh.ui.size as string) ?? 'all';
   const source = (sh.ui.source as string) ?? 'all';
-  const shown = v.accounts.filter((a) => (size === 'all' || (size === 'other' ? a.size !== 25_000 && a.size !== 50_000 : a.size === Number(size))) && (source === 'all' || a.source === source));
+  const shown = v.accounts.filter((a) => (size === 'all' || (size === 'other' ? ![25_000, 50_000, 100_000, 150_000].includes(a.size) : a.size === Number(size))) && (source === 'all' || a.source === source));
   const openAccount = (c: AccountCard) => sh.sheet(accountSheet(sh, v, c));
   const cols: { id: string; title: string; sub: string; has: (a: AccountCard) => boolean }[] = [
     { id: 'eval', title: 'Evaluations', sub: 'working toward a pass', has: (a) => a.phase === 'eval' && !['breached', 'retired', 'passed', 'review'].includes(a.status) },
@@ -119,7 +119,7 @@ function drawOverview(sh: FarmShell, v: PropFarmView): Node[] {
     tile('Fees', money(t.confirmedFees), `Entered by you. The simulation would have spent ${money(t.simulatedFees)}.`, 'fees', t.confirmedFees ? 'down' : undefined));
 
   const bar = h('div.pf-filters', {},
-    h('div.tl-chips', {}, ...[['all', 'Every size'], ['25000', '25K'], ['50000', '50K'], ['other', 'Other']].map(([id, label]) => chip(label!, size === id, () => { sh.ui.size = id; sh.redraw(); }))),
+    h('div.tl-chips', {}, ...[['all', 'Every size'], ['25000', '25K'], ['50000', '50K'], ['100000', '100K'], ['150000', '150K'], ['other', 'Other']].map(([id, label]) => chip(label!, size === id, () => { sh.ui.size = id; sh.redraw(); }))),
     h('div.tl-chips', {}, ...[['all', 'Every source'], ['simulated', 'Simulated'], ['manual', 'Yours, by hand'], ['connected', 'Connected']].map(([id, label]) => chip(label!, source === id, () => { sh.ui.source = id; sh.redraw(); }))),
     h('span.grow'),
     h('button.tl-btn', { type: 'button', onclick: () => sh.sheet(addAccountSheet(sh, v)) }, '＋ Track one of your accounts'),

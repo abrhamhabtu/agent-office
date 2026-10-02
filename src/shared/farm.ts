@@ -4,6 +4,7 @@ import { applyPlan, planLabel, type PlanMode } from './dayplan.js';
 import { MANAGE_BY_ID, managed, type ManageId } from './manage.js';
 import { ACCOUNT_CATALOG } from './prop-catalog.js';
 import { COSTS, type CostId } from './fills.js';
+import { FUNDEDNEXT_RULESETS } from './fundednext-rules.js';
 import { fromPropRules, isVerified, ruleSetFor, type RuleSet } from './prop-rules.js';
 import { canTrade, confirmPass, cushionOf, DaySession, fillOf, floorOf, openAccount, payoutCheck, requestPayout, settlePayout, type Account, type AccountStatus } from './account-ledger.js';
 import { capPolicy, crossAccountConflict, CUSHION_BASELINE, policyProblem, sizeTrade, type RiskPolicy } from './risk-policy.js';
@@ -39,19 +40,25 @@ export interface FarmProgram {
 const catalog = (id: string) => ACCOUNT_CATALOG.find((a) => a.id === id)!;
 const lucid = (size: '25k' | '50k', fee: number, feeEstimated: boolean, note: string): FarmProgram => ({ id: `lucidflex-${size}`, firm: 'Lucid', name: `LucidFlex ${size.toUpperCase()}`, evalRules: ruleSetFor(`lucidflex-${size}`, 'eval')!, fundedRules: ruleSetFor(`lucidflex-${size}`, 'funded')!, fee, feeEstimated, note });
 const reported = (id: string, firm: string, name: string, evalId: string | null, fundedId: string, fee: number, payoutCap: number, note: string, o: { feeEstimated?: boolean; automation?: 'allowed' | 'prohibited' | 'unknown' } = {}): FarmProgram => ({
-  id, firm, name, fee, note, feeEstimated: o.feeEstimated,
+  id, firm, name, fee, note, feeEstimated: o.feeEstimated ?? true,
   evalRules: evalId ? fromPropRules(catalog(evalId), { template: id, automation: o.automation, fee }) : null,
   fundedRules: fromPropRules(catalog(fundedId), { template: id, payoutCap, automation: o.automation, fee: evalId ? null : fee }),
 });
 
 export const FARM_PROGRAMS: FarmProgram[] = [
+  ...FUNDEDNEXT_RULESETS.filter(r => r.phase === 'eval').map(r => ({
+    id: r.template, firm: r.firm, name: r.program, evalRules: r,
+    fundedRules: FUNDEDNEXT_RULESETS.find(f => f.template === r.template && f.phase === 'funded')!,
+    fee: r.size === 25000 ? 80 : r.size === 50000 ? 150 : r.size === 100000 ? 280 : 484,
+    feeEstimated: true, note: `${r.size / 1000}K · ${r.maxMicros} micros · current source-checked numbers; execution conditions still need review.`,
+  })),
   lucid('25k', 75, true, 'A 50% consistency rule in the evaluation. Funded starts at 10 micros; a payout takes five $100 days and $1,000 of profit, and half of it can be taken.'),
   lucid('50k', 130, true, 'The same, twice the size. Funded starts at 20 micros and steps to 40.'),
   reported('luciddirect-25k', 'Lucid', 'LucidDirect 25K', null, 'luciddirect-25k', 199, 1000, 'Straight to funded. A 20% consistency rule, so a payout takes at least five even days.'),
   reported('tof-ignite-25k', 'Top One', 'Ignite 25K', null, 'tof-25k', 218, 500, 'Straight to funded. A 15% consistency rule, the strictest here. Top One prohibits bots: manual only.', { automation: 'prohibited' }),
   reported('tof-ignite-50k', 'Top One', 'Ignite 50K', null, 'tof-50k', 398, 1000, 'Straight to funded, the size you already follow. Manual only.', { automation: 'prohibited' }),
-  reported('fundednext-rapid-25k', 'FundedNext', 'Rapid 25K', 'fundednext-rapid-25k', 'fundednext-funded-25k', 80, 800, 'No consistency rule or minimum days in the challenge: one trade can pass it. The one in the screenshots.'),
-  reported('fundednext-rapid-50k', 'FundedNext', 'Rapid 50K', 'fundednext-rapid-50k', 'fundednext-funded-50k', 150, 1500, 'The same, twice the size.', { feeEstimated: true }),
+  reported('fundednext-rapid-25k', 'FundedNext', 'Rapid 25K (legacy scenario)', 'fundednext-rapid-25k', 'fundednext-funded-25k', 80, 800, 'No consistency rule or minimum days in the challenge: one trade can pass it. The one in the screenshots.'),
+  reported('fundednext-rapid-50k', 'FundedNext', 'Rapid 50K (legacy scenario)', 'fundednext-rapid-50k', 'fundednext-funded-50k', 150, 1500, 'The same, twice the size.', { feeEstimated: true }),
 ];
 export const FARM_PROGRAM_BY_ID = Object.fromEntries(FARM_PROGRAMS.map((p) => [p.id, p])) as Record<string, FarmProgram>;
 
@@ -61,7 +68,7 @@ export const programVerified = (p: FarmProgram) => isVerified(p.fundedRules) && 
 /** What the model leaves out. */
 export const FARM_CAVEATS = [
   'Minute bars can’t say which price inside a bar came first. A trade’s worst and best prices are marked on the bars they happened on; a result that rests on a guess inside one bar is counted, and the stop is always taken first.',
-  'Only the LucidFlex 25K and 50K rules were read on the firm’s own pages (2 October 2026). The other programs are from public summaries: treat every number on them as a what-if.',
+  'LucidFlex and current FundedNext numerical rules have official sources. FundedNext execution-specific gaps and older reported programs remain labeled research scenarios; inspect the rule sheet before comparing.',
   'Fees are not on the firms’ pages: set what you actually pay. Commission and slippage are assumptions too, which is why there are three cost settings to compare.',
   'A pass is confirmed and a payout arrives on schedule here. In life the firm reviews both, and can refuse.',
   'An account that isn’t breached but has too little cushion left to carry one micro is counted as lost: the farm retires it and buys the next attempt, as a trader would.',
