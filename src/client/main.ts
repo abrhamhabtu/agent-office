@@ -81,6 +81,7 @@ import { openScreenPreview } from './trading/preview';
 import { openStrategyDesk } from './trading/strategy';
 import { BacktestBoard, EvalBoard, FarmBoard, PaperBoard } from './trading/backoffice-boards';
 import { openFarm } from './trading/farm';
+import { planner } from './trading/farm-plan';
 import { openBacktestLab } from './trading/backtestlab';
 import { openEvalSim } from './trading/evalsim';
 import { openQueue } from './ui/queue';
@@ -471,6 +472,23 @@ trading.onAlert((a) => {
 store.on('floors', paintTrading);
 store.on('floor', paintTrading);
 trading.start();
+// The battle test's answer for the setup it was last left on, worked out ahead of time once the backtest
+// is in, so it is there the moment the console is opened. Only for someone who has used the console.
+{
+  let warmed = '';
+  trading.on(() => {
+    const bt = trading.snap?.backtest;
+    const key = `${bt?.ranAt}:${bt?.tuner?.ranAt}`;
+    if (!bt || bt.running || bt.tuner?.running || !bt.days.length || key === warmed) return;
+    try {
+      if (!localStorage.getItem('agent-office.prop-farm')) return;
+    } catch {
+      return;
+    }
+    warmed = key;
+    void trading.backtestDetail().then((d) => planner.warm(d));
+  });
+}
 // A link straight to the Prop Farm console: /#farm, or /#farm=research for one of its views.
 {
   const want = /^#farm(?:=(overview|research|compare|forward|payouts|battle))?$/.exec(location.hash);

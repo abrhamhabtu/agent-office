@@ -7,6 +7,7 @@ import { h, openModal } from '../ui/dom';
 import { trading } from './feed';
 import { badge, chart, chip, dayLabel, howSheet, money, panel, pct, segmented, shortDay, signedMoney, spark, stat, stored, TONE } from './labkit';
 import { mountBattle } from './farm-battle';
+import { connectionsSheet, DATA_WORD, dataState } from './farm-connections';
 import { drawCompare, drawResearch } from './farm-research';
 import './farm.css';
 
@@ -41,6 +42,10 @@ export interface FarmShell {
   redraw(): void;
   /** Slides a sheet over the view (null: closes it). */
   sheet(node: HTMLElement | null): void;
+  /** Shows these rule sets, a rule a line, each saying how it is known. */
+  showRules(ids: string[], title: string): void;
+  /** Shows what the office is connected to, and whether the data is real-time. */
+  showConnections(): void;
   detail(): BacktestDetail | null;
   /** What this console remembers while it's open: selections, filters, half-typed forms. */
   ui: Record<string, string | number | boolean | undefined>;
@@ -143,6 +148,7 @@ function drawOverview(sh: FarmShell, v: PropFarmView): Node[] {
       h('tbody', {}, ...v.brokers.map((b) => h('tr', { title: b.note }, h('th', {}, b.name), ...[b.data, b.accounts, b.orders].map((s) => h('td', {}, badge(s === 'wired' ? 'WIRED' : s === 'sandbox' ? 'PAPER ONLY' : s === 'unverified' ? 'UNVERIFIED' : 'NONE', s === 'wired' ? 'ok' : s === 'none' ? 'dim' : 'warn'))))))));
   const ops = panel('Operations', 'The observer: feeds, the worker, and anything it paused',
     h('div.pf-feeds', {}, ...v.ops.feeds.map((f) => h('div.pf-feed', { 'data-stale': f.stale ? '1' : undefined }, h('b', {}, f.symbol), h('span', {}, f.source), badge(f.stale ? 'QUIET' : f.delayed ? 'DELAYED' : 'REAL-TIME', f.stale ? 'bad' : f.delayed ? 'warn' : 'ok'), h('small', {}, f.ageSec == null ? 'no bars yet' : `newest bar ${f.ageSec < 90 ? `${f.ageSec}s` : `${Math.round(f.ageSec / 60)}m`} old`)))),
+    h('div.pf-acts', {}, h('button.tl-btn', { type: 'button', onclick: () => sh.showConnections() }, 'Every connection, and how to get real-time data →')),
     h('p.tl-fine', {}, `Research worker: ${v.ops.worker.busy ? 'working' : 'idle'}. ${v.ops.worker.rest}.`),
     v.ops.notes.length ? h('ul.pf-opsnotes', {}, ...v.ops.notes.slice(0, 6).map((n) => h('li', { 'data-level': n.level }, h('small', {}, ago(n.at)), n.text))) : h('p.tl-fine', {}, 'Nothing paused, nothing missed.'));
   const rules = panel('Rule library', 'Each program, size and phase, with where every number came from',
@@ -351,11 +357,14 @@ export function openFarm(first?: TabId) {
   const sheet = h('div.tl-sheet');
   const status = h('span.grow');
   const close = h('button.btn.close', { type: 'button', 'aria-label': 'Close the Prop Farm', title: 'Close (Esc)' }, '✕');
+  // Always in view: whether the data is real-time, and the way to everything the office is connected to.
+  const conn = h('button.pf-conn', { type: 'button', title: 'What the office is connected to, and whether the data is real-time', onclick: () => shell.showConnections() }, h('i'), h('span'));
   const body = h('div.tl-body', {}, rail, main, sheet);
   const el = h('div.modal.tl.tl-farm', { role: 'dialog', 'aria-label': 'Prop Farm', style: `--tl-accent:${ACCENT}` },
     h('header.tl-header', {},
       h('div.tl-title', {}, h('span.tl-kicker', {}, 'BACK OFFICE · PAPER ONLY · NO ORDERS'), h('h2', {}, '🌾 Prop Farm')),
       tabs,
+      conn,
       h('button.tl-btn', { type: 'button', onclick: () => { how = !how; custom = null; render(true); } }, 'How it works'),
       close),
     body,
@@ -382,6 +391,13 @@ export function openFarm(first?: TabId) {
       custom = node;
       how = false;
       render(true);
+    },
+    showRules(ids, title) {
+      const sets = (shell.view()?.rules ?? []).filter((r) => ids.includes(r.id));
+      shell.sheet(wrapSheet(shell, title, 'THE RULES AN ACCOUNT ON THIS PROGRAM IS HELD TO', ...(sets.length ? sets.map((r) => h('section.tl-panel', {}, ruleSheet(r))) : [h('p.tl-how-lead', {}, 'This program’s rules come from the older catalog, a public summary rather than the firm’s own pages: there is no rule sheet for it. Treat every result on it as a what-if.')])));
+    },
+    showConnections() {
+      shell.sheet(connectionsSheet(shell.view(), () => shell.sheet(null)));
     },
     detail: () => detail,
     ui,
@@ -419,7 +435,12 @@ export function openFarm(first?: TabId) {
     }), tab, (t) => shell.go(t)));
     status.textContent = footer();
     status.toggleAttribute('data-offline', trading.offline);
+    const data = dataState(v);
+    conn.dataset.kind = DATA_WORD[data].kind;
+    conn.lastElementChild!.textContent = DATA_WORD[data].chip;
     el.classList.toggle('tl-how-open', how || !!custom);
+    // A sheet takes the whole width, the battle test's rail included.
+    el.classList.toggle('pf-sheet-open', how || !!custom);
     el.classList.toggle('pf-wide', tab !== 'battle');
     const sig = `${tab}:${signature(v)}:${how}:${custom ? 1 : 0}`;
     if (tab === 'battle') {

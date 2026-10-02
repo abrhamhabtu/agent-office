@@ -61,7 +61,9 @@ symbol request to verify your account's entitlements; that final check needs you
 
 ## Performance and evidence fixes
 
-Battle comparisons run in a cancellable Web Worker, only while Battle test is visible. Comparisons
+Battle comparisons run in a Web Worker that belongs to the page, not to the console: a plan is kept
+once worked out, the saved plan is prepared ahead of time, and a newer setup takes over from an older
+one between parts (see `client/trading/farm-plan.ts`). Comparisons
 cover the selected firm's programs; results from an old setup cannot replace newer results. Holdout
 days stay excluded. Strategy controls are available before the historical replay has finished.
 

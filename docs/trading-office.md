@@ -133,6 +133,17 @@ Press **Y**, use **Prop farm** in the menu, walk up to the fourth Back Office wa
 Battle test. The research queue is bounded and resumes saved jobs after a restart. Forward runs pin
 settings and distinguish decisions recorded before an outcome from history added late.
 
+**Battle test** is a plan on the left and its answer on the right. The plan is four decisions (the
+program, the accounts, the strategy, the size); each row says what is chosen, and opens to change it.
+The answer is the replay of the real days, the odds over redraws of them, and the days themselves to
+step through. Plans are worked out in the background and kept while the page is open: the saved plan
+is ready before the console is opened, reopening it shows the answer at once, and only a setup that
+hasn't been tried is worked out, filling in part by part while the last answer stays up.
+
+**Connections**: the chip beside the tabs (Real-time data, Delayed data, Market closed) says whether
+the futures data is real-time. Click it for every connection in one place, whether each is up, and the
+two routes to real-time futures. The setup forms themselves are in ☰ → **Connections**.
+
 Battle test offers Lucid, Top One and FundedNext account scenarios. Current FundedNext Rapid Pro
 25K/50K/100K and Flex 50K/100K/150K sit beside the historical scenarios. Read each rule sheet: some
 conditions remain unverified. Fees are editable estimates; enter the checkout price and applicable
