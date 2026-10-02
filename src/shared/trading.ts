@@ -5,6 +5,11 @@
 // the prop accounts, the journal), and 🗄️ Back Office, where every setup is proved first: a backtest pod
 // and a paper pod. Prices are real (CME futures and Bitcoin); nothing here can place an order.
 
+import type { ManagedR } from './manage.js';
+import type { TunerView } from './tuning.js';
+import type { FarmView } from './farm.js';
+import type { PropFarmView } from './propfarm.js';
+
 export const SYMBOLS = ['NQ', 'ES', 'GC', 'BTC'] as const;
 export type Symbol = (typeof SYMBOLS)[number];
 
@@ -242,6 +247,27 @@ export interface Proposal {
   dataSource?: string;
 }
 
+/** What the indicators read on the bar a trade was entered on: what the Backtest Lab's filters ask of it. */
+export interface TradeInd {
+  /** Minutes since midnight Pacific. */
+  m: number;
+  /** The 9, 21 and 50 EMA on the 5-minute chart. */
+  ema9: number | null;
+  ema21: number | null;
+  ema50: number | null;
+  /** RSI(14), ADX(14) and the MACD histogram (12, 26, 9), all on the 5-minute chart. */
+  rsi: number | null;
+  adx: number | null;
+  macd: number | null;
+  /** The 5-minute ATR(14), in points. */
+  atr: number | null;
+  /** NY VWAP and the overnight VWAP. */
+  vwap: number | null;
+  onVwap: number | null;
+  /** The signal bar's volume against the 20 one-minute bars before it (1 is average). */
+  relVol: number | null;
+}
+
 export interface PaperTrade {
   id: string;
   day: string;
@@ -260,6 +286,19 @@ export interface PaperTrade {
   dollars: number;
   why: string;
   taken?: boolean;
+  /** The indicators on the entry bar (trades from before the lab kept them have none). */
+  ind?: TradeInd;
+  /** How it would have come out managed other ways (stop to breakeven, half off, trailed, added to), in R. */
+  alt?: ManagedR;
+  /** The furthest it went against and for the trade while open, in points, and when: what an account's equity did inside it. */
+  mae?: number;
+  mfe?: number;
+  maeAt?: number;
+  mfeAt?: number;
+  /** One bar touched both its stop and its target: which came first is the fill policy's guess (see shared/fills.ts). */
+  ambiguous?: boolean;
+  /** A bar opened past its stop, so it lost more than one risk. */
+  gapped?: boolean;
 }
 
 export interface PlaybookStats {
@@ -297,6 +336,65 @@ export interface BacktestSummary {
   /** The best playbook and market by expectancy, with enough trades to mean something. */
   best: { playbook: PlaybookId; symbol: Symbol; avgR: number; trades: number } | null;
   note: string;
+  /** The playbook tuner: every version of the tuned playbooks, and what its last run tried. */
+  tuner?: TunerView;
+  /** Ways of mixing the tuned playbooks in a day (one first and another as the fallback, one for trending and one for ranging), best per trade first. */
+  mixes?: PlanResult[];
+}
+
+/** The live eval as the boards show it (see server/trading/live-eval.ts). */
+export interface LiveEvalView {
+  accountId: string;
+  firm: string;
+  program: string;
+  kind: 'eval' | 'funded';
+  /** What it trades, in a line. */
+  label: string;
+  startDay: string;
+  /** Every weekday since it started, oldest first. */
+  days: string[];
+  office: {
+    result: 'passed' | 'busted' | 'running';
+    days: number;
+    pnl: number;
+    target: number;
+    cushion: number;
+    drawdown: number;
+    taken: number;
+    today: number;
+    todayTrades: number;
+    /** Paper trades it's in right now (they count once they close). */
+    openNow: number;
+    why: string;
+    /** Profit after each day (null: a day it hasn't reached yet). */
+    series: (number | null)[];
+  };
+  /** The owner's own account over the same days: what it has made since the office started keeping count. */
+  you: { accountId: string; name: string; pnl: number | null; today: number; since: string | null; series: (number | null)[] } | null;
+}
+
+/** How one game plan did over the backtest (see shared/dayplan.ts). */
+export interface PlanResult {
+  label: string;
+  mode: 'every' | 'fallback' | 'by-day';
+  order: PlaybookId[];
+  trades: number;
+  winRate: number;
+  avgR: number;
+  totalR: number;
+  maxDrawdownR: number;
+  /** On the later third of the days. */
+  laterAvgR: number;
+}
+
+/** Every trade the last backtest took, for the Backtest Lab and the eval simulator to work through in the browser. */
+export interface BacktestDetail {
+  ranAt: number;
+  /** Trading days replayed, oldest first (a day a playbook took nothing on is still a day). */
+  days: string[];
+  trades: PaperTrade[];
+  /** The same days traded by each candidate version of a tuned playbook (`trades` has the live versions'). */
+  versions?: { playbook: PlaybookId; version: number; trades: PaperTrade[] }[];
 }
 
 export interface PaperBook {
@@ -331,8 +429,11 @@ export interface PropRules {
 
 /** The firms Abe is trying out, with the rules Trade Pilot keeps for them (verify at checkout: firms change them). */
 export const PROP_ACCOUNTS: PropRules[] = [
-  { id: 'lucidflex-50k', firm: 'Lucid', program: 'LucidFlex 50K', size: 50_000, profitTarget: 3000, drawdown: 2000, drawdownType: 'trailing-eod', lockProfit: 0, dailyLossLimit: null, maxMicros: 50, consistencyPercent: 50, consistencyBasis: 'totalProfit', minTradingDays: 5, kind: 'eval' },
-  { id: 'lucidflex-100k', firm: 'Lucid', program: 'LucidFlex 100K', size: 100_000, profitTarget: 6000, drawdown: 3000, drawdownType: 'trailing-eod', lockProfit: 0, dailyLossLimit: null, maxMicros: 100, consistencyPercent: 50, consistencyBasis: 'totalProfit', minTradingDays: 5, kind: 'eval' },
+  // LucidFlex: 40 and 60 micros, a floor that locks at $100 over the start, and no published minimum days
+  // (two is the least its 50% consistency rule allows), as read on the firm's pages on 2 October 2026.
+  // The 50K agrees with its rule set in shared/prop-rules.ts.
+  { id: 'lucidflex-50k', firm: 'Lucid', program: 'LucidFlex 50K', size: 50_000, profitTarget: 3000, drawdown: 2000, drawdownType: 'trailing-eod', lockProfit: 100, dailyLossLimit: null, maxMicros: 40, consistencyPercent: 50, consistencyBasis: 'totalProfit', minTradingDays: 2, kind: 'eval' },
+  { id: 'lucidflex-100k', firm: 'Lucid', program: 'LucidFlex 100K', size: 100_000, profitTarget: 6000, drawdown: 3000, drawdownType: 'trailing-eod', lockProfit: 100, dailyLossLimit: null, maxMicros: 60, consistencyPercent: 50, consistencyBasis: 'totalProfit', minTradingDays: 2, kind: 'eval' },
   { id: 'topstep-50k', firm: 'Topstep', program: 'Combine 50K', size: 50_000, profitTarget: 3000, drawdown: 2000, drawdownType: 'trailing-eod', lockProfit: 0, dailyLossLimit: null, maxMicros: 50, consistencyPercent: 50, consistencyBasis: 'profitTarget', minTradingDays: 2, kind: 'eval' },
   { id: 'tof-50k', firm: 'Top One', program: 'Ignite 50K (funded)', size: 50_000, profitTarget: 3000, drawdown: 2000, drawdownType: 'trailing-eod', lockProfit: 100, dailyLossLimit: null, maxMicros: 70, consistencyPercent: 15, consistencyBasis: 'totalProfit', minTradingDays: 5, kind: 'funded' },
   { id: 'apex-50k', firm: 'Apex', program: 'Apex 4.0 50K', size: 50_000, profitTarget: 3000, drawdown: 2500, drawdownType: 'trailing-intraday', lockProfit: 100, dailyLossLimit: null, maxMicros: 100, consistencyPercent: 50, consistencyBasis: 'totalProfit', minTradingDays: 8, kind: 'eval' },
@@ -518,6 +619,12 @@ export interface PineTest {
   inSample: PineMetrics;
   outSample: PineMetrics;
   bySymbol: Partial<Record<Symbol, PineMetrics>>;
+  /**
+   * The same replay under the office's realistic fill policy and after ordinary costs. Everything above is
+   * Pine parity (gross, target before stop inside a bar), which is what TradingView shows; this is what an
+   * order would have got. `ambiguous` counts the trades whose result rests on a guess inside one bar.
+   */
+  realistic?: { all: PineMetrics; ambiguous: number; policy: string; cost: string };
   params: PineParams;
   /** Against the version it was made from, when the lab made it. */
   vs: { version: string; dAvgR: number; dTotalR: number; verdict: 'better' | 'same' | 'worse' | 'unproven'; reason: string; /** How sure: the gap against the noise in this many trades. */ confidence: 'low' | 'medium' | 'high' } | null;
@@ -611,6 +718,12 @@ export interface TradingSnapshot {
   proposals: Proposal[];
   paper: PaperBook;
   backtest: BacktestSummary | null;
+  /** The eval being run forward day by day on the paper book, beside the owner's own result (null: none running). */
+  liveEval?: LiveEvalView | null;
+  /** The first forward run of the prop farm, as the wall board shows it (null: none). */
+  farm?: FarmView | null;
+  /** The prop farm in full: accounts, research jobs, forward runs, payouts (see shared/propfarm.ts). */
+  propFarm?: PropFarmView;
   playbook: PlaybookItem[];
   bias: Bias[];
   accounts: AccountState[];

@@ -189,6 +189,8 @@ export function openStrategyDesk(opts: { onAsk?: () => void } = {}) {
   /** Did it hold up? All the days, the earlier days it's picked on, and the later days held back (with the live version's number beside it). */
   const periods = (t: NonNullable<PineVersionInfo['test']>, liveT: PineVersionInfo['test'], isLive: boolean) => {
     const rows: [string, PineMetrics, PineMetrics | undefined][] = [['All days', t.all, liveT?.all], ['Earlier days', t.inSample, liveT?.inSample], ['Later days (held back)', t.outSample, liveT?.outSample]];
+    // The rows above count fills the way the chart does. This one fills the way an order would be, and charges for it.
+    if (t.realistic) rows.push([`Realistic fills, after costs${t.realistic.ambiguous ? ` (${t.realistic.ambiguous} rest on a guess inside a bar)` : ''}`, t.realistic.all, liveT?.realistic?.all]);
     return h('table.strategy-table', {}, th('', 'Trades', 'Win rate', 'Avg per trade', 'Total', ...(isLive ? [] : ['Live avg'])), h('tbody', {}, ...rows.map(([label, m, l]) => h('tr', {}, h('th', { scope: 'row' }, label), num(String(m.trades)), num(pctOf(m.winRate)), num(`${signed(m.avgR)} R`, rTone(m.avgR)), num(`${signed(m.totalR, 1)} R`, rTone(m.totalR)), ...(isLive ? [] : [num(l ? `${signed(l.avgR)} R` : '—', l ? rTone(l.avgR) : '')])))));
   };
   const markets = (t: NonNullable<PineVersionInfo['test']>) =>

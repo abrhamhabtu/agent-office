@@ -1,5 +1,8 @@
 import type { Bar, Levels, PaperTrade, PlaybookId, ProposalStage, Symbol, Zone } from '../../shared/trading.js';
 import { INSTRUMENTS, PLAYBOOK_BY_ID } from '../../shared/trading.js';
+import { settingsOf, type Tuning } from '../../shared/tuning.js';
+import type { ManagedR, ManageId } from '../../shared/manage.js';
+import { exitOnBar, REALISTIC } from '../../shared/fills.js';
 
 // The playbooks as code. A trading day's one-minute bars are replayed in order through four scanners,
 // one per playbook, the way you'd sit through the session watching them: that one replay is what the
@@ -76,6 +79,73 @@ class Atr {
     } else this.value = (this.value! * (this.n - 1) + tr) / this.n;
   }
 }
+/** Wilder's RSI. */
+class Rsi {
+  value: number | null = null;
+  private prev: number | null = null;
+  private up = 0;
+  private down = 0;
+  private seen = 0;
+  constructor(private n: number) {}
+  push(v: number) {
+    if (this.prev != null) {
+      const d = v - this.prev;
+      const u = Math.max(0, d);
+      const dn = Math.max(0, -d);
+      if (this.seen < this.n) {
+        this.up += u / this.n;
+        this.down += dn / this.n;
+      } else {
+        this.up = (this.up * (this.n - 1) + u) / this.n;
+        this.down = (this.down * (this.n - 1) + dn) / this.n;
+      }
+      this.seen++;
+      if (this.seen >= this.n) this.value = this.down === 0 ? 100 : 100 - 100 / (1 + this.up / this.down);
+    }
+    this.prev = v;
+  }
+}
+/** Wilder's ADX: how strongly the market is trending, whichever way. */
+class Adx {
+  value: number | null = null;
+  private prev: Bar | null = null;
+  private tr = 0;
+  private plus = 0;
+  private minus = 0;
+  private dxSum = 0;
+  private seen = 0;
+  constructor(private n: number) {}
+  push(b: Bar) {
+    const p = this.prev;
+    this.prev = b;
+    if (!p) return;
+    const tr = Math.max(b.high - b.low, Math.abs(b.high - p.close), Math.abs(b.low - p.close));
+    const upMove = b.high - p.high;
+    const downMove = p.low - b.low;
+    const plus = upMove > downMove && upMove > 0 ? upMove : 0;
+    const minus = downMove > upMove && downMove > 0 ? downMove : 0;
+    this.seen++;
+    if (this.seen <= this.n) {
+      this.tr += tr;
+      this.plus += plus;
+      this.minus += minus;
+      if (this.seen < this.n) return;
+    } else {
+      this.tr += tr - this.tr / this.n;
+      this.plus += plus - this.plus / this.n;
+      this.minus += minus - this.minus / this.n;
+    }
+    if (!(this.tr > 0)) return;
+    const pdi = (100 * this.plus) / this.tr;
+    const mdi = (100 * this.minus) / this.tr;
+    const dx = pdi + mdi > 0 ? (100 * Math.abs(pdi - mdi)) / (pdi + mdi) : 0;
+    const k = this.seen - this.n;
+    if (k < this.n) {
+      this.dxSum += dx;
+      if (k === this.n - 1) this.value = this.dxSum / this.n;
+    } else this.value = (this.value! * (this.n - 1) + dx) / this.n;
+  }
+}
 class Vwap {
   private pv = 0;
   private pv2 = 0;
@@ -130,6 +200,62 @@ export class Profile {
     }
     return { poc: (pocK + 0.5) * this.bin, vah: (keys[hi]! + 1) * this.bin, val: keys[lo]! * this.bin };
   }
+}
+
+// ---- Managing a trade other ways -----------------------------------------------------------------------
+
+/**
+ * A trade followed under one other way of managing it (see shared/manage.ts): what's still on, where
+ * its stop and target are now, and what has been banked. It runs beside the playbook's own trade and
+ * can outlast it: a trailed runner is still going after the written target was hit.
+ */
+interface Shadow {
+  style: Exclude<ManageId, 'written'>;
+  stop: number;
+  target: number | null;
+  /** What's still held: each unit's entry and its share of the first position. */
+  units: { entry: number; size: number }[];
+  /** R already banked. */
+  banked: number;
+  /** The +1R step has been taken. */
+  moved: boolean;
+  best: number;
+  done: boolean;
+}
+const STYLES: Shadow['style'][] = ['be', 'half', 'trail', 'add'];
+
+/** One bar of a managed trade. Like the playbook's own: the stop is looked at first, then the target. */
+function stepShadow(sh: Shadow, t: PaperTrade, b: Bar, flat: boolean) {
+  const d = t.side === 'long' ? 1 : -1;
+  const risk = Math.abs(t.entry - t.stop);
+  const out = (price: number) => {
+    for (const u of sh.units) sh.banked += (u.size * (price - u.entry) * d) / risk;
+    sh.units = [];
+    sh.done = true;
+  };
+  if (d > 0 ? b.low <= sh.stop : b.high >= sh.stop) return out(sh.stop);
+  if (sh.target != null && (d > 0 ? b.high >= sh.target : b.low <= sh.target)) return out(sh.target);
+  const one = t.entry + d * risk;
+  if (!sh.moved && (d > 0 ? b.high >= one : b.low <= one)) {
+    sh.moved = true;
+    sh.stop = t.entry;
+    if (sh.style === 'half') {
+      sh.banked += 0.5;
+      sh.units[0]!.size = 0.5;
+    } else if (sh.style === 'add') sh.units.push({ entry: one, size: 1 });
+    else if (sh.style === 'trail') sh.target = null;
+  }
+  sh.best = d > 0 ? Math.max(sh.best, b.high) : Math.min(sh.best, b.low);
+  // The trail only ever tightens, one risk behind the best price so far; it takes effect from the next bar.
+  if (sh.style === 'trail' && sh.moved) sh.stop = d > 0 ? Math.max(sh.stop, sh.best - risk) : Math.min(sh.stop, sh.best + risk);
+  if (flat) out(b.close);
+}
+
+/** Where a managed trade stands: what it banked, and what it still holds marked at `price`. */
+function shadowR(sh: Shadow, t: PaperTrade, price: number): number {
+  const d = t.side === 'long' ? 1 : -1;
+  const risk = Math.abs(t.entry - t.stop);
+  return Math.round((sh.banked + sh.units.reduce((a, u) => a + (u.size * (price - u.entry) * d) / risk, 0)) * 100) / 100;
 }
 
 // ---- Replaying a day ------------------------------------------------------------------------------------
@@ -203,7 +329,7 @@ interface Scanner {
 const view = (stage: ProposalStage, title: string, extra: Partial<ScanView> = {}): ScanView => ({ stage, side: null, title, checks: [], entry: null, stop: null, target: null, note: '', ...extra });
 
 // Evan Dyer: the trend is set, price comes all the way back to NY VWAP, and bounces. One attempt a session.
-function vwapPullback(symbol: Symbol): Scanner {
+function vwapPullback(symbol: Symbol, k: Record<string, number>): Scanner {
   const buf = INSTRUMENTS[symbol].buffers.vwap;
   const tick = INSTRUMENTS[symbol].tick;
   let phase: 'wait' | 'trend' | 'touched' | 'done' | 'sliced' = 'wait';
@@ -216,7 +342,7 @@ function vwapPullback(symbol: Symbol): Scanner {
   return {
     id: 'vwap-pullback',
     step(c) {
-      if (phase === 'done' || c.vwap == null || c.m < RTH_OPEN + 5 || c.m >= 660) return null;
+      if (phase === 'done' || c.vwap == null || c.m < RTH_OPEN + 5 || c.m >= k.lastEntry!) return null;
       const { b, vwap } = c;
       const slope = c.vwapPast == null ? 0 : vwap - c.vwapPast;
       const up = c.ema9 != null && c.ema21 != null && c.ema9 > c.ema21 && b.close > vwap && slope > 0;
@@ -238,7 +364,7 @@ function vwapPullback(symbol: Symbol): Scanner {
       const d = dir(side);
       if (phase === 'trend') {
         swing = side === 'long' ? Math.max(swing, b.high) : Math.min(swing, b.low);
-        const away = (swing - vwap) * d >= 2 * buf;
+        const away = (swing - vwap) * d >= k.away! * buf;
         const tagged = side === 'long' ? b.low <= vwap + 2 * tick : b.high >= vwap - 2 * tick;
         if (tagged && away) {
           phase = 'touched';
@@ -253,18 +379,20 @@ function vwapPullback(symbol: Symbol): Scanner {
         phase = 'sliced';
         return null;
       }
-      if (c.i - touchAt > 6) {
+      if (c.i - touchAt > k.wait!) {
         phase = 'trend';
         swing = side === 'long' ? b.high : b.low;
         return null;
       }
       const bounce = (b.close - b.open) * d > 0 && (b.close - vwap) * d > 0 && c.prev != null && (b.close - (side === 'long' ? c.prev.high : c.prev.low)) * d > 0;
       if (!bounce) return null;
+      // An extra rule the tuner can switch on: only with the night's bias behind it.
+      if (k.bias && (c.onVwap == null || (b.close - c.onVwap) * d <= 0)) return null;
       const entry = b.close;
-      const stop = round(touchExt - d * buf, tick);
+      const stop = round(touchExt - d * buf * k.stop!, tick);
       const risk = (entry - stop) * d;
       if (risk <= 0) return null;
-      const target = (swing - entry) * d >= 1.5 * risk ? swing : round(entry + d * 2 * risk, tick);
+      const target = k.swing && (swing - entry) * d >= 1.5 * risk ? swing : round(entry + d * k.target! * risk, tick);
       phase = 'done';
       return { side, entry, stop, target, why: `Bounced off NY VWAP ${vwap.toFixed(2)} with the trend${b.volume > c.avgVol ? ', volume up' : ''}` };
     },
@@ -272,7 +400,7 @@ function vwapPullback(symbol: Symbol): Scanner {
       if (!c || c.vwap == null) return view('off', 'Waiting for the New York open');
       if (c.m < RTH_OPEN + 5) return view('off', 'Opens after the first 5 minutes', { checks });
       if (phase === 'done') return view('done', 'Took today’s one attempt', { side, checks });
-      if (c.m >= 660) return view('off', 'Best in the first hours: done for today', { checks });
+      if (c.m >= k.lastEntry!) return view('off', 'Best in the first hours: done for today', { checks });
       const d = dir(side);
       if (phase === 'wait' || phase === 'sliced')
         return view('watching', phase === 'sliced' ? 'Sliced through VWAP: trend in doubt, standing aside' : 'No clean trend: sitting on hands', { checks, note: 'If price does not come to VWAP, that is a valid non-trade.' });
@@ -288,7 +416,7 @@ function vwapPullback(symbol: Symbol): Scanner {
 
 // Evan Dyer's double break: the 15-minute opening range sets, then price breaks the range AND NY VWAP
 // the same way. Enter the retest of the level it broke. No VWAP break, no trade.
-function doubleBreak(symbol: Symbol): Scanner {
+function doubleBreak(symbol: Symbol, _k: Record<string, number>): Scanner {
   const buf = INSTRUMENTS[symbol].buffers.doubleBreak;
   const tick = INSTRUMENTS[symbol].tick;
   let phase: 'wait' | 'armed' | 'retest' | 'done' = 'wait';
@@ -356,7 +484,7 @@ function doubleBreak(symbol: Symbol): Scanner {
 
 // Octavia: zones drawn off the small basing candle before a big 5m impulse. Fresh zones only, first retest,
 // a rejection close in the zone's direction. Supply zones short, demand zones long, never the other way.
-function supplyDemand(symbol: Symbol): Scanner {
+function supplyDemand(symbol: Symbol, _k: Record<string, number>): Scanner {
   const buf = INSTRUMENTS[symbol].buffers.zone;
   const tick = INSTRUMENTS[symbol].tick;
   let retest: { zone: Zone; at: number; ext: number } | null = null;
@@ -447,19 +575,20 @@ function supplyDemand(symbol: Symbol): Scanner {
 
 // Chanelle: price is pushed to the edge of value (VAL cheap, VAH expensive), the auction stalls, and a
 // candle BODY closes back through the last imbalance. A fixed stop, a fixed 1.5R. Never off POC.
-function failedAuction(symbol: Symbol): Scanner {
-  const stopPts = INSTRUMENTS[symbol].buffers.auctionStop;
+function failedAuction(symbol: Symbol, k: Record<string, number>): Scanner {
+  const stopPts = INSTRUMENTS[symbol].buffers.auctionStop * k.stop!;
   const tick = INSTRUMENTS[symbol].tick;
   let edge: { side: 'long' | 'short'; at: number; extAt: number; ext: number; poc: number } | null = null;
   let taken = 0;
   let checks: ScanView['checks'] = [];
   // Any session (Globex, London, New York), but flat by the close: no new trade in the last half hour.
-  const allowed = (m: number) => m < 750;
+  // The tuner can keep it to the New York session.
+  const allowed = (m: number) => m < 750 && (!k.nyOnly || m >= RTH_OPEN);
   return {
     id: 'failed-auction',
     step(c, open) {
       const v = c.value;
-      if (!v || c.profileBars < 90 || open || taken >= 4 || !allowed(c.m)) {
+      if (!v || c.profileBars < 90 || open || taken >= k.maxTrades! || !allowed(c.m)) {
         edge = null;
         return null;
       }
@@ -479,7 +608,7 @@ function failedAuction(symbol: Symbol): Scanner {
         edge = null;
         return null;
       }
-      const stalled = c.i - edge.extAt >= 3;
+      const stalled = c.i - edge.extAt >= k.stall!;
       // The last imbalance made on the push into the edge: a three-bar gap the move left behind.
       let gap: number | null = null;
       for (let k = c.i - 1; k >= Math.max(2, edge.at - 25); k--) {
@@ -497,17 +626,17 @@ function failedAuction(symbol: Symbol): Scanner {
       // No imbalance on the push, no trigger: Chanelle only takes the inversion.
       const trigger = gap;
       const bodyThrough = trigger != null && (b.close - trigger) * d > 0 && (b.close - b.open) * d > 0;
-      const room = (v.poc - b.close) * d >= stopPts;
+      const room = (v.poc - b.close) * d >= stopPts * k.room!;
       checks = [
         { label: `Pushed to ${d > 0 ? 'VAL' : 'VAH'} ${(d > 0 ? v.val : v.vah).toFixed(2)}`, ok: true },
-        { label: 'Auction stalled (no new extreme for 3 bars)', ok: stalled },
+        { label: `Auction stalled (no new extreme for ${k.stall} bars)`, ok: stalled },
         { label: 'Body closed back through the imbalance', ok: bodyThrough },
-        { label: 'At least 1R of room to POC', ok: room },
+        { label: `At least ${k.room}R of room to POC`, ok: room },
       ];
       if (!stalled || !bodyThrough || !room) return null;
       const entry = b.close;
       const stop = round(entry - d * stopPts, tick);
-      const target = round(entry + d * 1.5 * stopPts, tick);
+      const target = round(entry + d * k.target! * stopPts, tick);
       edge = null;
       taken++;
       return { side: d > 0 ? 'long' : 'short', entry, stop, target, why: `Failed auction at ${d > 0 ? 'VAL' : 'VAH'}: body closed back through ${trigger!.toFixed(2)}; POC ${v.poc.toFixed(2)} is the magnet` };
@@ -518,9 +647,9 @@ function failedAuction(symbol: Symbol): Scanner {
       if (edge) {
         const d = edge.side === 'long' ? 1 : -1;
         const entry = round(c.b.close, tick);
-        return view('ready', `At ${d > 0 ? 'VAL' : 'VAH'}: waiting for the auction to fail`, { side: edge.side, checks, entry, stop: round(entry - d * stopPts, tick), target: round(entry + d * 1.5 * stopPts, tick), note: 'No body close through the imbalance, no trade.' });
+        return view('ready', `At ${d > 0 ? 'VAL' : 'VAH'}: waiting for the auction to fail`, { side: edge.side, checks, entry, stop: round(entry - d * stopPts, tick), target: round(entry + d * k.target! * stopPts, tick), note: 'No body close through the imbalance, no trade.' });
       }
-      if (taken >= 4) return view('done', 'Four auction trades today: done');
+      if (taken >= k.maxTrades!) return view('done', 'Auction trades for today: done');
       if (!allowed(c.m)) return view('off', 'Outside the session window');
       const price = c.b.close;
       const long = price - v.val <= v.vah - price;
@@ -536,7 +665,7 @@ function failedAuction(symbol: Symbol): Scanner {
         ],
         entry,
         stop: round(entry - d * stopPts, tick),
-        target: round(entry + d * 1.5 * stopPts, tick),
+        target: round(entry + d * k.target! * stopPts, tick),
         note: 'Longs only from VAL, shorts only from VAH.',
       });
     },
@@ -546,8 +675,8 @@ function failedAuction(symbol: Symbol): Scanner {
 // Support and resistance: a level price has respected (three touches or more on the 5m, or yesterday's and
 // the overnight extremes). Bounce off it on a rejection candle, or trade the break and retest. Each level
 // once a day, the stop just past it, the target at the next level (or two risks out).
-function supportResistance(symbol: Symbol): Scanner {
-  const buf = INSTRUMENTS[symbol].buffers.zone;
+function supportResistance(symbol: Symbol, k: Record<string, number>): Scanner {
+  const buf = INSTRUMENTS[symbol].buffers.zone * k.stop!;
   const tick = INSTRUMENTS[symbol].tick;
   const used = new Set<number>();
   const broke = new Map<number, { dir: 1 | -1; at: number }>();
@@ -569,7 +698,7 @@ function supportResistance(symbol: Symbol): Scanner {
         if (prev.close <= l.price + tol && b.close > l.price + tol && prev.close < l.price) broke.set(l.price, { dir: 1, at: c.i });
         if (prev.close >= l.price - tol && b.close < l.price - tol && prev.close > l.price) broke.set(l.price, { dir: -1, at: c.i });
       }
-      if (open || taken >= 3 || c.m < RTH_OPEN || c.m >= 720) return null;
+      if (open || taken >= k.maxTrades! || c.m < RTH_OPEN || c.m >= k.lastEntry!) return null;
       for (const l of c.sr) {
         if (used.has(l.price)) continue;
         const brk = broke.get(l.price);
@@ -579,9 +708,12 @@ function supportResistance(symbol: Symbol): Scanner {
         // Break and retest: broke through within the last 20 bars, came back to it, and held.
         const retestLong = brk?.dir === 1 && c.i - brk.at > 1 && c.i - brk.at <= 20 && b.low <= l.price + tol && b.close > l.price && b.close > b.open;
         const retestShort = brk?.dir === -1 && c.i - brk.at > 1 && c.i - brk.at <= 20 && b.high >= l.price - tol && b.close < l.price && b.close < b.open;
-        const d: 1 | -1 | 0 = supportBounce || retestLong ? 1 : resistBounce || retestShort ? -1 : 0;
+        // The tuner can keep it to bounces (1) or to breaks and retests (2).
+        const bounces = k.mode !== 2;
+        const retests = k.mode !== 1;
+        const d: 1 | -1 | 0 = (bounces && supportBounce) || (retests && retestLong) ? 1 : (bounces && resistBounce) || (retests && retestShort) ? -1 : 0;
         if (!d) continue;
-        const kind = retestLong || retestShort ? 'break and retest' : 'bounce';
+        const kind = retests && (d > 0 ? retestLong : retestShort) && !(bounces && (d > 0 ? supportBounce : resistBounce)) ? 'break and retest' : 'bounce';
         checks = [
           { label: `${l.label} ${l.price.toFixed(2)} (${l.touches} touches)`, ok: true },
           { label: kind === 'bounce' ? 'Rejection candle at the level' : 'Broke it, came back, held', ok: true },
@@ -591,7 +723,7 @@ function supportResistance(symbol: Symbol): Scanner {
         const risk = (entry - stop) * d;
         if (risk <= 0) continue;
         const nxt = nextLevel(c, entry, d);
-        const target = nxt != null && (nxt - entry) * d >= 1.5 * risk ? nxt : round(entry + d * 2 * risk, tick);
+        const target = nxt != null && (nxt - entry) * d >= 1.5 * risk ? nxt : round(entry + d * k.target! * risk, tick);
         used.add(l.price);
         taken++;
         return { side: d > 0 ? 'long' : 'short', entry, stop, target, why: `${kind === 'bounce' ? 'Bounced off' : 'Retested and held'} ${l.label.toLowerCase()} ${l.price.toFixed(2)}` };
@@ -600,7 +732,7 @@ function supportResistance(symbol: Symbol): Scanner {
     },
     view(c) {
       if (!c || !c.sr.length) return view('off', 'Marking the levels');
-      if (taken >= 3) return view('done', 'Three level trades today: done');
+      if (taken >= k.maxTrades!) return view('done', 'Level trades for today: done');
       const price = c.b.close;
       const tol = tolOf(c);
       const below = c.sr.filter((l) => l.price < price && !used.has(l.price)).sort((a, b) => b.price - a.price)[0];
@@ -613,11 +745,11 @@ function supportResistance(symbol: Symbol): Scanner {
       const risk = Math.abs(pick.price - stop);
       const target = nxt != null && Math.abs(nxt - pick.price) >= 1.5 * risk ? nxt : round(pick.price + d * 2 * risk, tick);
       const near = Math.abs(price - pick.price) <= Math.max(tol * 2, c.atr1 * 1.5);
-      const inWindow = c.m >= RTH_OPEN && c.m < 720;
+      const inWindow = c.m >= RTH_OPEN && c.m < k.lastEntry!;
       return view(!inWindow ? 'off' : near ? 'ready' : 'watching', `${d > 0 ? 'Support' : 'Resistance'} at ${pick.price.toFixed(2)}: ${d > 0 ? 'buy' : 'sell'} the rejection`, {
         side: d > 0 ? 'long' : 'short',
         checks: [
-          { label: `${pick.label} (${pick.touches} touches)`, ok: pick.touches >= 3 || /yesterday|overnight/i.test(pick.label) },
+          { label: `${pick.label} (${pick.touches} touches)`, ok: pick.touches >= k.touches! || /yesterday|overnight/i.test(pick.label) },
           { label: 'Price at the level', ok: near },
           { label: 'Rejection candle (wick or engulfing)', ok: false },
         ],
@@ -631,7 +763,7 @@ function supportResistance(symbol: Symbol): Scanner {
 }
 
 /** Levels the 5m swings keep turning at: pivots within a quarter of an ATR of each other, three or more of them. */
-function swingLevels(fives: Bar[], atr: number | null): SrLevel[] {
+function swingLevels(fives: Bar[], atr: number | null, touches = 3): SrLevel[] {
   if (fives.length < 10 || !atr) return [];
   const pivots: number[] = [];
   for (let i = 2; i < fives.length - 2; i++) {
@@ -645,7 +777,7 @@ function swingLevels(fives: Bar[], atr: number | null): SrLevel[] {
   const tol = atr * 0.25;
   let group: number[] = [];
   const flush = () => {
-    if (group.length >= 3) out.push({ price: group.reduce((a, v) => a + v, 0) / group.length, touches: group.length, label: 'Tested level' });
+    if (group.length >= touches) out.push({ price: group.reduce((a, v) => a + v, 0) / group.length, touches: group.length, label: 'Tested level' });
     group = [];
   };
   for (const p of pivots) {
@@ -656,7 +788,7 @@ function swingLevels(fives: Bar[], atr: number | null): SrLevel[] {
   return out;
 }
 
-const SCANNERS: ((s: Symbol) => Scanner)[] = [vwapPullback, doubleBreak, supplyDemand, supportResistance, failedAuction];
+const SCANNERS: Record<PlaybookId, (s: Symbol, k: Record<string, number>) => Scanner> = { 'vwap-pullback': vwapPullback, 'double-break': doubleBreak, 'supply-demand': supplyDemand, 'support-resistance': supportResistance, 'failed-auction': failedAuction };
 
 /** Finds new zones on the 5m chart: a small basing candle, then an impulse that leaves it. */
 function spotZone(fives: Bar[], atr: number | null, zones: Zone[]) {
@@ -680,9 +812,12 @@ function spotZone(fives: Bar[], atr: number | null, zones: Zone[]) {
  * Replays a trading day's bars through every playbook. `prior` is the trading day before (for the prior
  * day's high and low, the zones still fresh from it, and indicators that need a run-up).
  */
-export function replayDay(symbol: Symbol, bars: Bar[], prior: Bar[], opts: { live?: boolean } = {}): DayResult {
+export function replayDay(symbol: Symbol, bars: Bar[], prior: Bar[], opts: { live?: boolean; tuning?: Tuning; only?: PlaybookId[] } = {}): DayResult {
   const spec = INSTRUMENTS[symbol];
-  const scanners = SCANNERS.map((f) => f(symbol));
+  // `tuning` is a playbook's settings where they differ from how it was written; `only` replays just those playbooks (the tuner's runs).
+  const ids = (Object.keys(SCANNERS) as PlaybookId[]).filter((id) => !opts.only || opts.only.includes(id));
+  const scanners = ids.map((id) => SCANNERS[id](symbol, settingsOf(id, opts.tuning)));
+  const srTouches = settingsOf('support-resistance', opts.tuning).touches!;
   const nyVwap = new Vwap();
   const onVwap = new Vwap();
   const profile = new Profile(spec.profileBin);
@@ -690,6 +825,16 @@ export function replayDay(symbol: Symbol, bars: Bar[], prior: Bar[], opts: { liv
   const atr5 = new Atr(14);
   const ema9 = new Ema(9);
   const ema21 = new Ema(21);
+  // Not used by any playbook: kept on each trade for the Backtest Lab's filters (see TradeInd).
+  const ema50 = new Ema(50);
+  const rsi = new Rsi(14);
+  const adx = new Adx(14);
+  const macdFast = new Ema(12);
+  const macdSlow = new Ema(26);
+  const macdSignal = new Ema(9);
+  let macdHist: number | null = null;
+  let fiveCount = 0;
+  const lastVols: number[] = [];
   const zones: Zone[] = [];
   const fives: Bar[] = [];
   let five: Bar | null = null;
@@ -700,6 +845,17 @@ export function replayDay(symbol: Symbol, bars: Bar[], prior: Bar[], opts: { liv
       atr5.push(five);
       ema9.push(five.close);
       ema21.push(five.close);
+      ema50.push(five.close);
+      rsi.push(five.close);
+      adx.push(five);
+      macdFast.push(five.close);
+      macdSlow.push(five.close);
+      // The signal line only means something once the slow average has had its run-up.
+      if (++fiveCount >= 26) {
+        const line = macdFast.value! - macdSlow.value!;
+        macdSignal.push(line);
+        macdHist = line - macdSignal.value!;
+      }
       spotZone(fives, atr5.value, zones);
       five = null;
     }
@@ -720,6 +876,8 @@ export function replayDay(symbol: Symbol, bars: Bar[], prior: Bar[], opts: { liv
     }
     pushFive(b);
     atr1.push(b);
+    lastVols.push(b.volume);
+    if (lastVols.length > 20) lastVols.shift();
   }
   let orHigh: number | null = null;
   let orLow: number | null = null;
@@ -728,6 +886,8 @@ export function replayDay(symbol: Symbol, bars: Bar[], prior: Bar[], opts: { liv
   const vwapHist: number[] = [];
   const trades: PaperTrade[] = [];
   const open = new Map<PlaybookId, { t: PaperTrade; idx: number }>();
+  /** Every trade of the day followed under the other ways of managing it. */
+  const shadows: { t: PaperTrade; idx: number; list: Shadow[] }[] = [];
   const day = bars.length ? tradingDay(bars[0]!.ts) : '';
   let volSum = 0;
   let ctx: Ctx | null = null;
@@ -739,7 +899,7 @@ export function replayDay(symbol: Symbol, bars: Bar[], prior: Bar[], opts: { liv
   const levelsNow = (m: number, price: number): SrLevel[] => {
     if (srAtFives !== fives.length) {
       srAtFives = fives.length;
-      sr = swingLevels(fives.slice(-160), atr5.value);
+      sr = swingLevels(fives.slice(-160), atr5.value, srTouches);
     }
     const named: SrLevel[] = [];
     if (pdh != null) named.push({ price: pdh, touches: 1, label: 'Yesterday’s high' });
@@ -765,18 +925,43 @@ export function replayDay(symbol: Symbol, bars: Bar[], prior: Bar[], opts: { liv
     o.t.dollars = Math.round((price - o.t.entry) * d * pv * 100) / 100;
     open.delete(id);
   };
+  /** How far the trade has been against and for it, with when: what an account's equity did inside the trade. */
+  const excursion = (t: PaperTrade, at: number, worst: number, best: number) => {
+    const d = t.side === 'long' ? 1 : -1;
+    const adverse = Math.round(Math.max(0, (t.entry - worst) * d) * 100) / 100;
+    const favourable = Math.round(Math.max(0, (best - t.entry) * d) * 100) / 100;
+    if (adverse > (t.mae ?? 0)) {
+      t.mae = adverse;
+      t.maeAt = at;
+    }
+    if (favourable > (t.mfe ?? 0)) {
+      t.mfe = favourable;
+      t.mfeAt = at;
+    }
+  };
 
   for (let i = 0; i < bars.length; i++) {
     const b = bars[i]!;
     const m = sessionMinute(b.ts);
-    // Manage what's open first: a bar that tags both the stop and the target counts as the stop.
+    // Manage what's open first, by the office's one fill policy (see shared/fills.ts): a bar that tags both
+    // the stop and the target counts as the stop, and a bar that opens past the stop fills at its open.
     for (const [id, o] of open) {
       if (o.idx === i) continue;
       const long = o.t.side === 'long';
-      if (long ? b.low <= o.t.stop : b.high >= o.t.stop) close(id, b.ts, o.t.stop, 'loss');
-      else if (long ? b.high >= o.t.target : b.low <= o.t.target) close(id, b.ts, o.t.target, 'win');
-      else if (m >= RTH_CLOSE) close(id, b.ts, b.close, 'time');
+      const fill = exitOnBar(o.t.side, o.t.stop, o.t.target, b, REALISTIC);
+      if (fill) {
+        // Inside the bar that ends it, only what the exit itself proves is counted for certain.
+        const worst = fill.outcome === 'loss' ? fill.price : long ? Math.max(b.low, o.t.stop) : Math.min(b.high, o.t.stop);
+        excursion(o.t, b.ts, worst, fill.outcome === 'win' ? fill.price : o.t.entry);
+        if (fill.ambiguous) o.t.ambiguous = true;
+        if (fill.gapped) o.t.gapped = true;
+        close(id, b.ts, fill.price, fill.outcome);
+      } else {
+        excursion(o.t, b.ts, long ? b.low : b.high, long ? b.high : b.low);
+        if (m >= RTH_CLOSE) close(id, b.ts, b.close, 'time');
+      }
     }
+    for (const s of shadows) if (s.idx !== i) for (const sh of s.list) if (!sh.done) stepShadow(sh, s.t, b, m >= RTH_CLOSE);
     if (m < RTH_OPEN) {
       onVwap.push(b);
       onHigh = onHigh == null ? b.high : Math.max(onHigh, b.high);
@@ -815,6 +1000,7 @@ export function replayDay(symbol: Symbol, bars: Bar[], prior: Bar[], opts: { liv
       sr: levelsNow(m, b.close),
       avgVol: volSum / (i + 1),
     };
+    const avg20 = lastVols.length ? lastVols.reduce((a, v) => a + v, 0) / lastVols.length : 0;
     for (const s of scanners) {
       const sig = s.step(ctx, open.has(s.id));
       if (sig && !open.has(s.id)) {
@@ -834,11 +1020,27 @@ export function replayDay(symbol: Symbol, bars: Bar[], prior: Bar[], opts: { liv
           r: 0,
           dollars: 0,
           why: sig.why,
+          ind: {
+            m: m < 0 ? m + 1440 : m,
+            ema9: ema9.value,
+            ema21: ema21.value,
+            ema50: ema50.value,
+            rsi: rsi.value == null ? null : Math.round(rsi.value * 10) / 10,
+            adx: adx.value == null ? null : Math.round(adx.value * 10) / 10,
+            macd: macdHist,
+            atr: atr5.value,
+            vwap: vw,
+            onVwap: onVwap.value,
+            relVol: avg20 > 0 ? Math.round((b.volume / avg20) * 100) / 100 : null,
+          },
         };
         trades.push(t);
         open.set(s.id, { t, idx: i });
+        shadows.push({ t, idx: i, list: STYLES.map((style) => ({ style, stop: t.stop, target: t.target, units: [{ entry: t.entry, size: 1 }], banked: 0, moved: false, best: t.entry, done: false })) });
       }
     }
+    lastVols.push(b.volume);
+    if (lastVols.length > 20) lastVols.shift();
   }
   // Past the close with nothing left to trade: whatever's still open went flat at the last price.
   const last = bars[bars.length - 1];
@@ -850,6 +1052,8 @@ export function replayDay(symbol: Symbol, bars: Bar[], prior: Bar[], opts: { liv
     t.r = Math.round(((last.close - t.entry) * d * 100) / Math.abs(t.entry - t.stop)) / 100;
     t.dollars = Math.round((last.close - t.entry) * d * pv * 100) / 100;
   }
+  // Each trade's other endings; one still running (live, or a runner past the last bar) is marked to the tape.
+  if (last) for (const s of shadows) s.t.alt = Object.fromEntries(s.list.map((sh) => [sh.style, shadowR(sh, s.t, last.close)])) as ManagedR;
 
   const value = profile.value();
   const q = (v: number | null | undefined) => (v == null || !Number.isFinite(v) ? null : round(v, spec.tick));

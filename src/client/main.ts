@@ -75,10 +75,15 @@ import { floorRole, PLAYBOOK_BY_ID, PODS, podOf, seatJob, SYMBOLS, type FloorRol
 import { trading } from './trading/feed';
 import { openTrading, type PanelTab } from './trading/panel';
 import { openSessionDesk } from './trading/session';
-import { BacktestBoard, BossScreen, EvalBoard, MarketMap, NewsBoard, PaperBoard, PlaybookBoard, ProposalsBoard, TAPE_SPEED, TAPE_WIDTH, TickerStrip, bellText, paintTickerBadge, type Screen as TradingScreen } from './trading/screens';
+import { BossScreen, MarketMap, NewsBoard, PlaybookBoard, ProposalsBoard, TAPE_SPEED, TAPE_WIDTH, TickerStrip, bellText, paintTickerBadge, type Screen as TradingScreen } from './trading/screens';
 import { buildTradingDesks, deskDetailsTab } from './trading/desks';
 import { openScreenPreview } from './trading/preview';
 import { openStrategyDesk } from './trading/strategy';
+import { BacktestBoard, EvalBoard, FarmBoard, PaperBoard } from './trading/backoffice-boards';
+import { openFarm } from './trading/farm';
+import { planner } from './trading/farm-plan';
+import { openBacktestLab } from './trading/backtestlab';
+import { openEvalSim } from './trading/evalsim';
 import { openQueue } from './ui/queue';
 import { openUpgrade, restarting, showRestarting, showUpgraded } from './ui/upgrade';
 import { openHelp, renderCaffeine, renderChat, renderPeople, renderWorkers, updateSpeaking } from './ui/hud';
@@ -288,7 +293,8 @@ mountBoard(office.boardMeshes.queue, queueTex.texture, renderQueueBoard, ['queue
 // the paper book and the market. Screens hang over each pod, and the tape runs along the north wall.
 // One snapshot feeds every screen (see trading/feed.ts); the TV stays free for screen shares.
 const tradingRole = (): FloorRole => floorRole(store.currentFloor()?.name);
-const BOARD_SET: Record<FloorRole, Record<'issues' | 'queue' | 'pulls' | 'services', { screen: TradingScreen; label: string; tab: PanelTab }>> = (() => {
+// A board with a console of its own (`open`) opens that instead of the close-up and the panel's tab.
+const BOARD_SET: Record<FloorRole, Record<'issues' | 'queue' | 'pulls' | 'services', { screen: TradingScreen; label: string; tab: PanelTab; open?: () => void }>> = (() => {
   const market = { screen: new MarketMap(), label: '📊 Live market', tab: 'connections' as PanelTab };
   return {
     bell: {
@@ -298,10 +304,12 @@ const BOARD_SET: Record<FloorRole, Record<'issues' | 'queue' | 'pulls' | 'servic
       services: market,
     },
     office: {
-      issues: { screen: new BacktestBoard(), label: '🧪 Backtest lab', tab: 'backtest' },
-      queue: { screen: new EvalBoard(), label: '🏦 Prop eval simulator', tab: 'backtest' },
+      issues: { screen: new BacktestBoard(), label: '🧪 Backtest lab', tab: 'backtest', open: () => openBacktestLab() },
+      queue: { screen: new EvalBoard(), label: '🏦 Prop eval simulator', tab: 'backtest', open: () => openEvalSim() },
       pulls: { screen: new PaperBoard(), label: '📒 Paper book', tab: 'paper' },
-      services: market,
+      // The market is on every desk's monitor and the tape: this wall has the eval that's being run forward instead.
+      // (It shows the farm when one is running, and the live eval when not.)
+      services: { screen: new FarmBoard(), label: '🌾 Prop farm', tab: 'backtest', open: () => openFarm() },
     },
   };
 })();
@@ -331,9 +339,11 @@ function previewDeskMonitor(deskId: string) {
     onDetails: () => openTrading(role, deskDetailsTab(deskId, role)),
   });
 }
-function previewWallScreen(kind: 'issues' | 'queue' | 'pulls' | 'services') {
+function previewWallScreen(kind: 'issues' | 'queue' | 'pulls' | 'services', tape = false) {
   const role = tradingRole();
-  const board = BOARD_SET[role][kind];
+  // The tape is the market on every floor, whatever hangs on that floor's fourth wall.
+  const board = tape ? BOARD_SET.bell.services : BOARD_SET[role][kind];
+  if (board.open) return board.open();
   board.screen.render(trading.snap, role);
   openScreenPreview({
     title: board.label,
@@ -462,6 +472,33 @@ trading.onAlert((a) => {
 store.on('floors', paintTrading);
 store.on('floor', paintTrading);
 trading.start();
+// The battle test's answer for the setup it was last left on, worked out ahead of time once the backtest
+// is in, so it is there the moment the console is opened. Only for someone who has used the console.
+{
+  let warmed = '';
+  trading.on(() => {
+    const bt = trading.snap?.backtest;
+    const key = `${bt?.ranAt}:${bt?.tuner?.ranAt}`;
+    if (!bt || bt.running || bt.tuner?.running || !bt.days.length || key === warmed) return;
+    try {
+      if (!localStorage.getItem('agent-office.prop-farm')) return;
+    } catch {
+      return;
+    }
+    warmed = key;
+    void trading.backtestDetail().then((d) => planner.warm(d));
+  });
+}
+// A link straight to the Prop Farm console: /#farm, or /#farm=research for one of its views.
+{
+  const want = /^#farm(?:=(overview|research|compare|forward|payouts|battle))?$/.exec(location.hash);
+  if (want) {
+    const off = trading.on(() => {
+      off();
+      openFarm(want[1] as Parameters<typeof openFarm>[0]);
+    });
+  }
+}
 // The machine monitor on the west wall.
 const machineTex = new MachineTexture();
 mountBoard(office.machineScreen, machineTex.texture, () => machineTex.render(store.machine), ['machine']);
@@ -3181,7 +3218,7 @@ function interact(target: Interactable | null, key: DeskKey, note = aimedNote) {
     return;
   }
   if (target.kind === 'ticker') {
-    if (key === 'E') previewWallScreen('services');
+    if (key === 'E') previewWallScreen('services', true);
     return;
   }
   if (target.kind === 'station' && target.deskId) {
@@ -3199,7 +3236,11 @@ function interact(target: Interactable | null, key: DeskKey, note = aimedNote) {
   if (key !== 'E') return;
   if (target.kind === 'session-desk') openSessionDesk();
   else if (target.kind === 'elevator') showElevator();
-  else if (target.kind === 'issues' || target.kind === 'pulls' || target.kind === 'services' || target.kind === 'queue') openTrading(tradingRole(), BOARD_SET[tradingRole()][target.kind].tab);
+  else if (target.kind === 'issues' || target.kind === 'pulls' || target.kind === 'services' || target.kind === 'queue') {
+    const board = BOARD_SET[tradingRole()][target.kind];
+    if (board.open) board.open();
+    else openTrading(tradingRole(), board.tab);
+  }
   else if (target.kind === 'tv') watchShare();
   else if (target.kind === 'jukebox') showJukebox();
   else if (target.kind === 'bookshelf') showBookshelf();
@@ -4482,6 +4523,11 @@ function officeKey(e: KeyboardEvent): boolean {
     case 'KeyH':
       openHelp();
       return true;
+    case 'KeyY':
+      // The Prop Farm console: the same one the Back Office's wall display opens.
+      e.preventDefault();
+      if (!e.repeat) openFarm();
+      return true;
     case 'KeyF':
       startHanging();
       return true;
@@ -4694,7 +4740,7 @@ player.onClick = (ndc) => {
   }
   if (aim?.near && aim.it.kind === 'ticker') {
     reach();
-    previewWallScreen('services');
+    previewWallScreen('services', true);
     return;
   }
   if (aim?.near && (aim.it.kind === 'issues' || aim.it.kind === 'queue' || aim.it.kind === 'pulls' || aim.it.kind === 'services') && aim.hit.object === office.boardMeshes[aim.it.kind]) {
@@ -4816,7 +4862,9 @@ const hud = mountHud(
     { id: 'issues', icon: '🎯', label: 'Proposals', section: 'Open', count: () => trading.snap?.proposals.filter((p) => p.stage === 'ready' || p.stage === 'live').length ?? 0, title: () => 'Live setups from the playbooks', run: () => openTrading(tradingRole(), 'proposals') },
     { id: 'pulls', icon: '📰', label: 'News', section: 'Open', count: () => trading.snap?.news.filter((n) => n.kind === 'calendar' && n.impact === 'high' && n.at > Date.now()).length ?? 0, title: () => 'The calendar and the wire', run: () => openTrading(tradingRole(), 'news') },
     { id: 'queue', icon: '🛡️', label: 'Prop accounts', section: 'Open', title: () => 'Prop accounts and Law-of-10 risk', run: () => openTrading(tradingRole(), 'accounts') },
-    { id: 'services', icon: '🧪', label: 'Backtest', section: 'Open', title: () => 'The backtest, the paper book, the eval simulator', run: () => openTrading(tradingRole(), 'backtest') },
+    { id: 'services', icon: '🧪', label: 'Backtest lab', section: 'Open', title: () => 'What every playbook did on real bars, and which indicators help', run: () => openBacktestLab() },
+    { id: 'prop-farm', icon: '🌾', label: 'Prop farm', section: 'Open', key: 'Y', count: () => (trading.snap?.propFarm?.payouts.filter((p) => p.eligible || p.requested).length ?? 0) + (trading.snap?.propFarm?.jobs.filter((j) => j.status === 'running').length ?? 0), title: () => 'Prop accounts on paper: every account’s state, the research queue, forward runs and payouts (Y)', run: () => openFarm() },
+    { id: 'eval-sim', icon: '🏦', label: 'Eval simulator', section: 'Open', title: () => 'Play a strategy through a prop account’s rules', run: () => openEvalSim() },
     { id: 'trading-connections', icon: '🔌', label: 'Connections', section: 'Open', title: () => 'TradingView alerts, ProjectX, Trade Pilot and the feeds', run: () => openTrading(tradingRole(), 'connections') },
     { id: 'whiteboard', icon: '📝', label: 'Whiteboard', section: 'Open', title: () => 'Draw together, live', run: () => openWhiteboard(net) },
     // Up on the top bar while a meeting is on: what's being worked through in the meeting room.

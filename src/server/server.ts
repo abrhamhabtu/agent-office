@@ -1,4 +1,5 @@
 import http from 'node:http';
+import { TvMcp } from './trading/tv-mcp.js';
 import { TradingDesk } from './trading/desk.js';
 import { stationSnapshot } from './stations.js';
 import type { ProposalAction } from '../shared/trading.js';
@@ -251,6 +252,15 @@ export async function startServer(cfg: Config) {
   const building = new Building(cfg.dataDir, cfg.projectsDir);
   // The market desk behind the trading floors' boards: real prices, the playbooks, the paper book.
   const desk = new TradingDesk(cfg.dataDir);
+  const tvConnections = new Map<string, TvMcp>();
+  const tvConnection = (owner: string) => {
+    let connection = tvConnections.get(owner);
+    if (!connection) {
+      connection = new TvMcp(cfg.dataDir, owner, `http://localhost:${cfg.port}/api/trading/tv-mcp/callback`);
+      tvConnections.set(owner, connection);
+    }
+    return connection;
+  };
   if (!process.env.AGENT_OFFICE_NO_MARKET) desk.start();
   if (cfg.projects) {
     const err = building.setProjectsDir(cfg.projects, 'the command line');
@@ -883,6 +893,13 @@ export async function startServer(cfg: Config) {
     };
     const done = (why: string | undefined) => (why ? send(res, 400, { error: why }) : send(res, 200, desk.snapshot()));
     if (p === '/api/trading/snapshot' && req.method === 'GET') return send(res, 200, desk.snapshot(), { 'cache-control': 'no-store' });
+    // The backtest trade by trade, for the Backtest Lab and the eval simulator (only fetched when one is open).
+    if (p === '/api/trading/backtest/trades' && req.method === 'GET') return send(res, 200, desk.backtestDetail(), { 'cache-control': 'no-store' });
+    // One research job in full (the snapshot only carries each job's summary).
+    if (p === '/api/trading/prop-farm/job' && req.method === 'GET') {
+      const detail = desk.farm.jobDetail(url.searchParams.get('id') ?? '');
+      return detail ? send(res, 200, detail, { 'cache-control': 'no-store' }) : send(res, 404, { error: 'No such job' });
+    }
     // The Pine Vault: a version's exact source to copy into TradingView, and the owner's changes to it.
     if (p === '/api/trading/vault/source' && req.method === 'GET') {
       const src = desk.vault.source(url.searchParams.get('script') ?? '', url.searchParams.get('version') ?? '');
@@ -928,6 +945,14 @@ export async function startServer(cfg: Config) {
       case '/api/trading/backtest':
         void desk.runBacktest();
         return done(undefined);
+      case '/api/trading/prop-farm':
+        return done(desk.farm.act(b));
+      case '/api/trading/live-eval':
+        return done(desk.setLiveEval(b));
+      case '/api/trading/tuner':
+        // The owner's call on a playbook version: make it live, retire it, or mark it looked at.
+        if (b.action === 'seen') return done(desk.tuner.markSeen(String(b.playbook) as never, Number(b.version)));
+        return done(desk.setVersion(b.playbook, b.version, b.status));
       case '/api/trading/webhook-key':
         desk.rotateKey();
         return done(undefined);
@@ -997,6 +1022,17 @@ export async function startServer(cfg: Config) {
       if (p === '/api/logout' && req.method === 'POST') {
         return send(res, 200, { ok: true }, { 'set-cookie': auth.clearCookie(req) });
       }
+      if (p === '/api/trading/tv-mcp/callback' && req.method === 'GET') {
+        const state = url.searchParams.get('state') ?? '';
+        const connection = [...tvConnections.values()].find(c => c.accepts(state));
+        if (!connection) return send(res, 400, { error: 'Sign-in expired; start again from Connections' });
+        try {
+          await connection.finish(state, url.searchParams.get('code') ?? '');
+          res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'referrer-policy': 'no-referrer', 'content-security-policy': "default-src 'none'; style-src 'unsafe-inline'" });
+          res.end('<!doctype html><title>TradingView connected</title><main style="font:18px system-ui;padding:40px"><h1>TradingView connected</h1><p>Return to the office Connections panel and choose Check connection. You can close this tab.</p></main>');
+        } catch { send(res, 400, { error: 'Authorization could not finish. Start again from Connections.' }); }
+        return;
+      }
       if (p === '/api/health') return send(res, 200, { ok: true });
       // TradingView's servers post alerts here; the key in the URL (or the message) is their only credential.
       if (p === '/api/trading/tradingview' && req.method === 'POST') {
@@ -1035,6 +1071,20 @@ export async function startServer(cfg: Config) {
         return;
       }
       if (p === '/api/whoami') return send(res, 200, { ok: true, me: meOf(session.account?.id) });
+      if (p.startsWith('/api/trading/tv-mcp/')) {
+        const local = ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.socket.remoteAddress ?? '');
+        if (!local) return send(res, 403, { error: 'TradingView sign-in and research are available on the local office only' });
+        const connection = tvConnection(session.account?.id ?? 'shared-office');
+        if (p.endsWith('/status') && req.method === 'GET') return send(res, 200, connection.status(), { 'cache-control': 'no-store' });
+        if (req.method !== 'POST') return send(res, 405, { error: 'Use POST' });
+        if (!sameOrigin(req, cfg)) return send(res, 403, { error: 'Forbidden' });
+        try {
+          if (p.endsWith('/connect')) return send(res, 200, await connection.begin());
+          if (p.endsWith('/disconnect')) return send(res, 200, await connection.disconnect());
+          if (p.endsWith('/research')) return send(res, 200, await connection.research(JSON.parse(await readBody(req, 4096))));
+          return send(res, 404, { error: 'No such connection action' });
+        } catch (err) { return send(res, 400, { error: err instanceof Error ? err.message : 'TradingView connection failed' }); }
+      }
       if (p.startsWith('/api/trading/')) return await tradingRoute(p, url, req, res);
       if (p === '/api/agents/opencode/models' && req.method === 'GET') {
         try {

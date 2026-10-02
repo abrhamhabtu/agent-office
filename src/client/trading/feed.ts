@@ -1,4 +1,5 @@
-import type { ProposalAction, TradingSnapshot, TvAlert } from '../../shared/trading';
+import type { BacktestDetail, ProposalAction, TradingSnapshot, TvAlert } from '../../shared/trading';
+import type { JobDetail } from '../../shared/propfarm';
 
 /** A version the test lab made that tested better than the live one, which the owner hasn't looked at. */
 export interface StrategyNews {
@@ -28,6 +29,8 @@ export class TradingFeed {
   private rungBell: number | null | undefined;
   /** Bumps on every snapshot, so a screen can tell whether it has anything new to draw. */
   tick = 0;
+  /** The last refresh didn't get through (the office is restarting or stopped): what's on screen is the last snapshot. */
+  offline = false;
 
   on(fn: () => void): () => void {
     this.listeners.add(fn);
@@ -82,6 +85,7 @@ export class TradingFeed {
       // The office is restarting; the last snapshot stays up.
     } finally {
       this.busy = false;
+      this.offline = !received;
       // A failed refresh must still age every screen's freshness label; retain source timestamps.
       if (!received && this.snap) {
         this.tick++;
@@ -136,6 +140,54 @@ export class TradingFeed {
     } catch {
       return null;
     }
+  }
+
+  private detail: BacktestDetail | null = null;
+  private detailKey = '';
+
+  /** The last backtest trade by trade, fetched once per run (the Backtest Lab and the eval simulator work on it). */
+  async backtestDetail(): Promise<BacktestDetail | null> {
+    const bt = this.snap?.backtest;
+    // The tuner finishes after the backtest and adds its versions' trades, so its run is part of what's cached.
+    const key = `${bt?.ranAt}:${bt?.tuner?.ranAt}:${bt?.tuner?.running}`;
+    if (this.detail && this.detailKey === key && !bt?.running) return this.detail;
+    try {
+      const res = await fetch('/api/trading/backtest/trades', { credentials: 'same-origin' });
+      if (res.ok) {
+        const detail = (await res.json()) as BacktestDetail;
+        // An office that has only just restarted answers with nothing until its backtest has run: that
+        // isn't an answer to keep. It is asked again rather than remembered as "no trades".
+        if (detail.trades.length || !this.detail) this.detail = detail;
+        if (detail.trades.length && detail.ranAt === bt?.ranAt) this.detailKey = key;
+      }
+    } catch {
+      // The office is restarting; whatever was fetched before stays.
+    }
+    return this.detail;
+  }
+
+  private jobs = new Map<string, { key: string; detail: JobDetail }>();
+
+  /** One research job in full, fetched again only when it has moved on. */
+  async farmJob(id: string): Promise<JobDetail | null> {
+    const j = this.snap?.propFarm?.jobs.find((x) => x.id === id);
+    const key = `${j?.status}:${j?.done}`;
+    const had = this.jobs.get(id);
+    if (had && had.key === key) return had.detail;
+    try {
+      const res = await fetch(`/api/trading/prop-farm/job?id=${encodeURIComponent(id)}`, { credentials: 'same-origin' });
+      if (!res.ok) return had?.detail ?? null;
+      const detail = (await res.json()) as JobDetail;
+      this.jobs.set(id, { key, detail });
+      return detail;
+    } catch {
+      return had?.detail ?? null;
+    }
+  }
+
+  /** One action on the prop farm (see PropFarm.act on the server). */
+  farm(body: object) {
+    return this.post('/api/trading/prop-farm', body);
   }
 
   toggleChecklist(id: string) {

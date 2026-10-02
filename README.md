@@ -9,7 +9,7 @@
 
 # 🏢 Agent Office
 
-This fork also includes [Trading Office](docs/trading-office.md): Opening Bell and Back Office, with live market screens, resident advisers and paper simulation alongside the latest upstream office features. Its elevator aligns across the office, rooftop and garage, beside the opening bell and clear of the expandable wing. Press **J** for Session Desk: chart, levels, setup checklist, next event and account status in one window. Matching dual monitors keep hired-agent providers and live activity visible; charts and proposals show source timestamps and delayed/stale status.
+This fork also includes [Trading Office](docs/trading-office.md): Opening Bell and Back Office, with live market screens, resident advisers and paper simulation alongside the latest upstream office features. Its elevator aligns across the office, rooftop and garage, beside the opening bell and clear of the expandable wing. Press **J** for Session Desk: chart, levels, setup checklist, next event and account status in one window. On Back Office, click the Backtest lab or Prop eval simulator display for its console: try indicator filters on the backtest's real trades, then play a playbook through a prop account's rules and see the odds of passing. The Prop farm display runs several accounts through a firm's program on paper, from the fee to the payout (Lucid, Top One, FundedNext), with a day-by-day replay. Mix playbooks into a game plan (a fallback, or one per kind of day), try other ways of managing a trade, let the tuner look for better versions of the playbooks, and run an eval live day by day beside your own account. Matching dual monitors keep hired-agent providers and live activity visible; charts and proposals show source timestamps and delayed/stale status.
 
 **A 3D office your team shares with its coding agents.**
 
@@ -373,3 +373,11 @@ Every change to the app that lands on `main` is published as a GitHub release by
 The **Session Desk kiosk** beside the lounge opens the dashboard with **E** when you walk up to it. **J** still opens it anywhere on the office floor. Find “Session Desk” in the command palette and use **Shift+Enter** to walk to the kiosk.
 
 For optional real-time NQ, ES and GC, use **Session Desk → Data connections → ProjectX** with TopstepX API access, then **Enable real-time futures**. Quotes stream and provider candles refresh every 20 seconds; completed candles drive proposals. Until connected with eligible API access, futures remain visibly delayed. BTC candles and historical backtests remain Yahoo. See [the setup and source details](docs/trading-office.md#optional-real-time-futures).
+
+Prop Farm: press **Y** or open `/#farm` for accounts, research, comparison, forward paper tests,
+payouts and battle tests. Current FundedNext 25K–150K scenarios and setup notes are documented in
+[Prop Farm expansion](docs/prop-farm-expansion.md). Includes FundedNext Rapid Pro/Flex scenarios through
+150K, strategy recipes and separate evaluation/funded risk budgets.
+
+**TradingView MCP:** Session Desk → Data connections → Connect TradingView prepares official OAuth
+sign-in for Essential or higher. [Setup and limits](docs/prop-farm-expansion.md#tradingview-sign-in-tomorrow).

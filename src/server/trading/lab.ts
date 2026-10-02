@@ -1,5 +1,6 @@
 import type { Bar, LabReport, PineMetrics, PineParams, PineTest, Symbol } from '../../shared/trading.js';
-import { metrics, sessionsOf, simulate, type SimTrade } from './pine-sim.js';
+import { afterCosts, metrics, sessionsOf, simulate, type SimTrade } from './pine-sim.js';
+import { COSTS, REALISTIC } from '../../shared/fills.js';
 
 // The Strategy lab. It replays the live version of the VWAP Double Break Suite on real bars, then tries
 // the script's settings one at a time and asks: is this change better, or does it just look better on
@@ -129,14 +130,18 @@ export interface LabResult {
 /** Replays `params` over the sessions, split into the days it's judged on and the later days it isn't. */
 function evaluate(sessions: Partial<Record<Symbol, Map<string, Bar[]>>>, params: PineParams, train: Set<string>, test: Set<string>, days: string[], now: number): PineTest {
   const all: SimTrade[] = [];
+  const real: SimTrade[] = [];
   const bySymbol: PineTest['bySymbol'] = {};
   const symbols = SYMBOLS_TESTED.filter((s) => sessions[s]);
   for (const sym of symbols) {
     const t = simulate(sessions[sym]!, sym, params);
     all.push(...t);
     bySymbol[sym] = metrics(t);
+    // The same settings filled the way an order would be, and charged for: the number to judge by.
+    real.push(...simulate(sessions[sym]!, sym, params, undefined, REALISTIC));
   }
   return {
+    realistic: { all: metrics(afterCosts(real, COSTS.base)), ambiguous: real.filter((t) => t.ambiguous).length, policy: REALISTIC.id, cost: COSTS.base.id },
     ranAt: now,
     from: days[0] ?? '',
     to: days[days.length - 1] ?? '',

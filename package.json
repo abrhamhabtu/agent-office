@@ -27,6 +27,7 @@
   "dependencies": {
     "@lydell/node-pty": "^1.2.0-beta.15",
     "@microsoft/signalr": "^10.0.11",
+    "@modelcontextprotocol/sdk": "^1.31.0",
     "@xterm/addon-serialize": "^0.14.0",
     "@xterm/headless": "^6.0.0",
     "selfsigned": "^5.5.0",
