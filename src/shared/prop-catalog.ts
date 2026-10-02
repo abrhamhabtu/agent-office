@@ -1,3 +1,4 @@
+import { FUNDEDNEXT_RULESETS } from './fundednext-rules.js';
 import type { PropRules } from './trading.js';
 import { PROP_ACCOUNTS } from './trading.js';
 import { ruleSetFor, toPropRules } from './prop-rules.js';
@@ -51,6 +52,6 @@ const MORE: PropRules[] = [
 ];
 
 /** Every account the simulator can play a strategy through: the owner's own first. */
-export const ACCOUNT_CATALOG: PropRules[] = [...PROP_ACCOUNTS, ...MORE];
+export const ACCOUNT_CATALOG: PropRules[] = [...PROP_ACCOUNTS, ...MORE, ...FUNDEDNEXT_RULESETS.map(toPropRules)];
 /** Whether an account is one of the owner's own (the rest are there to try). */
 export const isOwnAccount = (id: string) => PROP_ACCOUNTS.some((a) => a.id === id);

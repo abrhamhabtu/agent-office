@@ -94,7 +94,11 @@ export interface FarmSetup {
   evalMicros: number;
   fundedMicros: number;
   /** `cap`: ask for the cap every time, as far as the cushion carries it. `cushion`: a tenth of the cushion a trade (the Law of 10), up to the cap. */
-  sizing: 'cap' | 'cushion';
+  sizing: 'cap' | 'cushion' | 'phase';
+  /** Optional for compatibility with pinned older runs. */
+  evalRiskPercent?: number;
+  fundedRiskPercent?: number;
+  protectPayout?: boolean;
   /** What every fill pays (see shared/fills.ts). */
   cost: CostId;
   strategy: FarmStrategy;
@@ -138,7 +142,10 @@ export function cleanSetup(raw: unknown): FarmSetup {
     slots: int(r.slots, 1, 10, FARM_DEFAULTS.slots),
     evalMicros: int(r.evalMicros, 1, 200, FARM_DEFAULTS.evalMicros),
     fundedMicros: int(r.fundedMicros, 1, 200, FARM_DEFAULTS.fundedMicros),
-    sizing: r.sizing === 'cushion' ? 'cushion' : 'cap',
+    sizing: r.sizing === 'phase' ? 'phase' : r.sizing === 'cushion' ? 'cushion' : 'cap',
+    evalRiskPercent: int(r.evalRiskPercent, 5, 75, 35),
+    fundedRiskPercent: int(r.fundedRiskPercent, 1, 25, 10),
+    protectPayout: r.protectPayout !== false,
     cost: r.cost === 'gross' || r.cost === 'stressed' ? r.cost : 'base',
     strategy: {
       playbooks: playbooks.length ? [...new Set(playbooks)] : [...FARM_DEFAULTS.strategy.playbooks],
@@ -153,8 +160,15 @@ export function cleanSetup(raw: unknown): FarmSetup {
 }
 
 /** The risk policy a setup runs a stage on. */
-export function policyOf(setup: FarmSetup, phase: 'eval' | 'funded'): RiskPolicy {
+export function policyOf(setup: FarmSetup, phase: 'eval' | 'funded', context?: { profit: number; goal: number; drawdown: number }): RiskPolicy {
   const cap = phase === 'eval' ? setup.evalMicros : setup.fundedMicros;
+  if (setup.sizing === 'phase') {
+    const share = (phase === 'eval' ? setup.evalRiskPercent ?? 35 : setup.fundedRiskPercent ?? 10) / 100;
+    const progress = context && context.goal > 0 ? Math.max(0, Math.min(1, context.profit / context.goal)) : 0;
+    const taper = phase === 'funded' && setup.protectPayout !== false ? 1 - 0.75 * progress : 1;
+    return { id: `phase-${phase}`, name: `${phase === 'eval' ? 'Evaluation pace' : 'Payout protection'} (${Math.round(share * taper * 100)}% risk)`, cap,
+      cushionShare: share * taper, reserve: (context?.drawdown ?? 0) * 0.1, dayShare: Math.min(0.75, share * 2) };
+  }
   return setup.sizing === 'cushion' ? { ...CUSHION_BASELINE, id: `cushion-${cap}`, name: `Cushion-based, up to ${cap}`, cap } : capPolicy(cap);
 }
 
@@ -351,7 +365,7 @@ export function runFarm(dayLists: PaperTrade[][], setup: FarmSetup, labels?: str
         const conflict = crossAccountConflict(t.symbol, t.side, held, tag(slots[i]!));
         const decision = conflict
           ? null
-          : sizeTrade({ symbol: t.symbol, stopPoints: Math.abs(t.entry - t.stop), policy: policies[a.phase], cost, allowedMicros: a.allowedMicros, openMicros: s.openMicros, cushion: cushionOf(a, rules), openRisk: s.openRisk, dayStartCushion: openCushion[i]!, dayLoss: Math.max(0, -s.dayPnl), dailyLossLimit: rules.dailyLossLimit });
+          : sizeTrade({ symbol: t.symbol, stopPoints: Math.abs(t.entry - t.stop), policy: setup.sizing === 'phase' ? policyOf(setup, a.phase, { profit: a.balance - a.cycle.startBalance, goal: Math.max(rules.payout?.minCycleProfit ?? 0, rules.payout?.minProfit ?? 0, (rules.payout?.profitDayMin ?? 0) * (rules.payout?.profitDays ?? 0), rules.payout?.consistencyPercent && rules.payout.consistencyPercent < 100 ? a.cycle.bestDay / (rules.payout.consistencyPercent / 100) : 0), drawdown: rules.drawdown }) : policies[a.phase], cost, allowedMicros: a.allowedMicros, openMicros: s.openMicros, cushion: cushionOf(a, rules), openRisk: s.openRisk, dayStartCushion: openCushion[i]!, dayLoss: Math.max(0, -s.dayPnl), dailyLossLimit: rules.dailyLossLimit });
         if (!decision?.micros) {
           lastWhy ||= conflict ?? decision!.why;
           if (decision && (decision.binding === 'cushion' || decision.binding === 'day')) starved[i]!++;
@@ -391,7 +405,7 @@ export function runFarm(dayLists: PaperTrade[][], setup: FarmSetup, labels?: str
         if (a.phase === 'eval') run.evalBusts++;
         else run.fundedBusts++;
         event(i, 'busted', `${a.why} (${money(a.balance)}).`, 0);
-      } else if (canTrade(a.status) && starved[i]! > 0 && !rep.fills && cushionOf(a, rules) <= rules.drawdown * SPENT_SHARE) {
+      } else if (setup.sizing !== 'phase' && canTrade(a.status) && starved[i]! > 0 && !rep.fills && cushionOf(a, rules) <= rules.drawdown * SPENT_SHARE) {
         // Not breached, but there is too little cushion left to carry one micro of what the strategy trades:
         // the account is spent. A farm stops feeding it and buys the next attempt.
         if (a.phase === 'eval') run.evalBusts++;

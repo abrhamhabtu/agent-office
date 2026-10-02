@@ -1,4 +1,5 @@
 import type { BacktestDetail, PlaybookId } from '../../shared/trading';
+import { STRATEGY_RECIPES } from '../../shared/strategy-recipes';
 import { PLAYBOOK_BY_ID } from '../../shared/trading';
 import { weekdays } from '../../shared/evalsim';
 import { cleanSetup, FARM_DEFAULTS, FARM_PROGRAM_BY_ID, FARM_PROGRAMS, farmDays, farmOdds, programVerified, runFarm, setupProblem, strategyLabel, type FarmCell, type FarmEvent, type FarmOdds, type FarmRun, type FarmSetup, type FarmStage, type FarmStrategy } from '../../shared/farm';
@@ -83,7 +84,7 @@ export function mountBattle(shell: FarmShell, rail: HTMLElement, main: HTMLEleme
   let perProgram = new Map<string, FarmOdds>();
   let evalLadder: { micros: number; odds: FarmOdds }[] = [];
   let fundedLadder: { micros: number; odds: FarmOdds }[] = [];
-  let presets: Preset[] = [];
+  let presets: Preset[] = STRATEGY_RECIPES;
   const limits = (s: FarmSetup) => {
     const p = FARM_PROGRAM_BY_ID[s.programId]!;
     return { evalMax: p.evalRules?.maxMicros ?? 0, fundedMax: p.fundedRules.maxMicros };
@@ -112,7 +113,7 @@ export function mountBattle(shell: FarmShell, rail: HTMLElement, main: HTMLEleme
     const mix = trading.snap?.backtest?.mixes?.find((m) => m.order.length > 1 && m.mode !== 'every' && m.trades >= 20);
     presets = [
       ...(mix ? [{ id: 'mix', name: 'The lab’s best mix', strategy: { playbooks: mix.order, mode: mix.mode, manage: 'written' as const, markets: ALL_MARKETS } }] : []),
-      one('support-resistance'), one('failed-auction'), one('vwap-pullback'), one('double-break'),
+      ...STRATEGY_RECIPES,
     ];
     day = Math.max(0, battle.days.length - 1);
   }
@@ -155,14 +156,28 @@ export function mountBattle(shell: FarmShell, rail: HTMLElement, main: HTMLEleme
         segmented<FarmSetup['share']>([{ id: 'rotate', label: 'Take turns' }, { id: 'copy', label: 'All take every trade' }], setup.share, (v) => change({ share: v })),
         h('small', {}, setup.share === 'rotate' ? 'Each signal goes to the next account in turn. An opposite position on another account is refused.' : 'Every account takes every signal: they win and lose together, which is one result counted several times.')),
       step(3, 'What they trade',
-        h('div.fm-presets', {}, ...presets.map((p) => chip(p.name, samePreset(p), () => change({ strategy: { ...p.strategy, manage: setup.strategy.manage } }), { color: PLAYBOOK_BY_ID[p.strategy.playbooks[0]!].color }))),
+        h('label.tl-inline', {}, 'Strategy recipe', h('select.tl-input', { 'aria-label': 'Strategy recipe', onchange: (e: Event) => {
+          const p = presets.find(p => p.id === (e.target as HTMLSelectElement).value);
+          if (p) change({ strategy: { ...p.strategy, markets: [...setup.strategy.markets], manage: setup.strategy.manage } });
+        } }, h('option', { value: '', selected: !presets.some(samePreset) }, 'Custom mix'), ...presets.map(p => h('option', { value: p.id, selected: samePreset(p) }, p.name)))),
+        h('small', {}, STRATEGY_RECIPES.find(samePreset)?.why ?? 'A research candidate: inspect the rule definitions and test it on unseen days.'),
+        h('div.tl-chips', {}, ...ALL_MARKETS.map(m => chip(m, setup.strategy.markets.includes(m), () => {
+          const markets = setup.strategy.markets.includes(m) ? setup.strategy.markets.filter(x => x !== m) : [...setup.strategy.markets, m];
+          if (markets.length) change({ strategy: { ...setup.strategy, markets } });
+        }))),
+        h('label.tl-inline', {}, 'Combine signals', h('select.tl-input', { 'aria-label': 'Combine signals', onchange: (e: Event) => change({ strategy: { ...setup.strategy, mode: (e.target as HTMLSelectElement).value as FarmStrategy['mode'] } }) },
+          ...[['every', 'Both signal families'], ['fallback', 'First, then fallback'], ['by-day', 'Trend / range selection']].map(([id, text]) => h('option', { value: id, selected: id === setup.strategy.mode }, text!)))),
         h('small', {}, strategyLabel(setup.strategy)),
         h('label.tl-inline', {}, 'Managed', h('select.tl-input', { 'aria-label': 'How a trade is managed', onchange: (e: Event) => change({ strategy: { ...setup.strategy, manage: (e.target as HTMLSelectElement).value as FarmStrategy['manage'] } }) }, ...MANAGE.map((m) => h('option', { value: m.id, selected: m.id === setup.strategy.manage }, m.short)))),
         h('label.tl-inline', {}, 'Costs', h('select.tl-input', { 'aria-label': 'What every fill pays', onchange: (e: Event) => change({ cost: (e.target as HTMLSelectElement).value as FarmSetup['cost'] }) }, ...COST_IDS.map((c) => h('option', { value: c, selected: c === setup.cost }, COSTS[c].name)))),
         h('small', {}, COSTS[setup.cost].what)),
       step(4, 'How big',
-        segmented<FarmSetup['sizing']>([{ id: 'cap', label: 'Up to the cap' }, { id: 'cushion', label: 'Off the cushion' }], setup.sizing, (v) => change({ sizing: v })),
-        h('small', {}, setup.sizing === 'cap' ? 'Ask for the cap on every trade, as far as the cushion can carry it at that trade’s stop. A cap is an upper bound, not an order size.' : 'A tenth of the cushion a trade and a fifth a day (the Law of 10), never more than the cap.'),
+        segmented<FarmSetup['sizing']>([{ id: 'phase', label: 'Phase-aware' }, { id: 'cap', label: 'Up to the cap' }, { id: 'cushion', label: 'Off the cushion' }], setup.sizing, (v) => change({ sizing: v })),
+        h('small', {}, setup.sizing === 'phase' ? 'Separate risk budgets by phase; 10% of the drawdown stays reserved. Funded risk tapers as the payout profit goal approaches. Contract ceilings still apply.' : setup.sizing === 'cap' ? 'Ask for the cap on every trade, as far as the cushion can carry it at that trade’s stop. A cap is an upper bound, not an order size.' : 'A tenth of the cushion a trade and a fifth a day (the Law of 10), never more than the cap.'),
+        setup.sizing === 'phase' ? h('div.pf-form', {},
+          ...([['evalRiskPercent', 'Evaluation risk %', 5, 75, 35], ['fundedRiskPercent', 'Funded risk %', 1, 25, 10]] as const).map(([key, label, min, max, fallback]) => h('label.tl-inline', {}, label,
+            h('input.tl-input', { type: 'number', min: String(min), max: String(max), value: String(setup[key] ?? fallback), 'aria-label': label, onchange: (e: Event) => change({ [key]: Number((e.target as HTMLInputElement).value) }) }))),
+          h('button.tl-toggle', { type: 'button', role: 'switch', 'aria-checked': String(setup.protectPayout !== false), onclick: () => change({ protectPayout: setup.protectPayout === false }) }, 'Reduce funded risk near payout')) : null,
         evalMax ? h('div.fm-size', {}, h('span.tl-label', {}, `Evaluation · up to ${setup.evalMicros} micros (the firm allows ${evalMax})`), ladderRow(evalLadder, setup.evalMicros, (n) => change({ evalMicros: n }))) : h('small', {}, 'No evaluation in this program: it starts funded.'),
         h('div.fm-size', {}, h('span.tl-label', {}, `Funded · up to ${setup.fundedMicros} micros (the firm allows ${program.fundedRules.scaling ? `${program.fundedRules.scaling[0]!.micros} to start, ${fundedMax} at most` : fundedMax})`), ladderRow(fundedLadder, setup.fundedMicros, (n) => change({ fundedMicros: n }))),
         h('small', {}, 'Under each size: what the farm nets on average in 60 days at it. ★ is the best of them on these days.'),
