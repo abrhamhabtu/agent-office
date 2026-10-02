@@ -131,6 +131,10 @@ test('the simulator’s catalog adds accounts without touching the owner’s own
   assert.deepEqual(ACCOUNT_CATALOG.slice(0, PROP_ACCOUNTS.length), PROP_ACCOUNTS);
   assert.ok(isOwnAccount('tof-50k') && !isOwnAccount('luciddirect-50k'));
   assert.ok(ACCOUNT_CATALOG.filter((a) => a.kind === 'funded').length >= 8);
+  // The 25K accounts, and the firm whose challenge one trade can pass.
+  assert.ok(ACCOUNT_CATALOG.filter((a) => a.size === 25_000).length >= 6);
+  const rapid = ACCOUNT_CATALOG.find((a) => a.id === 'fundednext-rapid-25k')!;
+  assert.deepEqual([rapid.profitTarget, rapid.drawdown, rapid.consistencyPercent, rapid.minTradingDays], [1500, 1000, 100, 1]);
   for (const a of ACCOUNT_CATALOG) assert.ok(a.profitTarget > 0 && a.drawdown > 0 && a.maxMicros > 0 && a.consistencyPercent > 0 && a.consistencyPercent <= 100, a.id);
 });
 

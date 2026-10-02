@@ -16,7 +16,7 @@ export interface LiveEvalConfig {
   markets: Symbol[];
   plan: { mode: PlanMode; oneAndDone: boolean; maxTrades: number };
   manage: ManageId;
-  opts: { divisor: number; fixedRisk: number | null; dailyStop: boolean; consistency: boolean };
+  opts: { divisor: number; fixedRisk: number | null; fixedMicros?: number | null; dailyStop: boolean; consistency: boolean };
   /** The first trading day it counts (YYYY-MM-DD, Pacific). */
   startDay: string;
   /** The owner's own account it's measured against, and what that account made each day since. */
@@ -57,7 +57,7 @@ export function readLiveEval(b: Record<string, unknown>, today: string, firstPap
     markets: markets.length ? markets : MARKETS,
     plan: { mode: p.mode === 'fallback' || p.mode === 'by-day' ? p.mode : 'every', oneAndDone: p.oneAndDone === true, maxTrades: num(p.maxTrades, 0, 10, 0) },
     manage: typeof b.manage === 'string' && b.manage in MANAGE_BY_ID ? (b.manage as ManageId) : 'written',
-    opts: { divisor: num(o.divisor, 2, 50, EVAL_DEFAULTS.divisor), fixedRisk: o.fixedRisk == null ? null : num(o.fixedRisk, 1, 1e5, 150), dailyStop: o.dailyStop !== false, consistency: o.consistency !== false },
+    opts: { divisor: num(o.divisor, 2, 50, EVAL_DEFAULTS.divisor), fixedRisk: o.fixedRisk == null ? null : num(o.fixedRisk, 1, 1e5, 150), fixedMicros: o.fixedMicros == null ? null : Math.floor(num(o.fixedMicros, 1, 500, 5)), dailyStop: o.dailyStop !== false, consistency: o.consistency !== false },
     startDay,
     mineAccount: isOwnAccount(rules.id) ? rules.id : activeOwn,
     mine: {},

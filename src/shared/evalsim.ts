@@ -1,5 +1,5 @@
 import type { PaperTrade, PropRules } from './trading.js';
-import { DAILY_STOP, microsFor } from './trading.js';
+import { DAILY_STOP, INSTRUMENTS, microsFor } from './trading.js';
 
 // The prop eval simulator. A strategy's backtest trades are played, in order, through one account's rules:
 // each trade is sized off the drawdown that's left, the floor trails the way that firm trails it, and the
@@ -14,6 +14,8 @@ export interface EvalOptions {
   divisor: number;
   /** A fixed dollar risk per trade instead, when set. */
   fixedRisk: number | null;
+  /** A fixed number of micros on every trade instead, when set (still capped by the account's limit). */
+  fixedMicros?: number | null;
   /** Stop for the day after three losses or two risks down, as the desk trades. */
   dailyStop: boolean;
   /** Hold the pass until the firm's consistency rule is met. */
@@ -112,7 +114,8 @@ function play(dayTrades: T[][], rules: PropRules, o: EvalOptions, onDay?: (d: Ev
 
   for (let i = 0; i < dayTrades.length; i++) {
     const startBalance = balance;
-    const dayRisk = o.fixedRisk ?? Math.max(0, Math.floor((balance - floor()) / o.divisor));
+    // With a fixed contract count the risk is whatever the stop makes it, so the day's risk isn't known up front.
+    let dayRisk = o.fixedMicros ? 0 : o.fixedRisk ?? Math.max(0, Math.floor((balance - floor()) / o.divisor));
     let dTaken = 0;
     let dSkipped = 0;
     let wins = 0;
@@ -129,11 +132,13 @@ function play(dayTrades: T[][], rules: PropRules, o: EvalOptions, onDay?: (d: Ev
       const cushion = balance - floor();
       // A fixed risk doesn't shrink as the cushion does, which is what lets it bust.
       const risk = o.fixedRisk ?? Math.max(0, Math.floor(cushion / o.divisor));
-      const n = microsFor(t.symbol, risk, Math.abs(t.entry - t.stop), rules.maxMicros);
+      const n = o.fixedMicros ? Math.min(Math.floor(o.fixedMicros), rules.maxMicros) : microsFor(t.symbol, risk, Math.abs(t.entry - t.stop), rules.maxMicros);
       if (!n) {
         dSkipped++;
         continue;
       }
+      // (The first trade's risk stands for the day's, for the ledger and the daily stop.)
+      if (o.fixedMicros && !dTaken) dayRisk = Math.round(n * Math.abs(t.entry - t.stop) * INSTRUMENTS[t.symbol].microPointValue);
       dTaken++;
       micros = Math.max(micros, n);
       const pnl = n * t.dollars;

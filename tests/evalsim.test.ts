@@ -83,3 +83,15 @@ test('the odds add up, are repeatable, and tell a winner from a loser', () => {
 test('weekdays drops the weekend days only Bitcoin trades', () => {
   assert.deepEqual(weekdays(['2026-09-25', '2026-09-26', '2026-09-27', '2026-09-28']), ['2026-09-25', '2026-09-28']);
 });
+
+test('a fixed number of contracts sizes every trade the same, up to the account’s limit, and can bust in one trade', () => {
+  const r = rules('topstep-50k');
+  // Five micros on a $40 stop: $200 a loss, whatever the cushion is. Fifty is this account's limit, so sixty is fifty.
+  const five = runEval([trade(1, 2), trade(2, -1)], r, { fixedMicros: 5, dailyStop: false });
+  assert.deepEqual(five.ledger.map((d) => [d.micros, d.pnl, d.risk]), [[5, 400, 200], [5, -200, 200]]);
+  const capped = runEval([trade(1, -1)], r, { fixedMicros: 60, dailyStop: false });
+  assert.equal(capped.ledger[0]!.micros, 50);
+  // Fifty micros on that stop is the whole $2,000 drawdown: one loss and it's over.
+  assert.equal(capped.result, 'busted');
+  assert.equal(runEval([trade(1, 2)], { ...r, consistencyPercent: 100, minTradingDays: 1 }, { fixedMicros: 50, dailyStop: false }).result, 'passed');
+});

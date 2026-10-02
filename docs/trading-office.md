@@ -72,6 +72,13 @@ September 2026 (LucidDirect's contract limits are taken to be LucidFlex's): chec
 For a straight-to-funded account the target is the profit its first payout needs. A daily loss limit
 stops the day; a program with no consistency rule (Apex's evaluation) is treated as having none.
 
+The list also has 25K accounts (LucidFlex, LucidDirect, Apex 4.0 EOD, Top One Ignite) and FundedNext
+Futures (Rapid 25K and 50K, Legacy 25K, and the Rapid funded accounts). FundedNext's Rapid challenge has
+no consistency rule or minimum days, so one trade can pass it. The **Risk dial** has a third sizing,
+**A fixed number of contracts**: the same micros on every trade up to the account's limit, with a ladder
+showing the pass and bust odds at each size. With a wide stop a fixed size can end the account in one
+loss. [The prop farm plan](prop-farm-plan.md) sets out what is built on these.
+
 **Game plans.** With two or more playbooks picked, **Game plan** chooses how they share a day:
 - **Every setup**: take all of them.
 - **First, then a fallback**: the first playbook you picked always trades; the next only gets its turn

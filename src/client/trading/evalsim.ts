@@ -42,7 +42,9 @@ interface Saved {
   account: string;
   playbooks: PlaybookId[];
   markets: Symbol[];
-  sizing: 'law' | 'fixed';
+  sizing: 'law' | 'fixed' | 'contracts';
+  /** Micros on every trade, when the sizing is a fixed contract count. */
+  fixedMicros: number;
   divisor: number;
   fixedRisk: number;
   dailyStop: boolean;
@@ -54,7 +56,7 @@ interface Saved {
   custom: Record<string, Partial<PropRules>>;
 }
 
-const DEFAULTS: Saved = { kind: 'eval', firm: 'all', size: 0, candidates: false, plan: 'every', oneAndDone: false, maxTrades: 0, manage: 'written', account: ACCOUNT_CATALOG[0]!.id, playbooks: ['double-break'], markets: [...MARKETS], sizing: 'law', divisor: 10, fixedRisk: 150, dailyStop: true, consistency: true, startReal: false, view: 'month', horizon: 60, custom: {} };
+const DEFAULTS: Saved = { kind: 'eval', firm: 'all', size: 0, candidates: false, plan: 'every', oneAndDone: false, maxTrades: 0, manage: 'written', account: ACCOUNT_CATALOG[0]!.id, playbooks: ['double-break'], markets: [...MARKETS], sizing: 'law', divisor: 10, fixedRisk: 150, fixedMicros: 5, dailyStop: true, consistency: true, startReal: false, view: 'month', horizon: 60, custom: {} };
 
 export interface EvalSimInit {
   account?: string;
@@ -120,6 +122,8 @@ export function openEvalSim(init: EvalSimInit = {}) {
   slider.value = String(st.divisor);
   const fixedIn = h('input.tl-input', { type: 'number', min: '10', step: '10', 'aria-label': 'Fixed dollar risk per trade' }) as HTMLInputElement;
   fixedIn.value = String(st.fixedRisk);
+  const microsIn = h('input.tl-input', { type: 'number', min: '1', max: '200', step: '1', 'aria-label': 'Micros on every trade' }) as HTMLInputElement;
+  microsIn.value = String(st.fixedMicros);
   const sizingSeg = h('div');
   const toggles = h('div.tl-toggles');
   const dialControls = h('div.tl-dial');
@@ -160,7 +164,7 @@ export function openEvalSim(init: EvalSimInit = {}) {
   const versionInfo = (p: PlaybookId, version: number) => trading.snap?.backtest?.tuner?.books.find((b) => b.playbook === p)?.versions.find((v) => v.version === version);
   const optsFor = (id: string, divisor = st.divisor): Partial<EvalOptions> => {
     const real = st.startReal && id === st.account ? realOf(id) : undefined;
-    return { divisor, fixedRisk: st.sizing === 'fixed' ? Math.max(1, st.fixedRisk) : null, dailyStop: st.dailyStop, consistency: st.consistency, start: real ? { balance: real.balance, peak: real.peak } : null };
+    return { divisor, fixedRisk: st.sizing === 'fixed' ? Math.max(1, st.fixedRisk) : null, fixedMicros: st.sizing === 'contracts' ? Math.max(1, st.fixedMicros) : null, dailyStop: st.dailyStop, consistency: st.consistency, start: real ? { balance: real.balance, peak: real.peak } : null };
   };
   const strategyName = () => (st.playbooks.length === 1 ? PLAYBOOK_BY_ID[st.playbooks[0]!].name : st.plan === 'every' ? `${st.playbooks.length} playbooks together` : planLabel({ ...planNow(), oneAndDone: false, maxTrades: 0 }));
 
@@ -331,9 +335,9 @@ export function openEvalSim(init: EvalSimInit = {}) {
       check(run.result === 'busted' ? 'bad' : 'ok', 'Drawdown floor', run.result === 'busted' ? 'Touched it' : `Never closer than ${money(run.minCushion)}`, `${money(rules.drawdown)} drawdown, ${DD_LABEL[rules.drawdownType]}`, run.result === 'busted' ? 1 : 1 - run.minCushion / Math.max(1, rules.drawdown)));
   }
 
-  function drawDial(dial: { divisor: number; odds: EvalOdds }[]) {
-    sizingSeg.replaceChildren(segmented([{ id: 'law', label: 'A share of the cushion' }, { id: 'fixed', label: 'A fixed dollar risk' }], st.sizing, (v) => { st.sizing = v; persist(); render(); }));
-    dialControls.replaceChildren(...(st.sizing === 'law' ? [slider, dialLabel] : [h('label.tl-inline', {}, 'Risk per trade $', fixedIn), h('small', {}, 'The same dollar risk on every trade, whatever the cushion is.')]));
+  function drawDial(dial: { divisor: number; odds: EvalOdds }[], ladder: { micros: number; odds: EvalOdds }[]) {
+    sizingSeg.replaceChildren(segmented<Saved['sizing']>([{ id: 'law', label: 'A share of the cushion' }, { id: 'fixed', label: 'A fixed dollar risk' }, { id: 'contracts', label: 'A fixed number of contracts' }], st.sizing, (v) => { st.sizing = v; persist(); render(); }));
+    dialControls.replaceChildren(...(st.sizing === 'law' ? [slider, dialLabel] : st.sizing === 'fixed' ? [h('label.tl-inline', {}, 'Risk per trade $', fixedIn), h('small', {}, 'The same dollar risk on every trade, whatever the cushion is.')] : [h('label.tl-inline', {}, 'Micros on every trade', microsIn), h('small', {}, `The same size every time, however far the stop is (this account allows ${rulesOf(st.account).maxMicros}). The risk is whatever the stop makes it: with a wide stop, one loss can end the account.`)]));
     dialLabel.replaceChildren(h('b', {}, `1/${st.divisor}`), ` of the drawdown left${st.divisor === 10 ? ' · the Law of 10' : ''}`);
     const toggle = (label: string, sub: string, on: boolean, flip: () => void) => h('button.tl-toggle', { type: 'button', role: 'switch', 'aria-checked': String(on), onclick: () => { flip(); persist(); render(); } }, h('i'), h('span', {}, h('b', {}, label), h('small', {}, sub)));
     const real = realOf(st.account);
@@ -341,10 +345,22 @@ export function openEvalSim(init: EvalSimInit = {}) {
     const moved = !!real && (real.balance !== rules.size || real.peak !== rules.size);
     toggles.replaceChildren(
       toggle('Daily stop', 'Three losses or two risks down and the day is over', st.dailyStop, () => (st.dailyStop = !st.dailyStop)),
-      toggle('Consistency rule', `No one day over ${rules.consistencyPercent}% of ${rules.consistencyBasis === 'profitTarget' ? 'the target' : 'the profit'}`, st.consistency, () => (st.consistency = !st.consistency)),
+      toggle('Consistency rule', rules.consistencyPercent >= 100 ? 'This program has none' : `No one day over ${rules.consistencyPercent}% of ${rules.consistencyBasis === 'profitTarget' ? 'the target' : 'the profit'}`, st.consistency, () => (st.consistency = !st.consistency)),
       ...(moved ? [toggle('Start from my real account', `${money(real!.balance)} now, ${money(real!.cushion)} of cushion left`, st.startReal, () => (st.startReal = !st.startReal))] : []));
-    if (st.sizing !== 'law') return void dialTable.replaceChildren();
     const score = (o: EvalOdds) => o.pass - o.bust;
+    if (st.sizing === 'contracts' && ladder.length) {
+      // The same question for a fixed size: how do the odds move as the contract count goes up?
+      const top = ladder.reduce((a, b) => (score(b.odds) > score(a.odds) + 0.005 ? b : a), ladder[0]!);
+      return void dialTable.replaceChildren(h('table.tl-table', {},
+        h('thead', {}, h('tr', {}, h('th', {}, 'Micros a trade'), h('th', {}, 'Pass'), h('th', {}, 'Bust'), h('th', {}, 'Typical pass'), h('th', {}, ''))),
+        h('tbody', {}, ...ladder.map((d) => h('tr', { 'data-on': d.micros === st.fixedMicros ? '1' : undefined, tabindex: '0', onclick: () => { st.fixedMicros = d.micros; microsIn.value = String(d.micros); persist(); render(); } },
+          h('th', { scope: 'row' }, `${d.micros} micro${d.micros === 1 ? '' : 's'}`),
+          h('td', { 'data-tone': 'up' }, pct(d.odds.pass)),
+          h('td', { 'data-tone': d.odds.bust > 0.25 ? 'down' : '' }, pct(d.odds.bust)),
+          h('td', {}, d.odds.medianDays ? `${d.odds.medianDays} days` : '—'),
+          h('td', {}, d === top && d.odds.runs ? h('span.tl-star', {}, '★ best balance') : oddsBar(d.odds)))))));
+    }
+    if (st.sizing !== 'law') return void dialTable.replaceChildren();
     const best = dial.reduce((a, b) => (score(b.odds) > score(a.odds) + 0.005 ? b : a), dial[0]!);
     dialTable.replaceChildren(h('table.tl-table', {},
       h('thead', {}, h('tr', {}, h('th', {}, 'Risk a trade'), h('th', {}, 'Pass'), h('th', {}, 'Bust'), h('th', {}, 'Typical pass'), h('th', {}, ''))),
@@ -406,7 +422,7 @@ export function openEvalSim(init: EvalSimInit = {}) {
     const le = trading.snap?.liveEval;
     const start = async (from: 'today' | 'back') => {
       const plan = planNow();
-      liveNote = (await trading.post('/api/trading/live-eval', { action: 'start', from, accountId: rules.id, rules: st.custom[rules.id] ?? {}, playbooks: st.playbooks, markets: st.markets, plan: { mode: plan.mode, oneAndDone: plan.oneAndDone, maxTrades: plan.maxTrades }, manage: st.manage, opts: { divisor: st.divisor, fixedRisk: st.sizing === 'fixed' ? st.fixedRisk : null, dailyStop: st.dailyStop, consistency: st.consistency } })) ?? (from === 'today' ? 'Running live from today' : 'Running live, counting the paper book’s last month');
+      liveNote = (await trading.post('/api/trading/live-eval', { action: 'start', from, accountId: rules.id, rules: st.custom[rules.id] ?? {}, playbooks: st.playbooks, markets: st.markets, plan: { mode: plan.mode, oneAndDone: plan.oneAndDone, maxTrades: plan.maxTrades }, manage: st.manage, opts: { divisor: st.divisor, fixedRisk: st.sizing === 'fixed' ? st.fixedRisk : null, fixedMicros: st.sizing === 'contracts' ? st.fixedMicros : null, dailyStop: st.dailyStop, consistency: st.consistency } })) ?? (from === 'today' ? 'Running live from today' : 'Running live, counting the paper book’s last month');
       render();
     };
     const o = le?.office;
@@ -511,6 +527,7 @@ export function openEvalSim(init: EvalSimInit = {}) {
     const odds = evalOdds(trades, rules, opts, days, { runs: 500, horizon: st.horizon });
     const perAccount = new Map([...new Set([st.account, ...listed().map((a) => a.id)])].map((id) => [id, evalOdds(trades, rulesOf(id), optsFor(id), days, { runs: 200, horizon: st.horizon })]));
     const perPlaybook = PLAYBOOKS.map((p) => { const t = managed(tradesFor([p.id]), st.manage); return { id: p.id, trades: t.length, odds: evalOdds(t, rules, opts, days, { runs: 200, horizon: st.horizon }) }; });
+    const ladder = st.sizing === 'contracts' ? [...new Set([1, 2, 3, 5, 10, 15, 20, rules.maxMicros].filter((n) => n <= rules.maxMicros))].sort((a, b) => a - b).map((micros) => ({ micros, odds: evalOdds(trades, rules, { ...opts, fixedMicros: micros }, days, { runs: 200, horizon: st.horizon }) })) : [];
     const dial = st.sizing === 'law' ? DIAL.map((divisor) => ({ divisor, odds: evalOdds(trades, rules, optsFor(st.account, divisor), days, { runs: 200, horizon: st.horizon }) })) : [];
     const perManage = MANAGE.map((m) => ({ id: m.id, odds: evalOdds(planned(planNow(), m.id), rules, opts, days, { runs: 200, horizon: st.horizon }) }));
     const startBalance = opts.start?.balance ?? rules.size;
@@ -521,7 +538,7 @@ export function openEvalSim(init: EvalSimInit = {}) {
     drawHero(rules, run, odds);
     drawChart(rules, run, odds, startBalance, startFloor);
     drawChecks(rules, run);
-    drawDial(dial);
+    drawDial(dial, ladder);
     drawSuggest(rules, run, odds, perPlaybook, perAccount, dial, perPlan, perManage);
     drawRules(rules);
     drawLedger(run);
@@ -540,6 +557,7 @@ export function openEvalSim(init: EvalSimInit = {}) {
     });
   };
   slider.addEventListener('input', () => { st.divisor = Number(slider.value); persist(); soon(); });
+  microsIn.addEventListener('input', () => { const v = Math.floor(Number(microsIn.value)); if (v > 0) { st.fixedMicros = v; persist(); soon(); } });
   fixedIn.addEventListener('input', () => { const v = Number(fixedIn.value); if (v > 0) { st.fixedRisk = v; persist(); soon(); } });
 
   // The trades only change when the backtest runs again; a new price tick isn't a reason to redraw.

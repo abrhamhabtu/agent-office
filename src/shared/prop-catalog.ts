@@ -14,6 +14,20 @@ const eval_ = (id: string, firm: string, program: string, size: number, profitTa
 const funded = (id: string, firm: string, program: string, size: number, profitTarget: number, drawdown: number, o: Partial<PropRules> = {}): PropRules => ({ ...eval_(id, firm, program, size, profitTarget, drawdown, { lockProfit: 100, ...o }), kind: 'funded' });
 
 const MORE: PropRules[] = [
+  // FundedNext Futures, the firm in the "bot farm" screenshots. Rapid has no consistency rule or minimum days
+  // in the challenge, which is what lets one trade pass it. Its funded payout rule here (three trading days,
+  // $500 of profit, best day at most 40%) is as those screenshots show it; published summaries differ on the
+  // contract limit (10 or 20 micros on the 25K challenge), so the stricter one is used.
+  eval_('fundednext-rapid-25k', 'FundedNext', 'Rapid 25K', 25_000, 1500, 1000, { maxMicros: 10, consistencyPercent: 100 }),
+  eval_('fundednext-rapid-50k', 'FundedNext', 'Rapid 50K', 50_000, 3000, 2000, { maxMicros: 15, consistencyPercent: 100 }),
+  eval_('fundednext-legacy-25k', 'FundedNext', 'Legacy 25K', 25_000, 1250, 1000, { maxMicros: 20, consistencyPercent: 40, minTradingDays: 5 }),
+  funded('fundednext-funded-25k', 'FundedNext', 'Rapid 25K (funded)', 25_000, 500, 1000, { lockProfit: 0, maxMicros: 15, consistencyPercent: 40, minTradingDays: 3 }),
+  funded('fundednext-funded-50k', 'FundedNext', 'Rapid 50K (funded)', 50_000, 500, 2000, { lockProfit: 0, maxMicros: 25, consistencyPercent: 40, minTradingDays: 3 }),
+  // The 25K sizes of the firms already here.
+  eval_('lucidflex-25k', 'Lucid', 'LucidFlex 25K', 25_000, 1250, 1000, { minTradingDays: 5 }),
+  funded('luciddirect-25k', 'Lucid', 'LucidDirect 25K', 25_000, 1500, 1000, { consistencyPercent: 20, minTradingDays: 5 }),
+  eval_('apex-eod-25k', 'Apex', 'Apex 4.0 EOD 25K', 25_000, 1500, 1000, { lockProfit: 100, dailyLossLimit: 500, maxMicros: 40, consistencyPercent: 100 }),
+  funded('tof-25k', 'Top One', 'Ignite 25K (funded)', 25_000, 1250, 1000, { dailyLossLimit: 500, maxMicros: 10, consistencyPercent: 15 }),
   eval_('lucidflex-150k', 'Lucid', 'LucidFlex 150K', 150_000, 9000, 4500, { minTradingDays: 5 }),
   // LucidDirect's contract limits aren't in the public summaries: taken to be LucidFlex's.
   funded('luciddirect-50k', 'Lucid', 'LucidDirect 50K', 50_000, 3000, 2000, { dailyLossLimit: 1200, consistencyPercent: 20, minTradingDays: 5 }),
