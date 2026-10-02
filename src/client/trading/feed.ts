@@ -1,4 +1,4 @@
-import type { ProposalAction, TradingSnapshot, TvAlert } from '../../shared/trading';
+import type { BacktestDetail, ProposalAction, TradingSnapshot, TvAlert } from '../../shared/trading';
 
 /** A version the test lab made that tested better than the live one, which the owner hasn't looked at. */
 export interface StrategyNews {
@@ -136,6 +136,27 @@ export class TradingFeed {
     } catch {
       return null;
     }
+  }
+
+  private detail: BacktestDetail | null = null;
+  private detailKey = '';
+
+  /** The last backtest trade by trade, fetched once per run (the Backtest Lab and the eval simulator work on it). */
+  async backtestDetail(): Promise<BacktestDetail | null> {
+    const bt = this.snap?.backtest;
+    // The tuner finishes after the backtest and adds its versions' trades, so its run is part of what's cached.
+    const key = `${bt?.ranAt}:${bt?.tuner?.ranAt}:${bt?.tuner?.running}`;
+    if (this.detail && this.detailKey === key && !bt?.running) return this.detail;
+    try {
+      const res = await fetch('/api/trading/backtest/trades', { credentials: 'same-origin' });
+      if (res.ok) {
+        this.detail = (await res.json()) as BacktestDetail;
+        this.detailKey = key;
+      }
+    } catch {
+      // The office is restarting; whatever was fetched before stays.
+    }
+    return this.detail;
   }
 
   toggleChecklist(id: string) {

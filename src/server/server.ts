@@ -883,6 +883,8 @@ export async function startServer(cfg: Config) {
     };
     const done = (why: string | undefined) => (why ? send(res, 400, { error: why }) : send(res, 200, desk.snapshot()));
     if (p === '/api/trading/snapshot' && req.method === 'GET') return send(res, 200, desk.snapshot(), { 'cache-control': 'no-store' });
+    // The backtest trade by trade, for the Backtest Lab and the eval simulator (only fetched when one is open).
+    if (p === '/api/trading/backtest/trades' && req.method === 'GET') return send(res, 200, desk.backtestDetail(), { 'cache-control': 'no-store' });
     // The Pine Vault: a version's exact source to copy into TradingView, and the owner's changes to it.
     if (p === '/api/trading/vault/source' && req.method === 'GET') {
       const src = desk.vault.source(url.searchParams.get('script') ?? '', url.searchParams.get('version') ?? '');
@@ -928,6 +930,14 @@ export async function startServer(cfg: Config) {
       case '/api/trading/backtest':
         void desk.runBacktest();
         return done(undefined);
+      case '/api/trading/farm':
+        return done(desk.setFarm(b));
+      case '/api/trading/live-eval':
+        return done(desk.setLiveEval(b));
+      case '/api/trading/tuner':
+        // The owner's call on a playbook version: make it live, retire it, or mark it looked at.
+        if (b.action === 'seen') return done(desk.tuner.markSeen(String(b.playbook) as never, Number(b.version)));
+        return done(desk.setVersion(b.playbook, b.version, b.status));
       case '/api/trading/webhook-key':
         desk.rotateKey();
         return done(undefined);

@@ -5,6 +5,8 @@ import { h, openModal } from '../ui/dom';
 import { trading } from './feed';
 import { accountLabel, fmt, money, pct, STAGE_COLOR, STAGE_LABEL } from './screens';
 import { openStrategyDesk } from './strategy';
+import { openBacktestLab } from './backtestlab';
+import { openEvalSim } from './evalsim';
 
 export type PanelTab = 'proposals' | 'news' | 'playbook' | 'accounts' | 'paper' | 'backtest' | 'vault' | 'alerts' | 'connections';
 
@@ -179,6 +181,7 @@ export function openTrading(role: FloorRole, start?: PanelTab) {
       return [
         row(dim(bt.running ? 'Replaying…' : `${bt.days.length} trading days (${bt.days[0] ?? ''} → ${bt.days.at(-1) ?? ''}), run ${new Date(bt.ranAt).toLocaleTimeString()}`), h('span.grow', {}), h('button.btn', { disabled: bt.running, onclick: () => run(trading.post('/api/trading/backtest', {}), 'Backtest started') }, '↻ Run again')),
         dim(bt.note),
+        card(dim('The Backtest Lab opens any playbook in full: its curve, the indicators that would have helped, and every trade. The eval simulator plays those trades through a prop account’s rules.'), row(h('button.btn.primary', { onclick: () => { modal.close(); openBacktestLab(); } }, '🧪 Open the Backtest Lab'), h('button.btn', { onclick: () => { modal.close(); openEvalSim(); } }, '🏦 Open the eval simulator'))),
         bt.best ? card(h('b', {}, `Best edge this month: ${PLAYBOOK_BY_ID[bt.best.playbook].name} on ${bt.best.symbol}`), dim(`${bt.best.avgR >= 0 ? '+' : ''}${bt.best.avgR}R a trade over ${bt.best.trades} trades`)) : null,
         ...PLAYBOOKS.map((p) => {
           const rows = bt.stats.filter((x) => x.playbook === p.id);

@@ -19,6 +19,142 @@ The graphics controls still offer Battery saver and High quality. Battery saver 
 behind the first-person hands while disabling outlines and shadows. The upstream sky cycles through
 a day and night every hour, so compare lighting at the same sky time, weather and graphics quality.
 
+## Backtest Lab and prop eval simulator
+
+On the **Back Office** floor, click the **🧪 Backtest lab** or **🏦 Prop eval simulator** wall display
+(or press **E** at it, or find either in the ☰ menu and the command palette). Each opens its own
+console, and each has a **How it works** button that walks through its steps with the real numbers
+from the last run. Close with ✕ or Esc to resume looking around.
+
+**Backtest Lab.** Pick a playbook on the left and a market above the chart. The headline says in one
+sentence what it did on the real month of one-minute bars; the six numbers beside it are what a trade
+makes on average (in R, where 1R is what the trade risked), the win rate, the total, the worst dip,
+won ÷ lost and the trade count. Run the pointer along the equity curve to see each trade and why it
+was taken. **Where the edge is** shows every playbook on every market; click a cell to open it.
+
+**Add an indicator** tries extra rules on those trades. The backtest keeps what each indicator read on
+every entry bar (9/21 and 50 EMA, MACD, RSI, ADX, the 5-minute ATR, NY and overnight VWAP, relative
+volume, the time), so a filter simply skips the trades where that reading was against you. Each chip
+shows what it would change per trade before you click it; point at one to read what the indicator is.
+A filter is **recommended** only when the trades it keeps do better per trade, it keeps enough of them
+(12 or more, and at least 35% of the trades), and it still helps on the later third of the days, which
+the choice was not made on. Longs-only and shorts-only are never recommended: one month's direction is
+the market's. Stacking filters on a month of history fits the past, so treat every result as paper evidence.
+
+**Prop eval simulator.** Pick an account on the left (LucidFlex 50K and 100K, Topstep Combine 50K,
+Top One Ignite 50K straight to funded, Apex 4.0 50K), then what to trade on it: one playbook or
+several together, on NQ, ES and GC. **Test this on a prop account →** in the Backtest Lab carries the
+playbook and its filters across. The backtest's trades are played through the account's rules in order:
+each trade is sized off the drawdown left (the risk dial; a tenth is the Law of 10, or set a fixed
+dollar risk), the floor trails the way that firm trails it, and the run ends when the account passes or
+busts. A pass needs the profit target, the minimum trading days and the consistency rule; the daily stop
+(three losses or two risks down) and the consistency rule can be switched off to see what they cost.
+The chart shows the balance against the target and the floor day by day, and the ledger lists each day.
+
+**The odds** redraw the same real days at random, with repeats, into 500 imagined stretches of 30, 60
+or 90 trading days and play each through the account: the share that pass, bust, or are still going.
+The bar on each account and each playbook is those odds, so the easier account and the better-fitting
+playbook are visible at a glance, and **What the simulator suggests** says them in words. Any rule on the
+account's sheet can be edited to try another size or a rule change (kept in this browser only);
+**Start from my real account** begins from the balance in the Risk guard. The wall board now applies
+the same rules, so a playbook shows **PASSED** only once consistency and the minimum days are met.
+Rules are the ones Trade Pilot keeps: firms change them, so check before buying an account. No fees
+or slippage are taken off, and an intraday-trailing floor is checked when a trade closes, not tick by tick.
+
+### Accounts, game plans and the tuner
+
+**Picking an account.** The simulator's list starts with **Evaluation** or **Straight to funded**, then a
+firm and a size. It holds your own accounts (marked **YOURS**, the ones the Risk guard follows) and more
+to try: LucidFlex 150K and LucidDirect 50K/100K/150K, Topstep Combine 100K/150K, Top One Ignite
+100K/150K, Apex 4.0 EOD 50K/100K/150K and Tradeify Lightning 50K/100K/150K. The list is sorted by the
+odds for the strategy you picked. The extra accounts' rules come from public rule summaries as of
+September 2026 (LucidDirect's contract limits are taken to be LucidFlex's): check every one with the firm.
+For a straight-to-funded account the target is the profit its first payout needs. A daily loss limit
+stops the day; a program with no consistency rule (Apex's evaluation) is treated as having none.
+
+The list also has 25K accounts (LucidFlex, LucidDirect, Apex 4.0 EOD, Top One Ignite) and FundedNext
+Futures (Rapid 25K and 50K, Legacy 25K, and the Rapid funded accounts). FundedNext's Rapid challenge has
+no consistency rule or minimum days, so one trade can pass it. The **Risk dial** has a third sizing,
+**A fixed number of contracts**: the same micros on every trade up to the account's limit, with a ladder
+showing the pass and bust odds at each size. With a wide stop a fixed size can end the account in one
+loss. [The prop farm plan](prop-farm-plan.md) sets out what is built on these.
+
+**Game plans.** With two or more playbooks picked, **Game plan** chooses how they share a day:
+- **Every setup**: take all of them.
+- **First, then a fallback**: the first playbook you picked always trades; the next only gets its turn
+  once the one before has lost that day, or has not set up by 08:00 PT. A winner from the first ends it.
+- **By the kind of day**: the first playbook when the market is trending (ADX 20 or more on the entry
+  bar), the second when it is ranging.
+
+**One and done** ends the day at the first winner, and **Trades a day** caps the count. A plan is applied
+to the backtest's trades in the order they were entered, using only what was known at each entry.
+The simulator ranks every mix of your three playbooks on the account in view, and the Backtest Lab's
+**Mixing playbooks in a day** table (under **All playbooks**) ranks them per trade.
+
+**The tuner.** After every backtest the office looks for better versions of VWAP Pullback in Trend,
+Support & Resistance and Failed Auction. It changes one setting at a time (the target, the stop's room,
+the last entry time, trades a day and a few per playbook), replays the month for each, and calls a change
+**better** only when it makes more per trade and in total, keeps most of the trades, does not deepen the
+dip, and still wins on the later third of the days. A change that clears that is saved as a new
+**candidate** version; when nothing does, the front-runner is kept as a version **to watch** and says it is
+not proven. Open a playbook in the Backtest Lab to see **Versions**: look at a candidate's trades, try it
+in the simulator (**Playbook rules → The tuner's candidate**), **Make it live**, or retire it. Making a
+version live changes how the office calls that playbook from then on (proposals, paper book, backtest);
+version 1 is always the playbook as written and can be rolled back to. About 40 replays take roughly half
+a minute in the background. Versions are kept in `<data>/trading/playbook-versions.json`. On a month of
+history most changes cannot be told from luck, and the tuner says so.
+
+**Managing the trade.** *Once a trade is working* (in both consoles) replays every trade under another
+way of handling it: stop to breakeven at +1R, bank half at +1R, let it run on a trailing stop one risk
+behind the best price, or size up with a second unit at +1R. The backtest follows each trade bar by bar
+under all of them, so switching is instant and the simulator ranks them for the account in view. Results
+are in R of the first risk. Sizing up holds two units, so an account at its contract limit could not take
+the add, and a playbook's next setup is the one its written rules would have called.
+
+**Live eval.** The fourth wall display on Back Office, **🏁 Live eval**, runs one account forward a day at
+a time on what the playbooks really take on paper, beside what you really make. In the simulator, set the
+account, playbooks, plan, risk and management, then **Run this live, from today** (or from as far back as
+the paper book goes, a month at most). The display shows the office's profit, progress to the target and
+cushion, your own profit over the same days, who leads, and both lines day by day. Your side is your
+account's daily result: from ProjectX when it is linked, otherwise what you log in the Risk guard, and it
+starts with your first trade after the live eval does. An account that is not one of yours is measured
+against your first active one. Paper trades count when they close; trades from before this version have
+no indicator readings, so a by-the-kind-of-day plan only counts trades taken from now on. The live
+market board that hung there is still on Opening Bell, every desk's monitor and the tape.
+
+The wall displays lead with one answer each: the best edge and best mix, how each playbook did on each
+of your accounts (**TARGET HIT** means the money is there but a rule is still pending), today's
+paper result, and the live eval's race.
+
+### The Farm
+
+**🌾 Prop farm** (the fourth wall display on Back Office, the ☰ menu, or the command palette) runs a few
+prop accounts through one firm's program on paper, from the fee to the payout. Set it up in the steps on
+the left:
+
+1. **The firm and the program**: Lucid (LucidFlex 25K and 50K, LucidDirect 25K), Top One (Ignite 25K and
+   50K, straight to funded) or FundedNext (Rapid 25K and 50K). Each card shows what that program typically
+   nets with your setup. Set what an attempt really costs you; two of the fees are guesses and say so.
+2. **How many accounts** side by side (up to five), how many attempts in all, and whether they **take
+   turns** (each signal goes to the next account, so no two are on opposite sides) or all take every trade.
+3. **What they trade**: a playbook, or the lab's best mix, and how a trade is managed.
+4. **How big**: micros in the evaluation and micros funded. Under each size is what the farm typically
+   nets at it; ★ is the best on these days.
+5. **Notices**: once the farm is live, a Discord webhook address gets every fill, pass and payout.
+
+**Battle test** replays the setup over the backtest's month: accounts move from *Evaluations* to *Funded*
+to *Payout ready* (parked until paid) or *Out*. Drag the day or press **Replay** to watch it happen; the
+feed lists every milestone and the chart is payouts less fees. The odds beside the headline run the same
+farm over 300 redraws of your real days, 60 at a time. **Live on paper** runs it forward on what the
+playbooks really take, a day at a time, and the wall display shows every account. Nothing is bought and
+no order is placed.
+
+A payout lands the day after an account parks, and the account rests that day. The model assumes an
+account starts again at its opening balance with its full drawdown after a payout, which some firms are
+stricter about, and it does not model a program's limit on payouts per account. Fees, splits and payout
+caps are from public summaries: check them with the firm. [The prop farm plan](prop-farm-plan.md) has the
+rest, including what each firm says about automation.
+
 ## Session Desk and cleaner desks
 
 Press **J**, click **Session Desk** in the top bar, or search for it in the command palette.
