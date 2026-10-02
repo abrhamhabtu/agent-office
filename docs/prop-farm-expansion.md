@@ -88,7 +88,7 @@ recorded shadow research and cannot change order size or account limits.
   vulnerable package in the inspected audit. No broad dependency downgrade was attempted.
 
 Validation: the full 622-test suite, TypeScript checks and production build passed; two additional
-feed-readiness regressions and the 23-test focused suite passed after the final status correction.
+feed-readiness regressions and the 22-test focused suite passed after the final status correction.
 Browser checks covered the FundedNext catalog, combined recipe selection, phase controls, completed
 worker comparisons and disconnected TradingView status. No browser console errors appeared.
 The real TradingView service accepted dynamic client registration; user authorization remains pending.
