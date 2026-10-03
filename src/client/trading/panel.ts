@@ -226,7 +226,22 @@ export function openTrading(role: FloorRole, start?: PanelTab) {
     },
     connections: (s) => {
       const origin = location.origin;
-      const hook = `${origin}${s.webhook.path}?key=${s.webhook.key}`;
+      let receiverOrigin = '';
+      try { receiverOrigin = localStorage.getItem('agent-office.candle-receiver-origin') ?? ''; } catch { /* Private browsing. */ }
+      const hook = `${receiverOrigin || origin}${s.webhook.path}?key=${s.webhook.key}`;
+      const receiver = h('input', { value: receiverOrigin, placeholder: 'https://your-receiver.trycloudflare.com', 'aria-label': 'Public candle receiver origin', style: 'flex:1;min-width:260px' }) as HTMLInputElement;
+      const saveReceiver = () => {
+        try {
+          const value = receiver.value.trim();
+          if (value) {
+            const url = new URL(value);
+            if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash || url.pathname !== '/' || (url.port && url.port !== '443')) throw new Error('Use the HTTPS origin only, with no path, key or credentials');
+            localStorage.setItem('agent-office.candle-receiver-origin', url.origin);
+          } else localStorage.removeItem('agent-office.candle-receiver-origin');
+          note = 'Receiver address saved. Copy the webhook URL below into each chart alert.';
+        } catch (e) { note = e instanceof Error ? e.message : 'Could not save receiver'; }
+        render();
+      };
       const user = h('input', { placeholder: 'ProjectX username', autocomplete: 'off', style: 'width:200px' });
       const key = h('input', { placeholder: 'API key', type: 'password', autocomplete: 'off', style: 'width:260px' });
       const base = h('input', { placeholder: 'https://api.topstepx.com/api', style: 'width:280px' });
@@ -242,11 +257,12 @@ export function openTrading(role: FloorRole, start?: PanelTab) {
         ...s.feeds.map((f) => card(row(mono(f.ok ? 'CONNECTED' : 'DOWN', f.ok ? GOOD : BAD), h('b', {}, f.name), h('span.grow', {}), f.lastAt ? dim(`updated ${new Date(f.lastAt).toLocaleTimeString()}`) : null), dim(f.note))),
         heading('TradingView → the office'),
         card(
-          dim('In TradingView, create an alert on your indicator or strategy, tick Webhook URL and paste this. When it fires, the office dings, the playbook’s desk agent jumps up, and the alert lands on the Risk & Journal screen.'),
+          dim('Public candle receiver: on localhost, run npm run tradingview:receiver and tunnel port 4610. This forwards only closed candles, keeping office pages and account routes off the public endpoint.'),
+          row(receiver, h('button.btn', { onclick: saveReceiver }, 'Save receiver address')),
+          dim(receiverOrigin ? 'Use this HTTPS URL for the Agent Office feed candle alerts below. The restricted receiver accepts closed-candle JSON only; strategy signal messages are rejected.' : 'In TradingView, create an alert on your indicator or strategy, tick Webhook URL and paste this. When it fires, the office dings, the playbook’s desk agent jumps up, and the alert lands on the Risk & Journal screen.'),
           row(h('input', { value: hook, readonly: true, style: 'flex:1;min-width:300px;font-family:ui-monospace,Menlo,monospace', onclick: (e: Event) => (e.target as HTMLInputElement).select() }), h('button.btn', { onclick: () => void navigator.clipboard?.writeText(hook).then(() => ((note = 'Webhook URL copied'), render())) }, 'Copy'), h('button.btn', { onclick: () => run(trading.post('/api/trading/webhook-key', {}), 'New key: update your alerts') }, 'New key')),
-          dim('Alert message (JSON, TradingView fills the {{…}}): name the setup so it rings the right desk.'),
-          h('code', { style: 'white-space:pre-wrap;font-size:12px' }, template),
-          dim(/localhost|127\.0\.0\.1/.test(origin) ? 'TradingView’s servers can’t reach localhost: open a tunnel (for example `cloudflared tunnel --url http://localhost:4600`) and use its https address in place of this one.' : 'TradingView only posts to https on port 443.'),
+          ...(receiverOrigin ? [] : [dim('Alert message (JSON, TradingView fills the {{…}}): name the setup so it rings the right desk.'), h('code', { style: 'white-space:pre-wrap;font-size:12px' }, template)]),
+          dim(!receiverOrigin && /localhost|127\.0\.0\.1/.test(origin) ? 'TradingView cannot reach localhost. Run `cloudflared tunnel --url http://127.0.0.1:4610`, then save its https origin above. Temporary addresses change when the tunnel restarts.' : 'TradingView posts to HTTPS on port 443. The restricted candle receiver does not forward strategy signal alerts.'),
         ),
         heading('TradingView → real-time candles'),
         card(

@@ -884,6 +884,28 @@ export async function startServer(cfg: Config) {
 
   /** The trading floors' API: the snapshot every board draws, and the few things a person can change. */
   const tradingRoute = async (p: string, url: URL, req: http.IncomingMessage, res: http.ServerResponse) => {
+    if (p === '/api/trading/history' && req.method === 'GET') return send(res, 200, desk.market.historyView(), { 'cache-control': 'no-store' });
+    if (p === '/api/trading/history' && req.method === 'POST') {
+      try {
+        const b = JSON.parse(await readBody(req, 65 * 1024 * 1024));
+        if (b.action === 'import') desk.market.historyLibrary.import(b);
+        else if (b.action === 'select') {
+          if (desk.research.status().busy || desk.snapshot().backtest?.running) throw new Error('Wait for the current replay to finish before changing its history');
+          desk.market.historyLibrary.select(b.symbol, b.id);
+        } else throw new Error('Unknown history action');
+        return send(res, 200, desk.market.historyView());
+      } catch (e) { return send(res, 400, { error: e instanceof Error ? e.message : 'History request failed' }); }
+    }
+    if (p === '/api/trading/research' && req.method === 'GET') return send(res, 200, desk.research.status(), { 'cache-control': 'no-store' });
+    if (p === '/api/trading/research' && req.method === 'POST') {
+      try {
+        const b = JSON.parse(await readBody(req, 4096));
+        if (b.action === 'start') desk.research.start(b);
+        else if (b.action === 'holdout') return send(res, 200, desk.research.openHoldout(b));
+        else throw new Error('Unknown research action');
+        return send(res, 200, desk.research.status());
+      } catch (e) { return send(res, 400, { error: e instanceof Error ? e.message : 'Research request failed' }); }
+    }
     const body = async () => {
       try {
         return JSON.parse((await readBody(req, 8192)) || '{}') as Record<string, unknown>;
@@ -1093,7 +1115,8 @@ export async function startServer(cfg: Config) {
       if (!session) {
         if (p.startsWith('/api/')) return send(res, 401, { error: 'Not logged in' });
         // Back to the 2D view after signing in, if that's where they were going.
-        res.writeHead(302, { location: p === '/lite' ? '/login?next=/lite' : '/login' }).end();
+        const next = ['/lite', '/arena', '/research'].includes(p) ? p : '';
+        res.writeHead(302, { location: next ? `/login?next=${encodeURIComponent(next)}` : '/login' }).end();
         return;
       }
       if (p === '/api/whoami') return send(res, 200, { ok: true, me: meOf(session.account?.id) });
@@ -1111,7 +1134,13 @@ export async function startServer(cfg: Config) {
           return send(res, 404, { error: 'No such connection action' });
         } catch (err) { return send(res, 400, { error: err instanceof Error ? err.message : 'TradingView connection failed' }); }
       }
-      if (p.startsWith('/api/trading/')) return await tradingRoute(p, url, req, res);
+      if (p.startsWith('/api/trading/')) {
+        if (req.method === 'POST' && ['/api/trading/history', '/api/trading/research'].includes(p)) {
+          if (!sameOrigin(req, cfg)) return send(res, 403, { error: 'Forbidden' });
+          if (!meOf(session.account?.id).admin) return send(res, 403, { error: 'Only office admins can change shared research history or experiments' });
+        }
+        return await tradingRoute(p, url, req, res);
+      }
       if (p === '/api/agents/opencode/models' && req.method === 'GET') {
         try {
           return send(res, 200, { models: await openCodeModels.get() });
@@ -1261,6 +1290,7 @@ export async function startServer(cfg: Config) {
       if (p === '/lite' || p === '/lite.html') return serveFile(res, path.join(publicDir, 'lite.html'), false);
       // The Arena by itself: the trader race without the office around it.
       if (p === '/arena' || p === '/arena.html') return serveFile(res, path.join(publicDir, 'arena.html'), false);
+      if (p === '/research' || p === '/research.html') return serveFile(res, path.join(publicDir, 'research.html'), false);
       const file = publicFile(p);
       if (file) return serveFile(res, file, false);
       res.writeHead(404, { 'content-type': 'text/plain' }).end('Not found');

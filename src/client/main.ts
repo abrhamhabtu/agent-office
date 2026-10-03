@@ -82,6 +82,7 @@ import { openStrategyDesk } from './trading/strategy';
 import { BacktestBoard, EvalBoard, FarmBoard, PaperBoard } from './trading/backoffice-boards';
 import { openFarm } from './trading/farm';
 import { openArena } from './trading/arena';
+import { openResearchWorkbench } from './trading/research-workbench';
 import { planner } from './trading/farm-plan';
 import { openBacktestLab } from './trading/backtestlab';
 import { openEvalSim } from './trading/evalsim';
@@ -491,6 +492,9 @@ trading.start();
   });
 }
 // A link straight to the Arena: /#arena, or /#arena=crypto for that league.
+if (location.hash === '#research') {
+  const off = trading.on(() => { off(); openResearchWorkbench(); });
+}
 {
   const want = /^#arena(?:=(futures|crypto))?$/.exec(location.hash);
   if (want) {
@@ -4875,6 +4879,7 @@ const hud = mountHud(
   [
     { id: 'session-desk', icon: '📊', label: 'Session Desk', section: 'Open', key: 'J', shown: () => inOffice(), status: () => inOffice(), chip: () => 'Session Desk', title: () => 'Active chart, levels, checklist, event and accounts (J)', run: openSessionDesk },
     { id: 'arena', icon: '🏟️', label: 'Arena', section: 'Open', key: 'U', shown: () => inOffice(), status: () => inOffice(), chip: () => 'Arena', title: () => 'Named traders racing on paper: a futures league and a crypto league (U)', run: () => openArena() },
+    { id: 'research', icon: '🔬', label: 'Strategy Workbench', section: 'Open', shown: () => inOffice(), status: () => inOffice(), chip: () => 'Research', title: () => 'Longer futures history, strategy validation and prop-account comparison', run: openResearchWorkbench },
     { id: 'strategy-desk', icon: '🌲', label: 'Strategy', section: 'Open', shown: () => inOffice(), status: () => inOffice(), count: () => trading.freshStrategies().length, chip: () => 'Strategy', title: () => 'Your Pine scripts: every version tested, one tap to copy to TradingView', run: showStrategyDesk },
     { id: 'issues', icon: '🎯', label: 'Proposals', section: 'Open', count: () => trading.snap?.proposals.filter((p) => p.stage === 'ready' || p.stage === 'live').length ?? 0, title: () => 'Live setups from the playbooks', run: () => openTrading(tradingRole(), 'proposals') },
     { id: 'pulls', icon: '📰', label: 'News', section: 'Open', count: () => trading.snap?.news.filter((n) => n.kind === 'calendar' && n.impact === 'high' && n.at > Date.now()).length ?? 0, title: () => 'The calendar and the wire', run: () => openTrading(tradingRole(), 'news') },

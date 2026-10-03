@@ -4,6 +4,8 @@ import WebSocket from 'ws';
 import type { Bar, ContextQuote, FeedStatus, Quote, Symbol } from '../../shared/trading.js';
 import { INSTRUMENTS, SYMBOLS } from '../../shared/trading.js';
 import { tradingDay } from './engine.js';
+import { HistoryLibrary } from './history-library.js';
+import { FUTURES, type HistoryView } from '../../shared/history-data.js';
 
 // Real prices. CME futures (NQ, ES, GC) come from Yahoo Finance's public chart API, which carries
 // one-minute bars with volume for the last month and a price that trails the exchange by seconds to
@@ -133,6 +135,7 @@ export interface Live {
 }
 
 export class Market {
+  readonly historyLibrary: HistoryLibrary;
   private bars = new Map<Symbol, Bar[]>();
   private live = new Map<Symbol, Live>();
   private projectXBars = new Map<Symbol, { bars: Bar[]; source: string }>();
@@ -159,6 +162,7 @@ export class Market {
 
   constructor(dataDir: string) {
     this.historyDir = path.join(dataDir, 'trading', 'bars');
+    this.historyLibrary = new HistoryLibrary(path.join(dataDir, 'trading', 'history-library'));
     for (const [id, name, note] of [
       ['yahoo', 'CME futures · Yahoo', 'NQ, ES and gold: 1-minute bars and the last price, seconds to minutes behind the exchange'],
       ['coinbase', 'Bitcoin · Coinbase', 'Live BTC-USD ticks over Coinbase’s public websocket'],
@@ -458,11 +462,21 @@ export class Market {
 
   // ---- History for the backtest ------------------------------------------------------------------
 
+  historyView(): HistoryView {
+    return { ...this.historyLibrary.view(), cached: FUTURES.map(symbol => {
+      let bars: Bar[] = [];
+      try { bars = JSON.parse(readFileSync(path.join(this.historyDir, `${symbol}.json`), 'utf8')); } catch { /* No cache yet. */ }
+      return { symbol, bars: bars.length, first: bars[0]?.ts ?? null, last: bars.at(-1)?.ts ?? null };
+    }) };
+  }
+
   /**
    * About a month of minute bars for a market: Yahoo keeps 1-minute history for 30 days, served a week
    * at a time. Finished days are kept on disk, so only the days since the last run are fetched again.
    */
   async history(sym: Symbol): Promise<Bar[]> {
+    const imported = this.historyLibrary.selected(sym);
+    if (imported) return imported;
     const file = path.join(this.historyDir, `${sym}.json`);
     let cached: Bar[] = [];
     try {
@@ -482,7 +496,8 @@ export class Market {
       }
     }
     const map = new Map([...cached, ...fresh].map((b) => [b.ts, b]));
-    const all = [...map.values()].sort((a, b) => a.ts - b.ts).filter((b) => b.ts > now - 45 * 86_400_000);
+    // The provider's retrieval limit is not a retention limit: keep real candles already collected.
+    const all = [...map.values()].sort((a, b) => a.ts - b.ts);
     // Keep only finished trading days on disk: today's are still changing.
     const today = tradingDay(now);
     try {

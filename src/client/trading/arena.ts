@@ -1,6 +1,7 @@
 import { ENGINES, enginesOf, MARKET_BY_ID, marketsOf, type ArenaView, type BacktestReport, type BrainView, type Decision, type Draft, type EngineId, type LabView, type League, type TraderView } from '../../shared/arena';
 import { h, openModal } from '../ui/dom';
 import './arena.css';
+import { openResearchWorkbench } from './research-workbench';
 
 // The Arena console: named traders racing on paper, a futures league and a crypto league.
 //
@@ -435,6 +436,7 @@ export function mountArena(host: HTMLElement, opts: { onClose?: () => void; leag
       draw();
     };
     return [h('section.ar-panel', {},
+      ...(fut ? [h('div.ar-panel-head', {}, h('div', {}, h('h3', {}, 'Strategy Workbench'), h('small', {}, 'Import longer chart history, test VWAP-led improvements on unfamiliar sessions, and compare prop firms after costs.')), h('button.ar-btn', { type: 'button', onclick: openResearchWorkbench }, 'Open Strategy Workbench ↗'))] : []),
       h('div.ar-panel-head', {}, h('h3', {}, 'Where the edge is'), h('small', {}, `${fut ? 'Every playbook on every market, over the recorded month' : 'Every engine on every coin, over the last day'}: one plain trader each, the house brain, this league’s account rules and fees. ${lab && lab !== 'loading' && !('error' in lab) ? `Replayed on ${lab.span}. ` : ''}Click a cell to design a trader on it.`)),
       grid,
       h('div.ar-panel-head', {}, h('h3', {}, 'Backtest a trader'), h('small', {}, `Replay the same tape with one of the traders on the floor, exactly as it is set up now. To try a change first, open a trader’s rules and backtest them there; a new design can be backtested before it starts.`)),
