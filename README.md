@@ -374,6 +374,8 @@ The **Session Desk kiosk** beside the lounge opens the dashboard with **E** when
 
 For optional real-time NQ, ES and GC, use **Session Desk → Data connections → ProjectX** with TopstepX API access, then **Enable real-time futures**. Quotes stream and provider candles refresh every 20 seconds; completed candles drive proposals. Until connected with eligible API access, futures remain visibly delayed. BTC candles and historical backtests remain Yahoo. See [the setup and source details](docs/trading-office.md#optional-real-time-futures).
 
+**Strategy Workbench:** Open → Strategy Workbench, Arena → Research, or `/research` opens a futures research console for VWAP Pullback in Trend, support/resistance and failed auction on NQ, ES and GC. Import and explicitly select one-minute chart CSVs for longer history, or use retained delayed candles. The workbench selects a fixed filter on training sessions, evaluates it on later sessions with costs, reserves a final quarter, and compares chronological prop-account outcomes. Topstep and Apex catalog rules are labeled research scenarios; checked numerical rules retain their source dates. [Workflow and limitations](docs/trading-office.md#strategy-workbench).
+
 Prop Farm: press **Y** or open `/#farm` for accounts, research, comparison, forward paper tests,
 payouts and battle tests. Current FundedNext 25K–150K scenarios and setup notes are documented in
 [Prop Farm expansion](docs/prop-farm-expansion.md). Includes FundedNext Rapid Pro/Flex scenarios through
@@ -381,3 +383,8 @@ payouts and battle tests. Current FundedNext 25K–150K scenarios and setup note
 
 **TradingView MCP:** Session Desk → Data connections → Connect TradingView prepares official OAuth
 sign-in for Essential or higher. [Setup and limits](docs/prop-farm-expansion.md#tradingview-sign-in-tomorrow).
+
+**TradingView live chart candles on localhost:** run `npm run tradingview:receiver`, tunnel its
+loopback port 4610, and save the public HTTPS origin in Connections. This exposes only keyed candle
+posts. Create a bar-close alert on each real-time one-minute futures chart with the supplied Pine
+indicator. [Receiver setup](docs/trading-office.md#real-time-candles-from-tradingview-alerts).

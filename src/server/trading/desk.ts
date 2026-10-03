@@ -22,6 +22,7 @@ import { Vault } from './vault.js';
 import { NewsDesk } from './news.js';
 import { ProjectX } from './projectx.js';
 import { Arena } from './arena.js';
+import { ResearchWorkbench } from './research-workbench.js';
 
 // The market desk: real prices in, the three playbooks replayed over today's bars, and out comes what
 // every board and laptop on the two trading floors draws. It also keeps the paper book (every setup the
@@ -184,6 +185,7 @@ export class TradingDesk {
   /** The prop farm: research jobs, forward runs, tracked accounts, payouts (see propfarm.ts). */
   readonly farm: PropFarm;
   readonly arena: Arena;
+  readonly research: ResearchWorkbench;
   private file: string;
   private paperFile: string;
   private saved: Saved;
@@ -205,6 +207,7 @@ export class TradingDesk {
     this.file = path.join(dir, 'desk.json');
     this.paperFile = path.join(dir, 'paper.json');
     this.market = new Market(dataDir);
+    this.research = new ResearchWorkbench(path.join(dir, 'research-workbench'), this.market);
     this.vault = new Vault(path.join(dataDir, 'trading', 'pine'));
     this.news = new NewsDesk(dataDir);
     this.tuner = new Tuner(path.join(dir, 'playbook-versions.json'));
@@ -456,7 +459,7 @@ export class TradingDesk {
         // The owner's three playbooks mixed in a day, on the markets a prop account trades. Ranked on the days
         // research may look at: the last quarter is the prop farm's holdout, and nothing is picked on it.
         mixes: rankPlans(all.filter((t) => t.symbol !== 'BTC' && seen.has(t.day)), TUNED_PLAYBOOKS, seenDays).slice(0, 8).map((m) => ({ label: m.label, mode: m.plan.mode, order: m.plan.order, trades: m.stats.trades, winRate: m.stats.winRate, avgR: m.stats.avgR, totalR: m.stats.totalR, maxDrawdownR: m.stats.maxDrawdownR, laterAvgR: m.laterAvgR })),
-        note: `${days.size} trading days of real 1-minute bars (Yahoo keeps a month). Entries on the signal bar's close, stop before target when one bar tags both, a gap through a stop filled at the open, flat at 13:00 PT. Gross: the Prop Farm adds fees and slippage. The last ${split.holdout.length} weekdays are held out: the tuner and the mixes are never judged on them.`,
+        note: `${days.size} trading days of real 1-minute bars from selected chart exports or the retained provider history. Entries on the signal bar's close, stop before target when one bar tags both, a gap through a stop filled at the open, flat at 13:00 PT. Gross: the Prop Farm adds fees and slippage. The last ${split.holdout.length} weekdays are held out: the tuner and the mixes are never judged on them.`,
       };
       // The tuner follows every backtest, in the background: the boards don't wait for it.
       void this.tuner.run(history, all, [...days].sort(), Date.now(), seenDays).catch(() => {}).finally(() => this.farm.dataReady());

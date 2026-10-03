@@ -266,6 +266,52 @@ Other ProjectX gateways continue to support account/journal sync; this market co
 TopstepX only. BTC quotes remain Coinbase, BTC candles remain Yahoo, and historical backtests
 continue using Yahoo history. These sources are not relabeled as exchange real-time data.
 
+### Strategy Workbench
+
+Open **Open → Strategy Workbench**, **Arena → Research → Open Strategy Workbench**,
+`/#research`, or the standalone `/research` page. VWAP Pullback in Trend is the primary playbook;
+support/resistance and failed auction are compared on the same NQ, ES and GC sessions.
+
+In **History library**, export standard one-minute OHLC candles with volume from TradingView
+([official export instructions](https://www.tradingview.com/support/solutions/43000537255-how-to-export-chart-data/)).
+Load older chart dates before exporting. Choose the matching market and exact chart symbol,
+validate and import, then explicitly select the saved series. Imports never automatically become active.
+Use epoch seconds/milliseconds or ISO timestamps with explicit offsets, up to 500,000 rows / 64 MB.
+Invalid rows and conflicting duplicates reject the whole file. Identical duplicates are removed;
+missing minutes and continuous-contract roll risks remain visible. Heikin Ashi and Renko exports
+are unsuitable for execution testing. Imported history changes historical tests, not the live feed.
+Switch back to **Retained Yahoo history** to restore the provider series. Collected provider candles
+are now retained rather than trimmed after 45 days; this cannot recover dates the provider never supplied.
+
+**Run strategy research** requires at least 12 overlapping completed sessions, each with at least
+300 candles and preceding-session context. Half the dates select among nine predefined filters,
+the next quarter evaluates the single training-selected candidate, and the last quarter stays reserved.
+Candidates require at least 20 training trades, 35% retention, positive stressed expectancy and no
+deeper training drawdown. Validation requires at least 20 trades in each comparison and accounts for
+the search count. Inconclusive and rejected results are shown; no candidate is promoted automatically.
+The reserved quarter can open only for a promising candidate, once per candle dataset; changing the
+micro cap or restarting the server does not restore an unseen test. Other existing office tools can
+still inspect those dates, so this is a workbench reservation rather than a system-wide quarantine.
+
+Firm comparisons replay the validation dates chronologically with costs, overlapping exposure,
+intraday excursions and the selected micro cap. Risk is capped at 10% of remaining cushion per entry,
+20% per day, with a stop after three losses. Each program gets one attempt, with no rebuy or extrapolated
+pass probability. Checked Lucid/FundedNext rules retain source evidence; Topstep/Apex catalog-only
+rules remain **research scenarios**, not a verification of current offers. Firm fees, funded payouts
+and live execution approval are outside this evaluation replay. Entries use the built-in engine's
+signal-close assumption, conservative stop-first exits and adverse gap fills.
+
+Reports are fingerprinted and saved under `<data>/trading/research-workbench/`; chart exports live in
+`<data>/trading/history-library/`. Download the public JSON report to retain its results, data fingerprint,
+source labels, rule provenance and assumptions. New history or settings produce a separate report.
+
+**Data connections** reuses the existing official TradingView OAuth and live-feed settings.
+TradingView's MCP public beta supplies delayed market data; successful OAuth does not establish
+real-time exchange entitlement or automatically populate the backtest history. See
+[TradingView's beta description](https://www.tradingview.com/blog/en/tradingview-mcp-server-public-beta-60864/).
+Use chart CSVs for longer backtests, chart alerts with a reachable HTTPS webhook for bar-close forward
+data, or eligible ProjectX/TopstepX access for streamed futures quotes.
+
 ### TradingView MCP research
 
 Open **Session Desk → Data connections → TradingView · official MCP research**. Connect, follow the
@@ -276,6 +322,17 @@ market timestamp and delay fields. This is an on-demand research connection, sep
 feed below. [Tomorrow's setup](prop-farm-expansion.md#tradingview-sign-in-tomorrow).
 
 ### Real-time candles from TradingView alerts
+
+For a local office, start `npm run tradingview:receiver` and then
+`cloudflared tunnel --url http://127.0.0.1:4610`. The receiver binds to loopback and forwards
+only keyed JSON candle posts to the local office on port 4600. It does not expose office pages,
+sign-in, websocket, account or strategy-signal routes. Save the tunnel's HTTPS origin under
+**TradingView → the office → Public candle receiver origin**, then copy the generated webhook URL.
+Keep the receiver, tunnel and office running. Quick-tunnel addresses are temporary; after a restart,
+save the new origin and edit all three TradingView alerts. For a different local backend port, set
+`TRADINGVIEW_OFFICE_URL`; set `TRADINGVIEW_RECEIVER_PORT` to change the receiver's default 4610.
+The office validates the key and candle fields; the relay does not fabricate a feed or bypass that validation.
+Enable TradingView two-factor authentication to use webhooks.
 
 For the office's candle feed, a Pine script can post each closed one-minute candle to the office's webhook. Open **Session Desk → Data connections** and find **TradingView → real-time candles**: it has the script (Copy Pine script) and the steps. In short: add the script to a **1-minute** chart of NQ1!, ES1!, GC1! or BTCUSD, create an alert with Condition **Agent Office feed → Any alert() function call** and **Webhook URL** set to the URL shown under *TradingView → the office*, and repeat for each market. (Without Pine, an ordinary alert on Once Per Bar Close with the JSON message shown in the same card works too.)
 
