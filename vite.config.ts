@@ -55,6 +55,7 @@ export default defineConfig({
         main: resolve(import.meta.dirname, 'src/client/index.html'),
         lite: resolve(import.meta.dirname, 'src/client/lite.html'),
         arena: resolve(import.meta.dirname, 'src/client/arena.html'),
+        research: resolve(import.meta.dirname, 'src/client/research.html'),
         login: resolve(import.meta.dirname, 'src/client/login.html'),
         claim: resolve(import.meta.dirname, 'src/client/claim.html'),
         join: resolve(import.meta.dirname, 'src/client/join.html'),
