@@ -126,6 +126,49 @@ The wall displays lead with one answer each: the best edge and best mix, how eac
 of your accounts (**TARGET HIT** means the money is there but a rule is still pending), today's
 paper result, and the live eval's race.
 
+### The Arena
+
+Press **U**, use **🏟️ Arena** in the top bar or the ☰ menu, or go to `/#arena` (`/#arena=crypto`). The same
+console is a page of its own at `/arena`, with nothing of the office around it.
+
+Named traders race each other on paper, in two leagues. The idea is
+[beebots](https://github.com/imikerussell/beebots)' (MIT): a trader is a character with rules, every decision
+is a pick from a menu of moves that are valid right now, and plain code can veto, shrink or force the pick.
+
+- **Futures.** Each trader runs one of the office's playbooks on a LucidFlex 50K evaluation: the trailing
+  floor behind, the target ahead, and sitting out is always a legal move. The tape replays the recorded month
+  a trading day at a time, and only moves while someone is watching. Pause it, change its speed, or start a
+  new season from the header.
+- **Crypto.** Each trader runs a $1,000 paper bankroll on BTC, ETH and SOL at 2x at most, on one of three
+  engines (Breakout, Trend, Reversion). This tape is live: Coinbase's public minute candles as they close.
+
+**Floor** shows every trader in a column (the account, the position, the curve, the last call with its
+probabilities), beside the Desk Head, the leaderboard, the decision stream and what the risk desk refused.
+**Leaderboard** lists the cast with rules to copy. **Engine wars** averages every account each engine has
+run. **Research** shows where the edge is (every playbook on every market over the recorded month, or
+every engine on every coin over the last day, one plain trader each) and backtests any trader on the floor;
+a new design, or a change to a trader's rules, can be backtested before it starts. **Graveyard** keeps
+every account that ended. **Design a trader** turns a sentence into a trader: an
+engine, markets, and rules. The phrases code enforces are "longs only", "shorts only", "two trades a day",
+"nothing in the first 30 minutes" and "no entries after 10:30"; the rest steers the brain.
+
+**The brain** is the house's by default: the engines' own scores, no model, free. Switch it to a model
+from the header and the office asks an agent CLI on this machine: Claude Code (Opus 5.5, Sonnet 5.5 or
+Haiku 4.5; `AGENT_OFFICE_ARENA_CLAUDE` names another binary), Codex (`codex exec`), OpenCode
+(`opencode run`) or the Gemini CLI (`gemini -p`), each on its own sign-in, at most 250 calls a day. Switching
+asks one test question first, and a harness that does not answer is not switched to. A brain only ever sees the menu:
+never a size, a stop or anything that could place an order, and when it does not answer the trader holds and
+opens nothing. The console says "Powered by Opus 5.5 on Claude Code" (or the harness in use) only while
+that model is really the one deciding. The traders' portraits are drawn by the console from their names.
+
+**The Desk Head** looks at every trader after each futures session (every four hours for crypto). He leaves
+a trader alone until it has lost three sessions running, rewrites at most one a round, and can change rules
+text only: never size, stops or limits. Every rewrite can be undone from the trader's rules.
+
+The engine is `src/shared/arena.ts`, the floor manager `src/server/trading/arena.ts`, the console
+`src/client/trading/arena.ts`. They use the office's bar type, prop rules and playbooks and nothing else of
+it. State is kept in `<data>/trading/arena/arena.json`. Everything is paper: there is no order route.
+
 ### The Farm
 
 Press **Y**, use **Prop farm** in the menu, walk up to the fourth Back Office wall display, or visit

@@ -893,6 +893,32 @@ export async function startServer(cfg: Config) {
     };
     const done = (why: string | undefined) => (why ? send(res, 400, { error: why }) : send(res, 200, desk.snapshot()));
     if (p === '/api/trading/snapshot' && req.method === 'GET') return send(res, 200, desk.snapshot(), { 'cache-control': 'no-store' });
+    // The Arena: both leagues at once, the live stream of them, and what the owner may change.
+    if (p === '/api/trading/arena' && req.method === 'GET') return send(res, 200, { futures: desk.arena.view('futures'), crypto: desk.arena.view('crypto') });
+    if (p === '/api/trading/arena/lab' && req.method === 'GET') {
+      try {
+        return send(res, 200, await desk.arena.lab(url.searchParams.get('league') === 'crypto' ? 'crypto' : 'futures'));
+      } catch (err) {
+        return send(res, 503, { error: err instanceof Error ? err.message : 'The research could not be run' });
+      }
+    }
+    if (p === '/api/trading/arena/stream' && req.method === 'GET') {
+      res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-store', connection: 'keep-alive', 'x-accel-buffering': 'no' });
+      const say = (league: string, view: unknown) => res.write(`data: ${JSON.stringify({ league, view })}\n\n`);
+      say('futures', desk.arena.view('futures'));
+      say('crypto', desk.arena.view('crypto'));
+      const off = desk.arena.subscribe(say);
+      const beat = setInterval(() => res.write(': still here\n\n'), 20_000);
+      req.on('close', () => {
+        off();
+        clearInterval(beat);
+      });
+      return;
+    }
+    if (p === '/api/trading/arena' && req.method === 'POST') {
+      const r = await desk.arena.act(await body());
+      return r.error ? send(res, 400, { error: r.error }) : send(res, 200, { ok: true, draft: r.draft, report: r.report });
+    }
     // The backtest trade by trade, for the Backtest Lab and the eval simulator (only fetched when one is open).
     if (p === '/api/trading/backtest/trades' && req.method === 'GET') return send(res, 200, desk.backtestDetail(), { 'cache-control': 'no-store' });
     // One research job in full (the snapshot only carries each job's summary).
@@ -1233,6 +1259,8 @@ export async function startServer(cfg: Config) {
       if (p === '/' || p === '/index.html') return serveFile(res, path.join(publicDir, 'index.html'), false);
       // The 2D view: the workers, their terminals and the boards, without the 3D office (lite.ts).
       if (p === '/lite' || p === '/lite.html') return serveFile(res, path.join(publicDir, 'lite.html'), false);
+      // The Arena by itself: the trader race without the office around it.
+      if (p === '/arena' || p === '/arena.html') return serveFile(res, path.join(publicDir, 'arena.html'), false);
       const file = publicFile(p);
       if (file) return serveFile(res, file, false);
       res.writeHead(404, { 'content-type': 'text/plain' }).end('Not found');

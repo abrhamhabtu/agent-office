@@ -81,6 +81,7 @@ import { openScreenPreview } from './trading/preview';
 import { openStrategyDesk } from './trading/strategy';
 import { BacktestBoard, EvalBoard, FarmBoard, PaperBoard } from './trading/backoffice-boards';
 import { openFarm } from './trading/farm';
+import { openArena } from './trading/arena';
 import { planner } from './trading/farm-plan';
 import { openBacktestLab } from './trading/backtestlab';
 import { openEvalSim } from './trading/evalsim';
@@ -488,6 +489,16 @@ trading.start();
     warmed = key;
     void trading.backtestDetail().then((d) => planner.warm(d));
   });
+}
+// A link straight to the Arena: /#arena, or /#arena=crypto for that league.
+{
+  const want = /^#arena(?:=(futures|crypto))?$/.exec(location.hash);
+  if (want) {
+    const off = trading.on(() => {
+      off();
+      openArena(want[1] as Parameters<typeof openArena>[0]);
+    });
+  }
 }
 // A link straight to the Prop Farm console: /#farm, or /#farm=research for one of its views.
 {
@@ -4523,6 +4534,11 @@ function officeKey(e: KeyboardEvent): boolean {
     case 'KeyH':
       openHelp();
       return true;
+    case 'KeyU':
+      // The Arena: named traders racing on paper.
+      e.preventDefault();
+      if (!e.repeat) openArena();
+      return true;
     case 'KeyY':
       // The Prop Farm console: the same one the Back Office's wall display opens.
       e.preventDefault();
@@ -4858,6 +4874,7 @@ const noMedia = () => (window.isSecureContext ? undefined : 'Voice and screen sh
 const hud = mountHud(
   [
     { id: 'session-desk', icon: '📊', label: 'Session Desk', section: 'Open', key: 'J', shown: () => inOffice(), status: () => inOffice(), chip: () => 'Session Desk', title: () => 'Active chart, levels, checklist, event and accounts (J)', run: openSessionDesk },
+    { id: 'arena', icon: '🏟️', label: 'Arena', section: 'Open', key: 'U', shown: () => inOffice(), status: () => inOffice(), chip: () => 'Arena', title: () => 'Named traders racing on paper: a futures league and a crypto league (U)', run: () => openArena() },
     { id: 'strategy-desk', icon: '🌲', label: 'Strategy', section: 'Open', shown: () => inOffice(), status: () => inOffice(), count: () => trading.freshStrategies().length, chip: () => 'Strategy', title: () => 'Your Pine scripts: every version tested, one tap to copy to TradingView', run: showStrategyDesk },
     { id: 'issues', icon: '🎯', label: 'Proposals', section: 'Open', count: () => trading.snap?.proposals.filter((p) => p.stage === 'ready' || p.stage === 'live').length ?? 0, title: () => 'Live setups from the playbooks', run: () => openTrading(tradingRole(), 'proposals') },
     { id: 'pulls', icon: '📰', label: 'News', section: 'Open', count: () => trading.snap?.news.filter((n) => n.kind === 'calendar' && n.impact === 'high' && n.at > Date.now()).length ?? 0, title: () => 'The calendar and the wire', run: () => openTrading(tradingRole(), 'news') },

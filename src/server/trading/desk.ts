@@ -21,6 +21,7 @@ import { readParams, reportOf, runLab, testVersions } from './lab.js';
 import { Vault } from './vault.js';
 import { NewsDesk } from './news.js';
 import { ProjectX } from './projectx.js';
+import { Arena } from './arena.js';
 
 // The market desk: real prices in, the three playbooks replayed over today's bars, and out comes what
 // every board and laptop on the two trading floors draws. It also keeps the paper book (every setup the
@@ -182,6 +183,7 @@ export class TradingDesk {
   readonly projectx: ProjectX;
   /** The prop farm: research jobs, forward runs, tracked accounts, payouts (see propfarm.ts). */
   readonly farm: PropFarm;
+  readonly arena: Arena;
   private file: string;
   private paperFile: string;
   private saved: Saved;
@@ -250,6 +252,16 @@ export class TradingDesk {
       connected: () => this.accounts().filter((a) => a.source === 'projectx'),
       projectxConnected: () => this.projectx.state().connected,
     });
+    // The Arena: named traders racing on paper (its own folder, its own engine: see shared/arena.ts).
+    this.arena = new Arena({
+      dir: path.join(dir, 'arena'),
+      prop: PROP_ACCOUNTS.find((a) => a.id === 'lucidflex-50k')!,
+      history: (sym) => this.market.history(sym as Symbol),
+      replay: (sym, bars, prior) => replayDay(sym as Symbol, bars, prior, { tuning: this.tuner.liveTuning() }).trades,
+      today: () => tradingDay(Date.now()),
+      now: () => Date.now(),
+      claude: process.env.AGENT_OFFICE_ARENA_CLAUDE || 'claude',
+    });
     // The single live farm from before is a forward run now.
     if (this.saved.farm) {
       this.farm.migrate(this.saved.farm, [...this.paperHistory.values()], { source: 'Reconstructed from the paper book', delayed: true, stale: false });
@@ -284,6 +296,7 @@ export class TradingDesk {
   }
 
   start() {
+    this.arena.start();
     this.market.onBars = (sym) => {
       if (this.liveSource.get(sym) !== this.market.barSource(sym)) {
         this.live.delete(sym); this.liveAt.delete(sym); this.liveSource.delete(sym);
@@ -319,6 +332,7 @@ export class TradingDesk {
   stop() {
     for (const t of this.timers) clearInterval(t);
     this.farm.stop();
+    this.arena.stop();
     this.market.stop();
     this.news.stop();
     this.projectx.stop();
