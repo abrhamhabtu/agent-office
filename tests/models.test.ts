@@ -201,6 +201,18 @@ test('Cursor catalogue parses `cursor-agent models` lines, with each model\'s na
   assert.deepEqual(await fetchCursorModels('cursor-agent', '/project', async () => ({ stdout: 'No models available for this account.\n', stderr: '' })), []);
 });
 
+test('Cursor Grok variants keep distinct launch ids and remove invisible name characters', async () => {
+  const models = await fetchCursorModels('cursor-agent', '/project', async () => ({
+    stdout: 'Available models\ngrok-4.7-high - Grok 4.7 High\ngrok-4.7-high-fast - Grok 4.7 High Fast\u200b\u200b\ncursor-grok-4.6-high - Grok 4.6\n',
+    stderr: '',
+  }));
+  assert.deepEqual(models, [
+    { id: 'grok-4.7-high', name: 'Grok 4.7 High' },
+    { id: 'grok-4.7-high-fast', name: 'Grok 4.7 High Fast' },
+    { id: 'cursor-grok-4.6-high', name: 'Grok 4.6' },
+  ]);
+});
+
 test('Cursor catalogue caches briefly and hides why it failed (not signed in)', async () => {
   let calls = 0;
   const catalogue = createModelCatalogue(() => fetchCursorModels('/cursor-agent', '/project', async () => {
