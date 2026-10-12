@@ -164,25 +164,31 @@ export function agentFields(project: ProjectInfo | null, id: string, initial: Ag
   const select = h('select.provider-select', { id, 'aria-label': 'Worker provider' }) as HTMLSelectElement;
   for (const provider of options) select.append(h('option', { value: provider }, PROVIDER_LABEL[provider]));
   const note = h('small.provider-note');
-  // A model is picked from a list or typed in, by provider: the two controls take turns.
+  // Catalogues use a list, with a manual field for custom ids or an unavailable catalogue.
   const modelLabel = h('label', {}, 'Model') as HTMLLabelElement;
   const modelSelect = h('select', { id: `${id}-model` }) as HTMLSelectElement;
   const modelInput = h('input', { type: 'text', id: `${id}-model-id`, list: `${id}-models`, autocomplete: 'off', spellcheck: 'false' }) as HTMLInputElement;
   const suggestions = h('datalist', { id: `${id}-models` });
+  const customLabel = h('label', { for: modelInput.id }, 'Model ID');
+  const customOption = '__custom_model__';
+  let custom = false;
   const effortLabel = h('label', { for: `${id}-effort` }, 'Effort');
   const effortSelect = h('select', { id: `${id}-effort` }) as HTMLSelectElement;
   effortSelect.append(h('option', { value: '' }, 'Default'));
   for (const e of AGENT_EFFORTS) effortSelect.append(h('option', { value: e }, EFFORT_LABEL[e]));
   const hint = h('small.provider-model-hint');
-  const fields = h('div.provider-model', {}, modelLabel, modelSelect, modelInput, suggestions, effortLabel, effortSelect, hint);
+  const fields = h('div.provider-model', {}, modelLabel, modelSelect, customLabel, modelInput, suggestions, effortLabel, effortSelect, hint);
   const element = h('div.provider-choice', {}, h('label', { for: id }, label), select, note, fields);
 
   const value = () => (options.includes(select.value as AgentProvider) ? (select.value as AgentProvider) : fallback);
   const meta = () => PROVIDER_META[value()];
   /** Its models: the ones it always has, or the ones its CLI listed. */
   const known = () => meta().models?.fixed ?? catalogues.get(value())?.list ?? [];
-  /** Typed in: for a provider whose model is, and for one whose list couldn't be had. */
-  const typed = () => meta().models?.pick === 'typed' || !!(meta().models?.catalog && catalogues.get(value())?.failed);
+  /** Keep a manual field when the CLI cannot offer any models. */
+  const typed = () => {
+    const catalogue = catalogues.get(value());
+    return meta().models?.pick === 'typed' || !!(meta().models?.catalog && !known().length && (catalogue?.failed || catalogue?.list));
+  };
   /** The model id the fields are on, whichever control is showing. */
   let chosen = '';
   /**
@@ -192,9 +198,10 @@ export function agentFields(project: ProjectInfo | null, id: string, initial: Ag
   const pick = (id: string) => {
     const models = known();
     chosen = id;
-    modelSelect.replaceChildren(h('option', { value: '' }, meta().models?.unset ?? 'Default'), ...models.map((m) => h('option', { value: m.id }, m.name ?? m.id)));
+    modelSelect.replaceChildren(h('option', { value: '' }, meta().models?.unset ?? 'Default'), ...models.map((m) => h('option', { value: m.id }, m.name ? (m.id.includes('/') ? `${m.name} (${m.id.split('/')[0]})` : m.name) : m.id)));
     if (id && !models.some((m) => m.id === id)) modelSelect.append(h('option', { value: id }, id));
-    modelSelect.value = id;
+    if (meta().models?.catalog) modelSelect.append(h('option', { value: customOption }, 'Custom model…'));
+    modelSelect.value = custom ? customOption : id;
     if (modelInput.value.trim() !== id) modelInput.value = id;
     suggestions.replaceChildren(...models.map((m) => h('option', { value: m.id, label: m.name })));
   };
@@ -214,9 +221,11 @@ export function agentFields(project: ProjectInfo | null, id: string, initial: Ag
     note.textContent = providerUsageNote(value());
     modelLabel.classList.toggle('hidden', !field);
     modelSelect.classList.toggle('hidden', !field || typed());
-    modelInput.classList.toggle('hidden', !field || !typed());
+    customLabel.classList.toggle('hidden', !field || typed() || !custom);
+    modelInput.classList.toggle('hidden', !field || !(typed() || custom));
     modelLabel.htmlFor = typed() ? modelInput.id : modelSelect.id;
-    for (const control of [modelSelect, modelInput]) control.setAttribute('aria-label', `${m.label} model`);
+    modelSelect.setAttribute('aria-label', `${m.label} model`);
+    modelInput.setAttribute('aria-label', `${m.label} ${typed() ? 'model' : 'custom model ID'}`);
     modelInput.placeholder = field?.unset ?? '';
     modelInput.maxLength = field?.max ?? 256;
     effortLabel.textContent = m.effortLabel ?? 'Effort';
@@ -225,7 +234,10 @@ export function agentFields(project: ProjectInfo | null, id: string, initial: Ag
     effortSelect.setAttribute('aria-label', m.effortLabel ? `${m.label} ${m.effortLabel.toLowerCase()} level` : `${m.label} reasoning effort`);
     if (!field) hint.textContent = m.unpicked ?? '';
     else if (field.catalog && catalogue?.request) hint.textContent = `Loading ${m.label} models…`;
-    else if (field.catalog && catalogue?.failed) hint.textContent = `${m.label}’s models couldn’t be listed: leave it empty for its default, or type a model id.`;
+    else if (field.catalog && catalogue?.failed) hint.textContent = known().length
+      ? `${m.label}’s models couldn’t be refreshed. Choose a cached model or Custom model to enter an id.`
+      : `${m.label}’s models couldn’t be listed: leave it empty for its default, or type a model id.`;
+    else if (field.catalog && catalogue?.list && !catalogue.list.length) hint.textContent = `${m.label} returned no models. Check the CLI’s sign-in and account access on the office machine, then reopen this dialog. You can also type a model id.`;
     else hint.textContent = field.hint;
     fields.classList.toggle('hidden', !field && !m.takesEffort && !hint.textContent);
     paintEffort();
@@ -244,6 +256,7 @@ export function agentFields(project: ProjectInfo | null, id: string, initial: Ag
     });
   };
   const set = (c: AgentChoice) => {
+    custom = false;
     select.value = options.includes(c.provider) ? c.provider : options.includes(fallback) ? fallback : options[0];
     const mine = select.value === c.provider;
     pick(mine && c.model && meta().validModel?.(c.model) ? c.model : '');
@@ -256,8 +269,11 @@ export function agentFields(project: ProjectInfo | null, id: string, initial: Ag
   // Another provider's model and effort mean nothing to this one: it starts on its own defaults.
   select.addEventListener('change', () => set({ provider: value() }));
   modelSelect.addEventListener('change', () => {
-    pick(modelSelect.value);
-    paintEffort();
+    const selected = modelSelect.value;
+    custom = selected === customOption;
+    pick(custom ? chosen : selected);
+    paint();
+    if (custom) modelInput.focus();
   });
   modelInput.addEventListener('input', () => {
     chosen = modelInput.value.trim();

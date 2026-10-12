@@ -53,6 +53,8 @@ On the machine that runs the office:
 - At least one agent CLI, signed in as the user that runs the office: **Claude Code** (`claude`), **Codex** (`codex`), **OpenCode** (`opencode`), **Grok** (`grok`), **Muse** (`muse`), **DeepSeek Harness** (`dsh`), **Pi** (`pi`, 0.87.1+) or the **Cursor** CLI (`cursor-agent`). With [accounts](#add-users), everyone can sign in to their own Claude from the office instead.
 - **git**, and the **GitHub CLI** (`gh auth login`) for cloning repos and the issue and PR boards
 
+Cursor and OpenCode offer model dropdowns from their CLIs, with **Custom model…** for a manual ID. To use Grok with a Cursor subscription, choose **Cursor** and then a Grok model; the **Grok** provider uses a separate CLI. See [Choosing an agent](docs/agents.md) for setup and model options.
+
 ## Run locally
 
 Install the latest release and start the office:
